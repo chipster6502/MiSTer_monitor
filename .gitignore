@@ -1,0 +1,18 @@
+# Arduino build artifacts
+*.elf
+*.bin
+*.hex
+build/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Personal credentials (never commit these)
+credentials.h
+secrets.h
