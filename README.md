@@ -1,4 +1,4 @@
-# MiSTer FPGA Monitor for M5Tab
+# MiSTer FPGA Monitor for M5Stack Tab5
 
 A status monitor for the MiSTer FPGA platform, running on an
 Tab5 ESP32 device from M5Stack. Displays the currently loaded game artwork, system
@@ -169,6 +169,20 @@ The system has three components that work together:
   distinguish a real game load from cursor navigation in the OSD menu.
 - **Tab5 sketch** — Polls the server every few seconds, downloads artwork from
   ScreenScraper, and renders the HUD interface.
+
+## Screenshots
+
+![Screensaver](images/screenshot01_menu.png)
+![System Monitor - CPU and Memory](images/screenshot02_cpu_memory_status.png)
+![System Monitor - Storage](images/screenshot02_storage.png)
+![System Monitor - USB devices](images/screenshot03_usb_devices.png)
+![System Monitor - Arcade system artwork](images/screenshot04_arcade.png)
+![System Monitor - Arcade subsystem artwork](images/screenshot05_arcade_subsystem.png)
+![System Monitor - Arcade game artwork](images/screenshot06_arcade_game.png)
+![System Monitor - Console core artwork](images/screenshot07_console.png)
+![System Monitor - Console game artwork](images/screenshot08_console_game.png)
+![System Monitor - Computer core artwork](images/screenshot09_computer.png)
+![System Monitor - Computer game artwork](images/screenshot10_computer_game.png)
 
 ## To Do
 
