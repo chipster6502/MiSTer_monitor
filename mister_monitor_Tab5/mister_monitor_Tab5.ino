@@ -6,6 +6,7 @@
 #include <ArduinoJson.h>
 #include <WebServer.h>
 #include "mister_types.h"
+#include "AppConfig.h"
 
 // ===== ANTI-CRASH: Reset diagnostics, memory safety =====
 #include "esp_system.h"       // esp_reset_reason()
@@ -44,21 +45,61 @@ inline uint8_t* psramMalloc(size_t size) {
 }
 
 // ========== CONFIGURATION ==========
-// Use your own wifi user and password; It is necessary to use a static IP address on the MiSTer
-const char* ssid = "DIGIFIBRA-6CA7_EXT";
-const char* password = "MDLLE7LR4N";
-const char* misterIP = "192.168.1.222";
-// ===================================
+// All user settings are loaded at boot from /config.ini on the ESP32 SD card.
+// Edit config.ini — do NOT hardcode credentials here.
+// Defaults below apply when the file is missing or a key is absent.
 
-#define TFCARD_CS_PIN 42  // CS pin for microSD on M5Tab (SPI mode)
+AppConfig appConfig;          // Populated from /config.ini in setup()
 
-// Image configuration
-#define CORE_IMAGES_PATH "/cores"  // Base directory on SD for images
-#define DEFAULT_CORE_IMAGE "/cores/menu.jpg"  // Default image
-#define CORE_IMAGE_TIMEOUT 30000    // Time to show image (ms)
-#define ENABLE_ALPHABETICAL_FOLDERS true  // Use a/, b/, c/... subfolders
+// Network — pointers are reassigned from appConfig after SD init
+const char* ssid     = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+const char* misterIP = "192.168.1.100";
 
-// Theme Colors
+// ScreenScraper runtime strings.
+String _ss_dev_user_str;
+String _ss_dev_pass_str;
+String _ss_user_str;
+String _ss_pass_str;
+String _boxart_region_str       = "wor";
+String _core_images_path_str    = "/cores";
+String _default_core_image_str  = "/cores/menu.jpg";
+
+// Media type search order — updated from appConfig in setup()
+// Defaults match AppConfig struct defaults (overridden by config.ini).
+String GAME_MEDIA_ORDER_STR              = "box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot";
+String ARCADE_MEDIA_ORDER_STR           = "fanart,marquee,wheel-carbon,wheel-steel,wheel,box3d,box2d,screenshot";
+String ARCADE_SUBSYSTEM_MEDIA_ORDER_STR = "wheel-steel,wheel-carbon,wheel";
+String CORE_MEDIA_ORDER_STR             = "wheel-steel,wheel-carbon,wheel,photo,illustration,box3d,box2d,marquee,fanart,screenshot";
+
+// Macros preserve all existing call sites without any further changes.
+#define SCREENSCRAPER_DEV_USER   (_ss_dev_user_str.c_str())
+#define SCREENSCRAPER_DEV_PASS   (_ss_dev_pass_str.c_str())
+#define SCREENSCRAPER_USER       (_ss_user_str.c_str())
+#define SCREENSCRAPER_PASS       (_ss_pass_str.c_str())
+#define BOXART_REGION            (_boxart_region_str.c_str())
+#define CORE_IMAGES_PATH         (_core_images_path_str.c_str())
+#define DEFAULT_CORE_IMAGE       (_default_core_image_str.c_str())
+
+// Internal ScreenScraper constants — not exposed in config.ini
+#define SCREENSCRAPER_DEBUG_PASS "uoAfIjh2AMd"
+#define SCREENSCRAPER_SOFTWARE   "M5Stack-MiSTer-Monitor"
+#define SAFE_JSON_BUFFER_SIZE    8192
+#define MAX_RESPONSE_SIZE        50000
+
+// Hardware constants — fixed for M5Tab
+#define TFCARD_CS_PIN     42
+#define TARGET_WIDTH      1280
+#define TARGET_HEIGHT     720
+#define IMAGE_AREA_HEIGHT 620
+#define ORIGINAL_WIDTH    320
+#define ORIGINAL_HEIGHT   240
+#define M5TAB_WIDTH       1280
+#define M5TAB_HEIGHT      720
+#define SCALE_X           ((float)M5TAB_WIDTH  / ORIGINAL_WIDTH)
+#define SCALE_Y           ((float)M5TAB_HEIGHT / ORIGINAL_HEIGHT)
+
+// Theme Colors — compile-time constants
 #define THEME_BLACK     0x0000
 #define THEME_YELLOW    0xFFE0
 #define THEME_GREEN     0x07E0
@@ -69,46 +110,24 @@ const char* misterIP = "192.168.1.222";
 #define THEME_GRAY      0x4208
 #define THEME_WHITE     0xFFFF
 
-// ScreenScraper API Configuration; use your own ScreenScraper credentials
-#define SCREENSCRAPER_DEV_USER   "YOUR_DEV_USERNAME"
-#define SCREENSCRAPER_DEV_PASS   "YOUR_DEV_PASSWORD"
-#define SCREENSCRAPER_DEBUG_PASS "YOUR_DEBUG_PASSWORD"
-#define SCREENSCRAPER_USER       "YOUR_USERNAME"
-#define SCREENSCRAPER_PASS       "YOUR_PASSWORD"
-#define SCREENSCRAPER_SOFTWARE "MiSTer_FPGA_Monitor"
-#define SCREENSCRAPER_TIMEOUT 30000      // 30 seconds (ScreenScraper may be slow)
-#define SCREENSCRAPER_RETRIES 2          // 2 attempts (to handle overload)
-#define SAFE_JSON_BUFFER_SIZE 8192
-#define MAX_RESPONSE_SIZE 50000
-#define USE_HTTPS_SCREENSCRAPER false    // Switch to true if HTTPS works better
-#define ENABLE_DEBUG_MODE false                       // Enable/disable debug mode
-#define DEBUG_FORCE_UPDATE false                      // Force cache update
-#define DEBUG_FORCE_LEVEL 0                         // Force user level (max threads)
-
-#define ENABLE_AUTO_DOWNLOAD true
-#define MAX_IMAGE_SIZE 500000
-#define DOWNLOAD_TIMEOUT 30000 
-#define TARGET_WIDTH 1280           // Target resolution
-#define TARGET_HEIGHT 720
-#define IMAGE_AREA_HEIGHT 620       // Reduced from 645 to give more footer space (100 pixels for footer)
-
-#define ORIGINAL_WIDTH 320
-#define ORIGINAL_HEIGHT 240
-#define M5TAB_WIDTH 1280
-#define M5TAB_HEIGHT 720
-
-// Scale factors
-#define SCALE_X ((float)M5TAB_WIDTH / ORIGINAL_WIDTH)   // 4.0
-#define SCALE_Y ((float)M5TAB_HEIGHT / ORIGINAL_HEIGHT) // 3.0
-
-#define BOXART_REGION "wor"        // wor=world, us, eu, jp
-
-#define SCROLL_SPEED_MS 300        // Milliseconds between each character scroll
-#define SCROLL_PAUSE_START_MS 2000 // Pause time at beginning of text
-#define SCROLL_PAUSE_END_MS 3000   // Pause time at end of text
-
-#define FORCE_CORE_REDOWNLOAD false
-#define FORCE_GAME_REDOWNLOAD false
+// Runtime-configurable parameters — formerly #defines, now global variables.
+int  CORE_IMAGE_TIMEOUT           = 30000;
+bool ENABLE_ALPHABETICAL_FOLDERS  = true;
+int  SCREENSCRAPER_TIMEOUT        = 30000;
+int  SCREENSCRAPER_RETRIES        = 2;
+bool USE_HTTPS_SCREENSCRAPER      = false;
+bool ENABLE_DEBUG_MODE            = false;
+bool DEBUG_FORCE_UPDATE           = false;
+int  DEBUG_FORCE_LEVEL            = 0;
+bool ENABLE_AUTO_DOWNLOAD         = true;
+int  MAX_IMAGE_SIZE               = 500000;
+int  DOWNLOAD_TIMEOUT             = 30000;
+int  SCROLL_SPEED_MS              = 300;
+int  SCROLL_PAUSE_START_MS        = 2000;
+int  SCROLL_PAUSE_END_MS          = 3000;
+bool FORCE_CORE_REDOWNLOAD        = false;
+bool FORCE_GAME_REDOWNLOAD        = false;
+// ===================================
 
 // Data variables
 String currentCore = "MENU";
@@ -408,6 +427,9 @@ void showCoreNotFoundScreen(String coreName);
 bool isErrorCore(String core);
 bool isArcadeCore(String coreName);
 bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* mediaType, const char* mediaName);
+bool tryMediaTypeWithRegions(String baseUrl, String savePath, const char* mediaBase, const char* mediaLabel, bool includeGeneric = true);
+bool tryMediaTypesForToken(String baseUrl, String savePath, String token);
+bool applyMediaOrderAndDownload(String baseUrl, String savePath, String orderStr);
 static bool showingGameImage = true;  // true = game image, false = system image
 static unsigned long lastRotationTime = 0;
 String lastArcadeSystemeId = "";  // Store last arcade subsystem ID
@@ -2027,6 +2049,51 @@ void setup() {
     sdCardAvailable = false;
   }
   
+  // ── Load /config.ini from SD card ─────────────────────────────────────────
+  loadConfig(appConfig);
+
+  ssid     = appConfig.ssid.c_str();
+  password = appConfig.wifiPass.c_str();
+  misterIP = appConfig.misterIP.c_str();
+
+  _ss_dev_user_str        = appConfig.ssDevUser;
+  _ss_dev_pass_str        = appConfig.ssDevPass;
+  _ss_user_str            = appConfig.ssUser;
+  _ss_pass_str            = appConfig.ssPass;
+  _boxart_region_str      = appConfig.boxartRegion;
+  _core_images_path_str   = appConfig.coreImagesPath;
+  _default_core_image_str = appConfig.defaultCoreImage;
+
+  GAME_MEDIA_ORDER_STR              = appConfig.gameMediaOrder;
+  ARCADE_MEDIA_ORDER_STR           = appConfig.arcadeMediaOrder;
+  ARCADE_SUBSYSTEM_MEDIA_ORDER_STR = appConfig.arcadeSubsystemMediaOrder;
+  CORE_MEDIA_ORDER_STR             = appConfig.coreMediaOrder;
+
+  CORE_IMAGE_TIMEOUT          = appConfig.coreImageTimeout;
+  ENABLE_ALPHABETICAL_FOLDERS = appConfig.alphabeticalFolders;
+  SCREENSCRAPER_TIMEOUT       = appConfig.ssTimeout;
+  SCREENSCRAPER_RETRIES       = appConfig.ssRetries;
+  USE_HTTPS_SCREENSCRAPER     = appConfig.ssUseHttps;
+  ENABLE_DEBUG_MODE           = appConfig.debugMode;
+  ENABLE_AUTO_DOWNLOAD        = appConfig.autoDownload;
+  MAX_IMAGE_SIZE              = appConfig.maxImageSize;
+  DOWNLOAD_TIMEOUT            = appConfig.downloadTimeout;
+  FORCE_CORE_REDOWNLOAD       = appConfig.forceCoreRedownload;
+  FORCE_GAME_REDOWNLOAD       = appConfig.forceGameRedownload;
+  SCROLL_SPEED_MS             = appConfig.scrollSpeedMs;
+  SCROLL_PAUSE_START_MS       = appConfig.scrollPauseStartMs;
+  SCROLL_PAUSE_END_MS         = appConfig.scrollPauseEndMs;
+
+  Serial.printf("[CONFIG] MiSTer IP   : %s\n", misterIP);
+  Serial.printf("[CONFIG] WiFi SSID   : %s\n", ssid);
+  Serial.printf("[CONFIG] SS User     : %s\n", SCREENSCRAPER_USER);
+  Serial.printf("[CONFIG] Region      : %s\n", BOXART_REGION);
+  Serial.printf("[CONFIG] Game order       : %s\n", GAME_MEDIA_ORDER_STR.c_str());
+  Serial.printf("[CONFIG] Arcade order     : %s\n", ARCADE_MEDIA_ORDER_STR.c_str());
+  Serial.printf("[CONFIG] Arcade subsys ord: %s\n", ARCADE_SUBSYSTEM_MEDIA_ORDER_STR.c_str());
+  Serial.printf("[CONFIG] Core order       : %s\n", CORE_MEDIA_ORDER_STR.c_str());
+  // ──────────────────────────────────────────────────────────────────────────
+
   bootFrameLoaded = false;  // Reset boot frame flag
   backgroundLoaded = false; // Ensure interface frame loads
 
@@ -6047,55 +6114,16 @@ bool downloadImageFromMediaJeu(String mediaUrl, String savePath) {
     baseUrl = mediaUrl;
   }
   
-  // WORKING DOWNLOAD METHOD: Try each media type using the method that worked in backup
-  if (isArcade) {
-    // ARCADE PRIORITY ORDER
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "fanart", "Fanart")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "marquee", "Marquee")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "marquee(wor)", "Marquee World")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "marquee(us)", "Marquee USA")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "marquee(eu)", "Marquee Europe")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "marquee(jp)", "Marquee Japan")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "wheel-carbon", "Wheel Carbon")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "wheel-carbon(wor)", "Wheel Carbon World")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "wheel-carbon(us)", "Wheel Carbon USA")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "wheel-carbon(eu)", "Wheel Carbon Europe")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "wheel-carbon(jp)", "Wheel Carbon Japan")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "wheel", "Wheel")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "wheel(wor)", "Wheel World")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "wheel(us)", "Wheel USA")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "wheel(eu)", "Wheel Europe")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "wheel(jp)", "Wheel Japan")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "mixrbv", "MixRBV")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "mixrbv(wor)", "MixRBV World")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "mixrbv(us)", "MixRBV USA")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "mixrbv(eu)", "MixRBV Europe")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "mixrbv(jp)", "MixRBV Japan")) return true;
-  } else {
-    // OTHER SYSTEMS PRIORITY ORDER
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "box-3D(wor)", "3D Box World")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "box-3D(us)", "3D Box USA")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "box-3D(eu)", "3D Box Europe")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "box-3D(jp)", "3D Box Japan")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "box-3D", "3D Box")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "box-2D(wor)", "2D Box World")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "box-2D(us)", "2D Box USA")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "box-2D(eu)", "2D Box Europe")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "box-2D(jp)", "2D Box Japan")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "fanart", "Fanart")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "wheel(wor)", "Wheel World")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "wheel(us)", "Wheel USA")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "wheel(eu)", "Wheel Europe")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "wheel(jp)", "Wheel Japan")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "marquee", "Marquee")) return true;
-    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "sstitle", "Screenshot")) return true;
-  }
-  
-  Serial.printf("All media types failed for %s\n", isArcade ? "ARCADE" : "OTHER SYSTEM");
-  Serial.printf("Final free heap: %d bytes\n", ESP.getFreeHeap());
-  return false;
-}
+  // CONFIGURABLE DOWNLOAD ORDER — driven by config.ini [images] section
+  String& orderStr = isArcade ? ARCADE_MEDIA_ORDER_STR : GAME_MEDIA_ORDER_STR;
+  bool result = applyMediaOrderAndDownload(baseUrl, savePath, orderStr);
 
+  if (!result) {
+    Serial.printf("[MEDIA] All types failed for %s\n", isArcade ? "ARCADE" : "OTHER SYSTEM");
+    Serial.printf("[MEDIA] Free heap: %d bytes\n", ESP.getFreeHeap());
+  }
+  return result;
+}
 // HELPER FUNCTION - MINIMAL STACK USAGE
 bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* mediaType, const char* mediaName) {
   // Check memory before each attempt
@@ -6204,6 +6232,110 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
   // Delay between attempts
   delay(1000);
   
+  return false;
+}
+
+// =============================================================================
+// tryMediaTypeWithRegions()
+//
+// Tries a media type with all region suffixes in user-preferred order.
+// The preferred region comes from config.ini [screenscraper] region=
+//
+// Order: preferred region first, then the remaining three in fixed order
+//        (wor -> us -> eu -> jp skipping the preferred one), then generic
+//        (no suffix) if includeGeneric is true.
+//
+// Example with region=eu and mediaBase="box-3D":
+//   box-3D(eu)  box-3D(wor)  box-3D(us)  box-3D(jp)  box-3D
+//
+// includeGeneric=false is used when the generic variant was already tried
+// before calling this function (e.g. marquee), or when it does not exist
+// in ScreenScraper (e.g. box-2D has no generic variant).
+// =============================================================================
+bool tryMediaTypeWithRegions(String baseUrl, String savePath,
+                              const char* mediaBase, const char* mediaLabel,
+                              bool includeGeneric) {
+  const char* ALL_REGIONS[] = {"wor", "us", "eu", "jp"};
+  String pref = _boxart_region_str;  // from config.ini region=
+
+  // 1. Preferred region first
+  String type  = String(mediaBase) + "(" + pref + ")";
+  String label = String(mediaLabel) + " " + pref;
+  if (tryDownloadMediaTypeWorking(baseUrl, savePath, type.c_str(), label.c_str())) return true;
+
+  // 2. Remaining regions in fixed order, skipping the preferred one
+  for (int i = 0; i < 4; i++) {
+    if (String(ALL_REGIONS[i]) != pref) {
+      type  = String(mediaBase) + "(" + String(ALL_REGIONS[i]) + ")";
+      label = String(mediaLabel) + " " + String(ALL_REGIONS[i]);
+      if (tryDownloadMediaTypeWorking(baseUrl, savePath, type.c_str(), label.c_str())) return true;
+    }
+  }
+
+  // 3. Generic (no region suffix)
+  if (includeGeneric) {
+    if (tryDownloadMediaTypeWorking(baseUrl, savePath, mediaBase, mediaLabel)) return true;
+  }
+
+  return false;
+}
+
+// =============================================================================
+// tryMediaTypesForToken()
+//
+// Expands a config.ini token to actual ScreenScraper &media= strings.
+// Regional variants are tried in user-preferred order via tryMediaTypeWithRegions.
+//
+// Tokens without regional variants (fanart, screenshot, photo, illustration)
+// map directly to a single API string.
+//
+// marquee is special: the generic "marquee" key is the most common variant
+// in ScreenScraper, so it is tried first before the regional ones.
+// box2d has no generic variant in the API, so includeGeneric=false.
+// =============================================================================
+bool tryMediaTypesForToken(String baseUrl, String savePath, String token) {
+  token.trim();
+  token.toLowerCase();
+
+  if      (token == "wheel-steel")   return tryMediaTypeWithRegions(baseUrl, savePath, "wheel-steel",  "Wheel Steel");
+  else if (token == "wheel-carbon")  return tryMediaTypeWithRegions(baseUrl, savePath, "wheel-carbon", "Wheel Carbon");
+  else if (token == "wheel")         return tryMediaTypeWithRegions(baseUrl, savePath, "wheel",        "Wheel");
+  else if (token == "box3d")         return tryMediaTypeWithRegions(baseUrl, savePath, "box-3D",       "3D Box");
+  else if (token == "box2d")         return tryMediaTypeWithRegions(baseUrl, savePath, "box-2D",       "2D Box",    false);
+  else if (token == "mix")           return tryMediaTypeWithRegions(baseUrl, savePath, "mixrbv",       "MixRBV");
+  else if (token == "marquee") {
+    // Generic "marquee" is the most common variant -- try it before regional ones
+    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "marquee", "Marquee")) return true;
+    return tryMediaTypeWithRegions(baseUrl, savePath, "marquee", "Marquee", false);
+  }
+  else if (token == "fanart")        return tryDownloadMediaTypeWorking(baseUrl, savePath, "fanart",        "Fanart");
+  else if (token == "screenshot")    return tryDownloadMediaTypeWorking(baseUrl, savePath, "sstitle",       "Screenshot");
+  else if (token == "photo")         return tryDownloadMediaTypeWorking(baseUrl, savePath, "photo",         "Photo");
+  else if (token == "illustration")  return tryDownloadMediaTypeWorking(baseUrl, savePath, "illustration",  "Illustration");
+  else Serial.printf("[MEDIA] Unknown token: '%s' -- skipping\n", token.c_str());
+
+  return false;
+}
+
+// =============================================================================
+// applyMediaOrderAndDownload() -- iterates order string, tries token by token
+// =============================================================================
+bool applyMediaOrderAndDownload(String baseUrl, String savePath, String orderStr) {
+  Serial.printf("[MEDIA] Order: %s\n", orderStr.c_str());
+  int start = 0;
+  while (start < (int)orderStr.length()) {
+    int comma = orderStr.indexOf(',', start);
+    String token = (comma == -1) ? orderStr.substring(start)
+                                 : orderStr.substring(start, comma);
+    token.trim();
+    if (token.length() > 0) {
+      Serial.printf("[MEDIA] Trying token: %s\n", token.c_str());
+      if (tryMediaTypesForToken(baseUrl, savePath, token)) return true;
+    }
+    if (comma == -1) break;
+    start = comma + 1;
+  }
+  Serial.println("[MEDIA] All tokens exhausted -- no image found");
   return false;
 }
 

@@ -9,8 +9,7 @@ information, storage status, and network details in real time.
 - Real-time game and core artwork display via ScreenScraper API
 - Automatic game and system detection from OSD, MiSTer Remote web app and Super Attract Mode (SAM)
 - Automatic Arcade subsystem detection
-- System monitor (CPU, memory, uptime)
-- Storage, network, and USB device panels
+- System monitor (CPU, memory, uptime, storage, network, and connected USB devices panels)
 - Touch-based navigation
 - Screenshot capture of the Tab5 display, downloadable over the local network via HTTP
 
@@ -33,11 +32,12 @@ information, storage status, and network details in real time.
 1. Copy `mister/mister_status_server.py` to `/media/fat/Scripts/mister_monitor/`
 2. Copy `mister/detect_game_load.sh` to `/media/fat/Scripts/mister_monitor/`
 3. Copy `mister/start_monitor.sh` to `/media/fat/Scripts/mister_monitor/`
-4. Make the shell script executable:
+4. Make the shell scripts executable:
 ```bash
    chmod +x /media/fat/Scripts/mister_monitor/detect_game_load.sh
+   chmod +x /media/fat/Scripts/mister_monitor/start_monitor.sh
 ```
-4. Add the following lines to `/media/fat/linux/user-startup.sh` to launch
+5. Add the following lines to `/media/fat/linux/user-startup.sh` to launch
    both scripts automatically on boot:
 ```bash
    python3 /media/fat/Scripts/mister_monitor/mister_status_server.py &
@@ -50,9 +50,8 @@ The Tab5 can capture screenshots of its own display and make them available
 for download over the local network. The `mister_status_server.py` script
 includes a lightweight HTTP endpoint for this purpose.
 
-Once the server is running on the MiSTer, any screenshot saved by the Tab5
-to its microSD card is also accessible from a browser or `curl` on the same
-network. To download the latest screenshot, open:
+Once the server is running on the MiSTer, any screenshot is accessible from a
+browser or `curl` on the same network. To download the latest screenshot, open:
 
 ```
 http://<Tab5-IP>:8080/screenshot.jpg
@@ -66,7 +65,7 @@ served directly by `mister_status_server.py`.
 
 #### Installing M5Stack Board Support in Arduino IDE
 
-Before opening the sketch you need to register the M5Stack board package
+Before opening the sketch you need to download the M5Stack board package
 with Arduino IDE so the Tab5 target appears in the board selector.
 
 1. Open Arduino IDE and go to **File → Preferences**.
@@ -74,50 +73,125 @@ with Arduino IDE so the Tab5 target appears in the board selector.
    (click the icon to the right of the field if you need to add it to an
    existing list):
    ```
-   https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/arduino/package_m5stack_index.json
+   https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json
    ```
 3. Click **OK** to close Preferences.
 4. Go to **Tools → Board → Boards Manager…**
 5. Search for **M5Stack** and install the package named **M5Stack by M5Stack**.
    The installation may take a few minutes as it downloads the ESP32 toolchain.
-6. Once installed, go to **Tools → Board → M5Stack** and select **M5Stack Tab5**.
+6. Once installed, go to **Tools → Board → M5Stack** and select **M5Tab5**.
 7. Connect the Tab5 via USB-C, select the correct port under **Tools → Port**,
    and you are ready to upload.
 
 #### Uploading the Sketch
 
-1. Open `mister_monitor_Tab5/mister_monitor_Tab5.ino` in Arduino IDE
-2. Fill in your credentials at the top of the file:
-```cpp
-   #define MISTER_IP           "192.168.x.x"   // Your MiSTer IP address
-   #define SCREENSCRAPER_USER  "your_username"
-   #define SCREENSCRAPER_PASS  "your_password"
+No credentials need to be hardcoded in the source. All configuration is read
+at boot from `config.ini` on the microSD card (see the SD Card Setup section
+below).
+
+1. Open `mister_monitor_Tab5/mister_monitor_Tab5.ino` in Arduino IDE.
+2. Install required libraries via **Tools → Manage Libraries…**:
+   - M5Unified
+   - M5GFX
+   - JPEGDEC
+3. Select the M5Stack Tab5 board and upload.
+
+### Tab5 SD Card Setup
+
+#### config.ini
+
+All user configuration lives in a single file placed in the **root** of the
+microSD card: `/config.ini`. The sketch reads it at boot before connecting to
+WiFi, so no credentials ever need to be hardcoded in the source.
+
+Copy `config.ini` from the repository root to the SD card and fill in your
+values:
+
+```ini
+[wifi]
+ssid=YOUR_WIFI_SSID
+password=YOUR_WIFI_PASSWORD
+
+[mister]
+ip=192.168.1.100          ; must be a static IP — see note below
+
+[screenscraper]
+ss_user=YOUR_SS_USERNAME
+ss_pass=YOUR_SS_PASSWORD
+ss_dev_user=YOUR_SS_USERNAME
+ss_dev_pass=YOUR_SS_DEV_PASSWORD
 ```
-It is necessary to use a static MiSTer IP address.
-How to configure a static MiSTer IP address in your MiSTer: 
-You will have to modify the /etc/dhcpcd.conf file to setup a static ip.
-Add something like this on the bottom of the file:
-```cpp
+
+Any key that is absent keeps the built-in default. The full list of available
+keys is documented inside `config.ini` itself with comments explaining each
+option.
+
+**Static MiSTer IP address** — the Tab5 connects to the MiSTer by IP, so a
+static address is required. Edit `/etc/dhcpcd.conf` on the MiSTer and add:
+
+```
 interface eth0
 static ip_address=192.168.0.XX/24
 static routers=192.168.0.X
 static domain_name_servers=192.168.0.X 8.8.8.8
 ```
-For DNS, you don't need to Provide more than one but if you do, just leave a space between them.
-The Static IP address has the /24 for the netmask, if you don't know what your network has, then leave it as /24 as that's the most common for home networks.
 
-Use interface wlan0 for wireless lan
+Use `interface wlan0` instead of `eth0` for a wireless connection. The `/24`
+netmask covers the most common home network setup; adjust if your router uses
+a different subnet.
 
-3. Install required libraries via Arduino Library Manager:
-   - M5Unified
-   - M5GFX
-   - JPEGDEC
-4. Select the M5Tab5 board and upload
+#### Artwork download order
 
-### Tab5 SD Card Setup
+The sketch downloads artwork from ScreenScraper for each core and game it
+encounters. You can control which image types are tried and in what order via
+keys in the `[images]` section of `config.ini`:
 
-Create a `/cores/` folder on the microSD card. Game artwork is downloaded
-automatically and organized alphabetically (e.g. `/cores/S/SNES.jpg`).
+| Key | Used for |
+|---|---|
+| `core_media_order` | System-level art (non-arcade cores) |
+| `arcade_subsystem_media_order` | Arcade subsystem art (CPS2, Capcom Classics…) |
+| `arcade_media_order` | Arcade game artwork |
+| `game_media_order` | Non-arcade game artwork (consoles, computers) |
+
+Each value is a comma-separated list of tokens tried left to right until one
+download succeeds. Available tokens:
+
+| Token | Description |
+|---|---|
+| `wheel-steel` | Steel/metallic border logo wheel |
+| `wheel-carbon` | Carbon fibre border logo wheel |
+| `wheel` | Plain/transparent border logo wheel |
+| `box3d` | 3-D rendered box art |
+| `box2d` | 2-D flat box scan |
+| `fanart`
+| `marquee` | Arcade cabinet marquee header |
+| `screenshot` | In-game title screenshot |
+| `photo` | Real photograph of hardware |
+| `illustration` | Illustration of hardware |
+| `mix` | MixRBV composite image |
+
+Region order within each token — the region= key in [screenscraper]
+controls which regional variant is tried first. The remaining regions follow
+in fixed order, and the no-region generic variant is tried last. For example,
+with region=eu and token box3d the sequence is:
+box-3D(eu) → box-3D(wor) → box-3D(us) → box-3D(jp) → box-3D.
+
+
+Default orders applied out of the box:
+
+```ini
+; System/core artwork: steel wheel first (cleanest on the HUD background)
+core_media_order=wheel-steel,wheel-carbon,wheel,photo,illustration,box3d,box2d,marquee,fanart,screenshot
+
+; Arcade subsystems (CPS1, SEGA Classics, ...): wheels only
+arcade_subsystem_media_order=wheel-steel,wheel-carbon,wheel
+
+; Arcade game ROMs: logo art before boxes (most titles have no physical box)
+arcade_media_order=fanart,marquee,wheel-carbon,wheel-steel,wheel,box3d,box2d,screenshot
+
+; Non-arcade game ROMs: physical box art first
+game_media_order=box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot
+```
 
 #### Asset Images
 
@@ -126,8 +200,7 @@ The repository includes a set of needed images in the
 
 - `frame01.jpg`, `frame02.jpg`, `logomister.jpg` and `menu.jpg` must be placed inside
   the `/cores/` folder.
-- `Arcade.jpg` must be placed inside
-  `/cores/A/Arcade.jpg`.
+- `Arcade.jpg` and `Arcade_75.jpg` must be placed inside `/cores/A/`.
 
 Core and game images that are missing will be downloaded automatically from
 ScreenScraper the first time that core/game is detected.
@@ -157,7 +230,8 @@ forum. Once logged in:
    account, typically within a few days.
 
 Once your developer account is active, you will receive a response in the forum
-with confirmation and instructions for its use.
+with confirmation and instructions for its use. Enter your credentials in
+`config.ini` under the `[screenscraper]` section.
 
 ## Architecture
 
