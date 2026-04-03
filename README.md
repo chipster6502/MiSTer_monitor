@@ -9,7 +9,8 @@ information, storage status, and network details in real time.
 - Real-time game and core artwork display via ScreenScraper API
 - Automatic game and system detection from OSD, MiSTer Remote web app and Super Attract Mode (SAM)
 - Automatic Arcade subsystem detection
-- System monitor (CPU, memory, uptime, storage, network, and connected USB devices panels)
+- System monitor (CPU, memory, uptime)
+- Storage, network, and USB device panels
 - Touch-based navigation
 - Screenshot capture of the Tab5 display, downloadable over the local network via HTTP
 
@@ -43,6 +44,12 @@ information, storage status, and network details in real time.
    python3 /media/fat/Scripts/mister_monitor/mister_status_server.py &
    bash /media/fat/Scripts/mister_monitor/detect_game_load.sh &
 ```
+6. Enable log_file_entry in `/media/fat/MiSTer.ini` by setting:
+```ini
+log_file_entry=1
+```
+This is required for the Python server to detect which core and game are
+currently loaded. Without it, core and game artwork lookups will not work.
 
 #### Screenshot HTTP Server
 
@@ -50,8 +57,9 @@ The Tab5 can capture screenshots of its own display and make them available
 for download over the local network. The `mister_status_server.py` script
 includes a lightweight HTTP endpoint for this purpose.
 
-Once the server is running on the MiSTer, any screenshot is accessible from a
-browser or `curl` on the same network. To download the latest screenshot, open:
+Once the server is running on the MiSTer, any screenshot saved by the Tab5
+to its microSD card is also accessible from a browser or `curl` on the same
+network. To download the latest screenshot, open:
 
 ```
 http://<Tab5-IP>:8080/screenshot.jpg
@@ -65,7 +73,7 @@ served directly by `mister_status_server.py`.
 
 #### Installing M5Stack Board Support in Arduino IDE
 
-Before opening the sketch you need to download the M5Stack board package
+Before opening the sketch you need to register the M5Stack board package
 with Arduino IDE so the Tab5 target appears in the board selector.
 
 1. Open Arduino IDE and go to **File → Preferences**.
@@ -73,13 +81,13 @@ with Arduino IDE so the Tab5 target appears in the board selector.
    (click the icon to the right of the field if you need to add it to an
    existing list):
    ```
-   https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json
+   https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/arduino/package_m5stack_index.json
    ```
 3. Click **OK** to close Preferences.
 4. Go to **Tools → Board → Boards Manager…**
 5. Search for **M5Stack** and install the package named **M5Stack by M5Stack**.
    The installation may take a few minutes as it downloads the ESP32 toolchain.
-6. Once installed, go to **Tools → Board → M5Stack** and select **M5Tab5**.
+6. Once installed, go to **Tools → Board → M5Stack** and select **M5Stack Tab5**.
 7. Connect the Tab5 via USB-C, select the correct port under **Tools → Port**,
    and you are ready to upload.
 
@@ -119,7 +127,7 @@ ip=192.168.1.100          ; must be a static IP — see note below
 ss_user=YOUR_SS_USERNAME
 ss_pass=YOUR_SS_PASSWORD
 ss_dev_user=YOUR_SS_USERNAME
-ss_dev_pass=YOUR_SS_DEV_PASSWORD
+ss_dev_pass=YOUR_SS_PASSWORD
 ```
 
 Any key that is absent keeps the built-in default. The full list of available
@@ -149,33 +157,35 @@ keys in the `[images]` section of `config.ini`:
 | Key | Used for |
 |---|---|
 | `core_media_order` | System-level art (non-arcade cores) |
-| `arcade_subsystem_media_order` | Arcade subsystem art (CPS2, Capcom Classics…) |
-| `arcade_media_order` | Arcade game artwork |
-| `game_media_order` | Non-arcade game artwork (consoles, computers) |
+| `arcade_subsystem_media_order` | Arcade subsystem art (CPS1, Neo Geo, Konami 573…) |
+| `arcade_media_order` | Arcade game ROMs |
+| `game_media_order` | Non-arcade game ROMs (consoles, computers) |
 
 Each value is a comma-separated list of tokens tried left to right until one
 download succeeds. Available tokens:
 
 | Token | Description |
 |---|---|
-| `wheel-steel` | Steel/metallic border logo wheel |
-| `wheel-carbon` | Carbon fibre border logo wheel |
-| `wheel` | Plain/transparent border logo wheel |
+| `wheel-steel` | Steel/metallic background logo wheel |
+| `wheel-carbon` | Carbon fibre background logo wheel |
+| `wheel` | Plain/transparent background logo wheel |
 | `box3d` | 3-D rendered box art |
 | `box2d` | 2-D flat box scan |
-| `fanart`
+| `fanart` | Fan art / promotional artwork |
 | `marquee` | Arcade cabinet marquee header |
 | `screenshot` | In-game title screenshot |
-| `photo` | Real photograph of hardware |
-| `illustration` | Illustration of hardware |
+| `photo` | Real photograph of hardware or cartridge |
+| `illustration` | Promotional illustration or poster |
 | `mix` | MixRBV composite image |
 
-Region order within each token — the region= key in [screenscraper]
+**Region order within each token** — the `region=` key in `[screenscraper]`
 controls which regional variant is tried first. The remaining regions follow
 in fixed order, and the no-region generic variant is tried last. For example,
-with region=eu and token box3d the sequence is:
-box-3D(eu) → box-3D(wor) → box-3D(us) → box-3D(jp) → box-3D.
-
+with `region=eu` and token `box3d` the sequence is:
+`box-3D(eu)` → `box-3D(wor)` → `box-3D(us)` → `box-3D(jp)` → `box-3D`.
+Two exceptions: `box2d` has no generic variant in the API; `marquee` tries
+the generic variant first as it is the most common one in ScreenScraper's
+database.
 
 Default orders applied out of the box:
 
@@ -183,7 +193,7 @@ Default orders applied out of the box:
 ; System/core artwork: steel wheel first (cleanest on the HUD background)
 core_media_order=wheel-steel,wheel-carbon,wheel,photo,illustration,box3d,box2d,marquee,fanart,screenshot
 
-; Arcade subsystems (CPS1, SEGA Classics, ...): wheels only
+; Arcade subsystems (CPS1, Neo Geo, Konami 573, ...): wheels only
 arcade_subsystem_media_order=wheel-steel,wheel-carbon,wheel
 
 ; Arcade game ROMs: logo art before boxes (most titles have no physical box)
@@ -200,7 +210,7 @@ The repository includes a set of needed images in the
 
 - `frame01.jpg`, `frame02.jpg`, `logomister.jpg` and `menu.jpg` must be placed inside
   the `/cores/` folder.
-- `Arcade.jpg` and `Arcade_75.jpg` must be placed inside `/cores/A/`.
+- `Arcade.jpg` must be placed inside `/cores/A/Arcade.jpg`.
 
 Core and game images that are missing will be downloaded automatically from
 ScreenScraper the first time that core/game is detected.
@@ -269,6 +279,9 @@ The system has three components that work together:
   320×240 display, touchscreen). This device shares the touch interface with
   the Tab5 but runs at the lower resolution, making it a natural intermediate
   target between the two existing hardware profiles.
+- **Other ESP32-based displays support**
+- Ensure it works with other detection sources like NFC readers and other web-based launchers.
+- Apply scaling for small images (really necessary in few cases)
 
 ## License
 
