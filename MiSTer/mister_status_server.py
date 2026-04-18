@@ -61,7 +61,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         # ✅ USE GLOBAL REFERENCE instead of copying
         self.last_timestamps = server_last_timestamps  # ✅ REFERENCE, NOT A COPY
         
-        # Instance variables
+        # Variables de instancia
         self.session_start = time.time()
         self.requests_count = 0
         self.last_significant_change = 0
@@ -71,27 +71,27 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         self.is_first_call = global_is_first_call
         self.has_valid_cache = global_has_valid_cache
         
-        # Complete list of known non-arcade systems
+        # Lista completa de sistemas conocidos no-arcade
         self.KNOWN_NON_ARCADE_SYSTEMS = [
-            # === Nintendo consoles ===
+            # === Consolas Nintendo ===
             'nes', 'nintendo', 'famicom', 'snes', 'super nintendo', 'n64', 'nintendo64',
             'gameboy', 'gbc', 'gba', 'fds', 'sgb',
             
-            # === Sega consoles ===
+            # === Consolas Sega ===
             'genesis', 'megadrive', 'sega', 'mastersystem', 'sms', 'gamegear', 'gg',
             'saturn', 'dreamcast', 'megacd', 'segacd', 's32x', 'sg1000',
             
-            # === Sony/Other consoles ===
+            # === Consolas Sony/Otras ===
             'psx', 'playstation', 'ps1',
             
-            # === Atari consoles ===
+            # === Consolas Atari ===
             'atari2600', 'atari5200', 'atari7800', 'atarilynx', 'atari800', 'atarist',
             
             # === Classic consoles ===
             'colecovision', 'intellivision', 'vectrex', 'odyssey2', 'channelf', 
             'astrocade', 'creativision', 'tutor', 'supervision', 'gamate', 'pokemonmini',
             
-            # === MSX and japanese computers ===
+            # === MSX y ordenadores japoneses ===
             'msx', 'msx1', 'msx2', 'msx2plus', 'x68000', 'pc8801', 'sharp', 'x1', 'pc88', 'mz',
             
             # === PC Engine / TurboGrafx ===
@@ -100,16 +100,16 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             # === Handhelds ===
             'wonderswan', 'wonderswancolor', 'ngp', 'ngpc', 'gamegear',
             
-            # === European computers ===
+            # === Ordenadores europeos ===
             'gx4000', 'amstradcpc', 'amstrad', 'cpc6128', 'zx48', 'zxspectrum', 'zx81', 'zx80',
             'oric', 'bbcmicro', 'acorn', 'electron', 'archimedes', 'enterprise', 'samcoupe',
             'aquarius', 'microbee', 'atom', 'laser500',
             
-            # === American computerss ===
+            # === Ordenadores americanos ===
             'vic20', 'c64', 'c128', 'c16', 'plus4', 'pet2001', 'ti99', 'trs80', 'coco', 'dragon', 'mc10',
             'trs80coco2', 'coleco', 'adam', 'apple2', 'applei', 'macplus',
             
-            # === Various systems ===
+            # === Sistemas diversos ===
             'svi318', 'creativision', 'tutor', 'laser500', 'fmtowns', 'amiga', 'ao486', 'pcxt',
             
             # === Names from SAM (lowercase) ===
@@ -118,7 +118,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             'n64', 'neogeo', 's32x', 'saturn', 'sms', 'snes', 'tgfx16', 'tgfx16cd', 
             'psx', 'x68k',
             
-            # === Additional systems ===
+            # === Sistemas adicionales ===
             'APOGEE', 'ARCHIE', 'AY-3-8500', 
             'AcornElectron', 'Adam', 'Altair8800', 'Amstrad PCW', 
             'BBCMicro', 'BK0011M', 'Casio_PV-2000', 'COCO3', 'CoCo2', 'EDSAC', 
@@ -130,20 +130,20 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             'Homelab', 'BBCBridgeCompanion', 'PocketChallengeV2', 'MyVision', 
             'SuperVision8000', 'VT52', 'CreatiVision',
             
-            # === Less common complete consoles ===
+            # === Consolas menos comunes completas ===
             'Atari2600', 'ATARI5200', 'ATARI7800', 'ATARI800', 'AtariST', 
             'WonderSwan', 'WonderSwanColor', 'Saturn', 'FDS', 'SGB', 
             'VECTREX', 'Coleco', 'Intellivision', 'ODYSSEY2', 'ChannelF', 
             'Astrocade', 'Gamate', 'PokemonMini', 'SG1000', 
             'SG-1000', 'TomyTutor', 'SCV', 'SuperGrafx', 'PDP1', 
 
-            # === complete computers ===
+            # === Ordenadores completos ===
             'C64', 'C16', 'C128', 'VIC20', 'Amiga', 'AO486', 'PCXT', 'Amstrad', 
             'Spectrum', 'ZX81', 'ZXNext', 'zx48', 'MSX', 'MSX1', 'X68000', 
             'Apple-II', 'APPLE-I', 'MACPLUS', 'SAM', 'SAMCOUPE',
         ]
         
-        # Full mapping of core names
+        # Mapeo completo de nombres de cores
         self.CORE_NAME_MAPPING = {
             # === Nintendo ===
             'NES': 'Nintendo Entertainment System',
@@ -194,7 +194,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             'mame': 'Multiple Arcade Machine Emulator',
             'Arcade': 'Multiple Arcade Machine Emulator',
             
-            # === Computers ===
+            # === Ordenadores ===
             'PET2001' : 'PET',
             'C64': 'Commodore 64',
             'C128': 'Commodore 128',
@@ -236,7 +236,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             'APPLE-I': 'Apple I',
             'MACPLUS': 'Mac OS',
             
-            # === Various ===
+            # === Diversos ===
             'X68000': 'Sharp X68000',
             'Coleco': 'Colecovision',
             'Intellivision': 'Intellivision',
@@ -341,7 +341,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
     def _initialize_timestamps(self):
         """Leer timestamps iniciales de archivos"""
         timestamps = {}
-        for file_name in ['CORENAME', 'ACTIVEGAME', 'CURRENTPATH']:
+        for file_name in ['CORENAME', 'ACTIVEGAME', 'CURRENTPATH', 'FILESELECT']:
             try:
                 timestamps[file_name] = os.path.getmtime(f'/tmp/{file_name}')
             except:
@@ -353,7 +353,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
     def _get_current_timestamps(self):
         """Get current timestamps (helper method)"""
         timestamps = {}
-        for file_name in ['CORENAME', 'ACTIVEGAME', 'CURRENTPATH']:
+        for file_name in ['CORENAME', 'ACTIVEGAME', 'CURRENTPATH', 'FILESELECT']:
             try:
                 timestamps[file_name] = os.path.getmtime(f'/tmp/{file_name}')
             except:
@@ -366,7 +366,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         parsed_path = urlparse(self.path)
         path = parsed_path.path
         
-        # Main Endpoints
+        # Endpoints principales
         if path == '/status/core':
             self.send_text_response(self.get_current_core())
         elif path == '/status/game':
@@ -388,12 +388,18 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         elif path == '/status/debug/files':
             self.send_json_response(self.get_debug_files_info())
         elif path == '/status/rom/details':
-            self.send_json_response(self.get_rom_details())
+            from urllib.parse import parse_qs
+            force = parse_qs(parsed_path.query).get('force', ['0'])[0] == '1'
+            if force:
+                self.send_json_response(self.get_rom_details_forced())
+            else:
+                self.send_json_response(self.get_rom_details())
         elif path == '/status/system/type':
             self.send_json_response(self.get_system_type_info())
         elif path == '/status/debug/sam':
             self.send_json_response(self.get_sam_debug_info())
         elif path == '/status/error_state':
+            # NEW ENDPOINT: Return current error state
             global server_error_state, last_valid_core, last_valid_core_timestamp
             self.send_json_response({
                 'error_state': server_error_state,
@@ -412,9 +418,9 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 'usb': self.get_usb_info(),
                 'network': self.get_network_stats(),
                 'session': self.get_session_stats(),
-                'error_state': server_error_state,          
-                'has_error': bool(server_error_state),      
-                'last_valid_core': last_valid_core,         
+                'error_state': server_error_state,          # NEW
+                'has_error': bool(server_error_state),      # NEW
+                'last_valid_core': last_valid_core,         # NEW
                 'timestamp': int(time.time())
             }
             self.send_json_response(status)
@@ -423,56 +429,26 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
     def _read_stable_path_sources(self):
         """
-        Returns the best available CURRENTPATH and FULLPATH equivalents.
-
-        When the external debounce script (currentpath_stable.sh) is running, it
-        writes /tmp/LOADEDGAME and /tmp/LOADEDFULLPATH only after CURRENTPATH has
-        been stable for several seconds, i.e. a game was truly loaded, not just
-        hovered over in the OSD browser.
-
-        Priority:
-          1. LOADEDGAME / LOADEDFULLPATH  — if LOADEDGAME exists on disk
-          2. CURRENTPATH / FULLPATH        — fallback when the script is not running
+        Returns CURRENTPATH and FULLPATH from /tmp.
 
         Returns:
             (currentpath_str, currentpath_timestamp, fullpath_str, source_label)
-            where source_label is 'LOADEDGAME' or 'CURRENTPATH' for logging.
         """
-        loadedgame_path = '/tmp/LOADEDGAME'
-
-        if os.path.exists(loadedgame_path):
-            content = ""
-            timestamp = 0
-            fullpath = ""
-            try:
-                with open(loadedgame_path, 'r') as f:
-                    content = f.read().strip()
-                timestamp = os.path.getmtime(loadedgame_path)
-            except:
-                pass
-            try:
-                with open('/tmp/LOADEDFULLPATH', 'r') as f:
-                    fullpath = f.read().strip()
-            except:
-                pass
-            print(f"📌 Using LOADEDGAME as stable path source")
-            return content, timestamp, fullpath, 'LOADEDGAME'
-        else:
-            content = ""
-            timestamp = 0
-            fullpath = ""
-            try:
-                with open('/tmp/CURRENTPATH', 'r') as f:
-                    content = f.read().strip()
-                timestamp = os.path.getmtime('/tmp/CURRENTPATH')
-            except:
-                pass
-            try:
-                with open('/tmp/FULLPATH', 'r') as f:
-                    fullpath = f.read().strip()
-            except:
-                pass
-            return content, timestamp, fullpath, 'CURRENTPATH'
+        content = ""
+        timestamp = 0
+        fullpath = ""
+        try:
+            with open('/tmp/CURRENTPATH', 'r') as f:
+                content = f.read().strip()
+            timestamp = os.path.getmtime('/tmp/CURRENTPATH')
+        except:
+            pass
+        try:
+            with open('/tmp/FULLPATH', 'r') as f:
+                fullpath = f.read().strip()
+        except:
+            pass
+        return content, timestamp, fullpath, 'CURRENTPATH'
 
     def has_significant_change(self):
         """
@@ -481,13 +457,13 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         global server_last_timestamps
         
         current_timestamps = {}
-        for file_name in ['CORENAME', 'ACTIVEGAME', 'CURRENTPATH', 'LOADEDGAME']:
+        for file_name in ['CORENAME', 'ACTIVEGAME', 'CURRENTPATH', 'FILESELECT']:
             try:
                 current_timestamps[file_name] = os.path.getmtime(f'/tmp/{file_name}')
             except:
                 current_timestamps[file_name] = 0
         
-        # Read ACTIVEGAME content once — used for two filters below
+        # Read ACTIVEGAME content once — used for .ini filter below
         activegame_content = ""
         try:
             with open('/tmp/ACTIVEGAME', 'r') as f:
@@ -495,7 +471,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         except:
             pass
 
-        # Filter 1: ignore ACTIVEGAME timestamp change caused by .ini config files
+        # Ignore ACTIVEGAME timestamp changes caused by .ini config files
         if activegame_content and activegame_content.lower().endswith('.ini'):
             current_timestamps['ACTIVEGAME'] = server_last_timestamps.get('ACTIVEGAME', 0)
 
@@ -512,24 +488,30 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
         changed_set = set(changed_files)
 
-        # Only CURRENTPATH changed: OSD cursor navigation, no real game load.
+        # Helper: compare FILESELECT and CURRENTPATH timestamps at nanosecond precision.
+        # During navigation MiSTer writes both files at the exact same nanosecond.
+        # After a load, FILESELECT has a newer timestamp than CURRENTPATH.
+        def fileselect_matches_currentpath():
+            try:
+                return (os.stat('/tmp/FILESELECT').st_mtime_ns ==
+                        os.stat('/tmp/CURRENTPATH').st_mtime_ns)
+            except:
+                return True  # if we can't read, assume navigation (safe default)
+
+        # CURRENTPATH alone → pure OSD cursor navigation
         if changed_set == {'CURRENTPATH'}:
             return False, "menu_navigation", changed_files
 
-        # Filter 2: LOADEDGAME changed (with or without CURRENTPATH) while an arcade
-        # game is active. detect_game_load.sh writes LOADEDGAME a few seconds after
-        # the game starts — for arcade this is a harmless side-effect, not a real
-        # state change. Ignoring it keeps the correctly-identified arcade game cached
-        # and prevents the wrong image from appearing.
-        # The cache will be invalidated only when ACTIVEGAME, CORENAME, or another
-        # meaningful file actually changes (i.e. the user loads a different game).
-        if changed_set <= {'LOADEDGAME', 'CURRENTPATH'} and 'LOADEDGAME' in changed_set:
-            if (activegame_content and
-                    "/_Arcade/" in activegame_content and
-                    activegame_content.lower().endswith('.mra')):
-                return False, "arcade_loadedgame_ignored", changed_files
+        # FILESELECT + CURRENTPATH both changed: could be navigation OR a load that
+        # happened alongside navigation (missed by infrequent polling).
+        # Verify by comparing current timestamps: equal → navigation, different → load.
+        if changed_set == {'FILESELECT', 'CURRENTPATH'}:
+            if fileselect_matches_currentpath():
+                return False, "menu_navigation", changed_files
+            else:
+                return True, "significant_changes", changed_files
 
-        # Any other change (CORENAME, ACTIVEGAME, etc.): real event, invalidate cache.
+        # Any other change (CORENAME, ACTIVEGAME, FILESELECT alone, etc.): real event
         return True, "significant_changes", changed_files
     
     def _handle_cache_logic(self, endpoint_name, cached_value, has_valid_cache_flag):
@@ -637,7 +619,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         
         print("🔍 === ENHANCED CORE DETECTION WITH IMPROVED CACHING===")
 
-        # ========== EARLY MENU VALIDATION (BEFORE CACHE) ==========
+        # ========== NEW: EARLY MENU VALIDATION (BEFORE CACHE) ==========
         try:
             # Read CORENAME first to check for MENU state
             with open('/tmp/CORENAME', 'r') as f:
@@ -654,7 +636,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             print(f"⚠️ Error reading CORENAME for early MENU check: {e}")
             # Continue with normal logic if we can't read the file
 
-        # ========== EXISTING CACHE LOGIC + FIRST CALL LOGIC ==========
+        # ========== EXISTING CACHE LOGIC + NEW FIRST CALL LOGIC ==========
         use_cache, cache_reason, *default_value = self._handle_cache_logic(
             'core', self.cached_core_state, self.has_valid_cache['core']
         )
@@ -665,7 +647,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 self._update_global_cache('core', result)
                 return result
             elif cache_reason == "first_call_currentpath_only":
-                # Handle first call with only CURRENTPATH changed
+                # ✅ NEW: Handle first call with only CURRENTPATH changed
                 result = default_value[0] if default_value else "Menu"
                 print(f"🎯 First call + only CURRENTPATH changed since start - returning: '{result}'")
                 return result
@@ -691,7 +673,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                         mapped_core = self.map_sam_core_name(sam_core)
                         print(f"📝 SAM core mapped: '{sam_core}' → '{mapped_core}'")
                         
-                        # Update last valid core
+                        # ✅ NEW: Update last valid core
                         last_valid_core = mapped_core
                         last_valid_core_timestamp = time.time()
                         server_error_state = ""  # Clear error state
@@ -715,17 +697,10 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             except:
                 pass
 
-            # Use LOADEDGAME/LOADEDFULLPATH when available (debounce script running),
-            # otherwise fall back to CURRENTPATH/FULLPATH.
-            # Note: stable_fullpath is LOADEDFULLPATH and is intentionally NOT used for
-            # arcade detection below - see fullpath_content comment.
             currentpath_content, currentpath_timestamp, stable_fullpath, path_source = \
                 self._read_stable_path_sources()
 
-            # For arcade detection, ALWAYS read real FULLPATH directly from /tmp.
-            # LOADEDFULLPATH (returned by _read_stable_path_sources when LOADEDGAME exists)
-            # may be stale from a previous computer-game session and would cause arcade
-            # detection to fail when the user switches to an arcade game afterwards.
+            # For arcade detection, always read FULLPATH directly from /tmp.
             fullpath_content = ""
             try:
                 with open('/tmp/FULLPATH', 'r') as f:
@@ -936,7 +911,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 self._update_global_cache('game', result)
                 return result
             elif cache_reason == "first_call_currentpath_only":
-                # Handle first call with only CURRENTPATH changed
+                # ✅ NEW: Handle first call with only CURRENTPATH changed
                 result = default_value[0] if default_value else ""
                 print(f"🎯 First call + only CURRENTPATH changed since start - returning: '{result}'")
                 return result
@@ -980,14 +955,10 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         except:
             pass
 
-        # Use LOADEDGAME/LOADEDFULLPATH when available (debounce script running),
-        # otherwise fall back to CURRENTPATH/FULLPATH.
-        # stable_fullpath (LOADEDFULLPATH) is NOT used for arcade detection here.
         currentpath_content, currentpath_timestamp, stable_fullpath, path_source = \
             self._read_stable_path_sources()
 
-        # For arcade detection, ALWAYS read real FULLPATH directly from /tmp.
-        # LOADEDFULLPATH may be stale from a previous computer-game session.
+        # For arcade detection, always read FULLPATH directly from /tmp.
         fullpath_content = ""
         try:
             with open('/tmp/FULLPATH', 'r') as f:
@@ -1010,7 +981,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             return ""
         
         # STEP 4: ARCADE FAST PATH
-        # LOADEDGAME and CURRENTPATH are completely ignored for arcade games.
+        # CURRENTPATH is completely ignored for arcade games.
         #
         # Source priority:
         #   1. ACTIVEGAME with /_Arcade/ + .mra, fresh vs CORENAME  → Remote launch
@@ -1067,25 +1038,62 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 self._update_global_cache('game', "")
                 return ""
 
-        # STEP 5: Non-arcade — timestamp comparison to pick best source
-        activegame_is_newer = activegame_timestamp > currentpath_timestamp
-        print(f"⏱️ Timestamp comparison: ACTIVEGAME {'NEWER' if activegame_is_newer else 'OLDER'} than CURRENTPATH")
-        
-        if activegame_is_newer and activegame_content:
+        # STEP 5a: Non-arcade Remote launch.
+        # Remote writes ACTIVEGAME first, then CURRENTPATH+FILESELECT simultaneously a moment
+        # later, so ACTIVEGAME ends up slightly OLDER than CURRENTPATH — a timestamp comparison
+        # alone is not reliable. The definitive signal is that Remote copies the game filename
+        # into both ACTIVEGAME (full path) and CURRENTPATH (filename only), so:
+        #   os.path.basename(ACTIVEGAME) == CURRENTPATH
+        # This match only occurs when Remote loaded the game; during OSD navigation CURRENTPATH
+        # changes continuously while ACTIVEGAME stays at its last Remote value, and
+        # has_significant_change() suppresses detection (returns menu_navigation) so we never
+        # reach this step unless ACTIVEGAME itself just changed.
+        activegame_basename = os.path.basename(activegame_content) if activegame_content else ""
+        activegame_remote_fresh = (
+            activegame_content and
+            "/_Arcade/" not in activegame_content and
+            not activegame_content.lower().endswith('.ini') and
+            (activegame_timestamp >= currentpath_timestamp or
+             (currentpath_content and activegame_basename == currentpath_content))
+        )
+
+        if activegame_remote_fresh:
             game_name = self.extract_game_name(activegame_content, preserve_parentheses=True)
-            print(f"🖥️ NON-ARCADE game from ACTIVEGAME: '{game_name}'")
+            print(f"🖥️ NON-ARCADE (Remote/ACTIVEGAME): '{game_name}'")
+            self._update_global_cache('game', game_name)
+            return game_name
+
+        # STEP 5b: Non-arcade OSD load — compare FILESELECT and CURRENTPATH timestamps at nanosecond precision.
+        # MiSTer writes FILESELECT and CURRENTPATH at the exact same nanosecond during navigation.
+        # When a game is loaded via OSD, only FILESELECT gets a new timestamp; CURRENTPATH keeps its old one.
+        # → FILESELECT_ns > CURRENTPATH_ns  : game loaded → use CURRENTPATH as game name
+        # → FILESELECT_ns == CURRENTPATH_ns : navigation → no game change
+        try:
+            fileselect_ns  = os.stat('/tmp/FILESELECT').st_mtime_ns
+            currentpath_ns = os.stat('/tmp/CURRENTPATH').st_mtime_ns
+        except:
+            fileselect_ns  = 0
+            currentpath_ns = 0
+
+        print(f"⏱️ FILESELECT_ns={fileselect_ns} CURRENTPATH_ns={currentpath_ns} diff={fileselect_ns - currentpath_ns}")
+
+        if fileselect_ns > currentpath_ns and currentpath_content:
+            # Extra check: if FULLPATH starts with '_' (e.g. _Computer, _Console, _Utility),
+            # the user is loading a core from the OSD system folders, not a game ROM.
+            # In that case FILESELECT being newer is a core-load event, not a game-load event.
+            fullpath_basename = os.path.basename(fullpath_content.rstrip('/'))
+            if fullpath_content and (fullpath_content.lstrip('/').startswith('_') or fullpath_basename.startswith('_')):
+                print(f"⚠️ FULLPATH starts with '_' ('{fullpath_content}') → core load from OSD, not a game")
+                self._update_global_cache('game', "")
+                return ""
+            game_name = self.extract_game_name(currentpath_content, preserve_parentheses=True)
+            print(f"🖥️ NON-ARCADE (OSD/FILESELECT newer): '{game_name}'")
             self._update_global_cache('game', game_name)
             return game_name
         else:
-            if currentpath_content:
-                game_name = self.extract_game_name(currentpath_content, preserve_parentheses=True)
-                print(f"🖥️ NON-ARCADE game from CURRENTPATH/LOADEDGAME: '{game_name}'")
-                self._update_global_cache('game', game_name)
-                return game_name
-            else:
-                print("ℹ️ No game path available")
-                self._update_global_cache('game', "")
-                return ""
+            print(f"ℹ️ FILESELECT not newer than CURRENTPATH → navigation or no game loaded")
+            self._update_global_cache('game', "")
+            return ""
 
     # ========== HELPER FUNCTIONS ==========
     
@@ -1109,7 +1117,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         current_time = time.time()
         timestamps = {}
         
-        # SAM Timestamp
+        # Timestamp de SAM
         if os.path.exists(sam_log_path):
             sam_timestamp = os.path.getmtime(sam_log_path)
             timestamps['SAM_Games.log'] = {
@@ -1117,7 +1125,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 'age_seconds': int(current_time - sam_timestamp)
             }
         
-        # Timestamps from other files
+        # Timestamps de otros archivos
         for file_name in ['CORENAME', 'ACTIVEGAME', 'CURRENTPATH']:
             file_path = f'/tmp/{file_name}'
             if os.path.exists(file_path):
@@ -1167,7 +1175,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
     
     def is_known_non_arcade_system(self, corename):
         """
-        Check if a core name corresponds to a known non-arcade system
+        Verifica si un nombre de core corresponde a un sistema conocido no-arcade
         """
         if not corename:
             return False
@@ -1182,15 +1190,15 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
     def detect_arcade_name_similarity(self, corename, activegame_path):
         """
-        Detects similarities between CORENAME and arcade filename
-        To resolve conflicts between native MiSTer and web interface
+        Detecta similitudes entre CORENAME y nombre de archivo arcade
+        Para resolver conflictos MiSTer nativo vs interfaz web
         
         Returns: (is_similar, confidence_score)
         """
         if not corename or not activegame_path:
             return False, 0.0
         
-        # Extract filename from .mra
+        # Extraer nombre del archivo .mra
         arcade_filename = os.path.splitext(os.path.basename(activegame_path))[0]
         
         # Clean names for comparison
@@ -1199,18 +1207,18 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         
         print(f"🔍 Comparing: '{corename}' (clean: '{corename_clean}') vs '{arcade_filename}' (clean: '{arcade_clean}')")
         
-        # Criterion 1: Exact match
+        # Criterio 1: Coincidencia exacta
         if corename_clean == arcade_clean:
             print(f"✅ Exact match found")
             return True, 1.0
         
-        # Criterion 2: CORENAME is a significant prefix
+        # Criterio 2: CORENAME es prefijo significativo
         if len(corename_clean) >= 4 and arcade_clean.startswith(corename_clean):
             confidence = len(corename_clean) / len(arcade_clean)
             print(f"✅ Prefix match found (confidence: {confidence:.2f})")
             return True, confidence
         
-        # Criterion 3: Common substrings
+        # Criterio 3: Subcadenas comunes
         if len(corename_clean) >= 6:
             common_chars = 0
             for char in corename_clean:
@@ -1218,7 +1226,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                     common_chars += 1
             
             coverage = common_chars / len(corename_clean)
-            if coverage >= 0.7:  # 70% common characters
+            if coverage >= 0.7:  # 70% de caracteres comunes
                 print(f"✅ Character similarity found (coverage: {coverage:.2f})")
                 return True, coverage
         
@@ -1245,16 +1253,16 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
     def normalize_core_name(self, core_name):
         """
-        Normalize core names using the existing mapping
+        Normaliza nombres de cores usando el mapeo existente
         """
         if not core_name:
             return "Menu"
         
-        # Search on the map
+        # Buscar en el mapeo
         if core_name in self.CORE_NAME_MAPPING:
             return self.CORE_NAME_MAPPING[core_name]
         
-        # Additional special cases
+        # Casos especiales adicionales
         core_lower = core_name.lower()
         special_mappings = {
             'mame': 'Arcade',
@@ -1285,7 +1293,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         if not game_path:
             return ""
         
-        # Extract base name from file
+        # Extraer nombre base del archivo
         base_name = os.path.splitext(os.path.basename(game_path))[0]
         
         if preserve_parentheses:
@@ -1368,17 +1376,17 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 print(f"🔍 SAM_Games.log no existe en {sam_log_path}")
                 return False, "", "", ""
             
-            # Check if the file is recent
+            # Verificar si el archivo es reciente (ampliar a 5 minutos)
             sam_stat = os.path.getmtime(sam_log_path)
             age = time.time() - sam_stat
             
             print(f"🔍 SAM_Games.log age: {age:.1f} seconds")
             
-            if age > 300:  # 5 minutes
+            if age > 300:  # 5 minutos
                 print(f"🔍 SAM_Games.log demasiado antiguo: {age:.1f}s > 300s")
                 return False, "", "", ""
             
-            # Read log content with better error handling
+            # Leer contenido del log con mejor manejo de errores
             try:
                 with open(sam_log_path, 'r', encoding='utf-8', errors='ignore') as f:
                     lines = f.readlines()
@@ -1403,12 +1411,12 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 parts = line.split(' - ')
                 
                 if len(parts) >= 3:
-                    # parts[0] = time (04:17:58)
+                    # parts[0] = hora (04:17:58)
                     # parts[1] = core (atarilynx) 
-                    # parts[2] and following = file path
+                    # parts[2] y siguientes = ruta del archivo
                     
                     sam_core_raw = parts[1].strip()
-                    sam_path = ' - '.join(parts[2:])  # Gather the full route in case it has "-" in the name
+                    sam_path = ' - '.join(parts[2:])  # Reunir ruta completa por si tiene " - " en el nombre
                     
                     # Extract game name: last path segment without extension
                     if sam_path:
@@ -1419,10 +1427,10 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                     else:
                         sam_game = ""
                     
-                    # Map SAM core name to human-readable name
+                    # Mapear nombre del core SAM a nombre legible
                     sam_core = self.map_sam_core_name(sam_core_raw)
                     
-                    print(f"✅ SAM detected - Core: '{sam_core}' (raw: '{sam_core_raw}'), Game: '{sam_game}', Path: '{sam_path}'")
+                    print(f"✅ SAM detectado - Core: '{sam_core}' (raw: '{sam_core_raw}'), Game: '{sam_game}', Path: '{sam_path}'")
                     return True, sam_core, sam_game, sam_path
             
             print("🔍 No valid information found in SAM_Games.log")
@@ -1436,14 +1444,14 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         
     def map_sam_core_name(self, sam_core_raw):
         """
-        Map core names from SAM to human-readable names
+        Mapea nombres de cores desde SAM a nombres legibles
         """
         # Specific mapping from SAM
         sam_core_mapping = {
             'amiga': 'Amiga',
             'amigacd32': 'Amiga CD32',
             'ao486': 'PC/Windows',
-            'arcade': 'mame',  # Special: arcade from SAM must map to mame
+            'arcade': 'mame',  # Especial: arcade desde SAM debe mapear a mame
             'atari2600': 'Atari 2600',
             'atari5200': 'Atari 5200',
             'atari7800': 'Atari 7800',
@@ -1499,7 +1507,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             else:
                 other_files_timestamps[file_name] = 0
         
-        # Get timestamp from SAM log
+        # Obtener timestamp del log SAM
         sam_log_path = '/tmp/SAM_Games.log'
         sam_timestamp = os.path.getmtime(sam_log_path) if os.path.exists(sam_log_path) else 0
         
@@ -1522,7 +1530,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         # Check if any other file is newer (with a smaller margin for other files)
         newest_other_file = max(other_files_timestamps.values()) if other_files_timestamps else 0
         
-        if newest_other_file > sam_timestamp + 60:  # 60 seconds for other files
+        if newest_other_file > sam_timestamp + 60:  # 60 segundos para otros archivos
             return False, f"Other detection files much newer than SAM log ({newest_other_file - sam_timestamp:.1f}s difference)"
         
         # SAM is active and is the most recent or current source
@@ -1887,14 +1895,15 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
     
     def get_rom_details(self):
         """
-        Get complete ROM details with improved path detection logic
-        Check /status/game first, then SAM_Games.log, then CORENAME-based detection
+        ENHANCED METHOD: Get complete ROM details with improved path detection logic
+        New logic: Check /status/game first, then SAM_Games.log, then CORENAME-based detection
         Includes: filename, size, CRC32, MD5, SHA1, path
+        ADDED: First call validation for CURRENTPATH-only changes
         """
         try:
             print(f"[{time.strftime('%H:%M:%S')}] Getting ROM details with enhanced caching...")
             
-            # Apply cache logic
+            # Apply new cache logic
             use_cache, cache_reason, *default_value = self._handle_cache_logic(
                 'rom_details', self.cached_rom_details, self.has_valid_cache['rom_details']
             )
@@ -1907,7 +1916,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                     self._update_global_cache('rom_details', result)
                     return result
                 elif cache_reason == "first_call_currentpath_only":
-                    # Handle first call with only CURRENTPATH changed
+                    # ✅ NEW: Handle first call with only CURRENTPATH changed
                     result = default_value[0] if default_value else {
                         "filename": "", "size": 0, "crc32": "", "md5": "", "sha1": "", "path": "",
                         "available": False, "error": "Menu navigation (first call)", 
@@ -1983,9 +1992,60 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             self._update_global_cache('rom_details', result)
             return result
     
+    def get_rom_details_forced(self):
+        """
+        Forced ROM details: bypasses game-name detection and timestamp checks.
+        Goes directly to _get_non_arcade_rom_path() / _get_arcade_rom_path()
+        so that RESCAN GAME works even when FILESELECT timestamps are stale.
+        """
+        print("🔄 === FORCED ROM DETAILS (bypass timestamp check) ===")
+        try:
+            corename = ""
+            try:
+                with open('/tmp/CORENAME', 'r') as f:
+                    corename = f.read().strip()
+            except:
+                pass
+
+            is_arcade = self._is_arcade_system(corename)
+            if is_arcade:
+                rom_path = self._get_arcade_rom_path()
+            else:
+                rom_path = self._get_non_arcade_rom_path()
+
+            if not rom_path:
+                return {
+                    "filename": "", "size": 0, "crc32": "", "md5": "", "sha1": "",
+                    "path": "", "available": False,
+                    "error": "Forced scan: no ROM path found via CURRENTPATH/ACTIVEGAME",
+                    "detection_method": "forced_none", "timestamp": int(time.time())
+                }
+
+            print(f"🔄 Forced path resolved: {rom_path}")
+            is_zip, zip_path, internal_path = self.is_zip_path(rom_path)
+            if is_zip:
+                result = self.get_rom_details_from_zip(rom_path, zip_path, internal_path)
+            else:
+                result = self.get_rom_details_from_file(rom_path)
+
+            result["detection_method"] = "forced"
+            # Update cache so subsequent normal calls benefit from this result
+            self._update_global_cache('rom_details', result)
+            return result
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {
+                "filename": "", "size": 0, "crc32": "", "md5": "", "sha1": "",
+                "path": "", "available": False,
+                "error": f"Forced scan error: {str(e)}",
+                "detection_method": "forced_error", "timestamp": int(time.time())
+            }
+
     def _get_enhanced_rom_path(self):
         """
-        ROM path detection:
+        Enhanced ROM path detection following the new logic:
         1. Check /status/game endpoint
         2. Verify SAM_Games.log for path extraction if game matches
         3. Check CORENAME to determine arcade vs non-arcade
@@ -2205,8 +2265,6 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         except:
             pass
 
-        # Use LOADEDGAME/LOADEDFULLPATH when available (debounce script running),
-        # otherwise fall back to CURRENTPATH/FULLPATH
         currentpath, currentpath_timestamp, fullpath, path_source = \
             self._read_stable_path_sources()
 
@@ -2650,7 +2708,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             'game_source': 'none'
         }
         
-        # Check SAM FIRST
+        # Verificar SAM PRIMERO
         sam_active, sam_core, sam_game, sam_path = self.is_sam_active_and_current()
         debug_info['sam_active'] = sam_active
         if sam_active:
@@ -2662,7 +2720,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 'path': sam_path
             }
         
-        # Verify files
+        # Verificar archivos
         files_to_check = ['CORENAME', 'ACTIVEGAME', 'CURRENTPATH', 'FULLPATH']
         for file_name in files_to_check:
             file_path = f'/tmp/{file_name}'
@@ -2688,7 +2746,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             corename_content = debug_info['files']['CORENAME']['content']
             activegame_content = debug_info['files']['ACTIVEGAME']['content']
             
-            # SPECIAL CASE: Check name similarity for MiSTer/Web conflicts
+            # CASO ESPECIAL: Verificar similitud de nombres para conflictos MiSTer/Web
             if (activegame_content and "/_Arcade/" in activegame_content and 
                 activegame_content.endswith('.mra')):
                 
@@ -2706,7 +2764,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                     debug_info['game_source'] = 'activegame_similarity_match'
                     return debug_info
             
-            # Check /_Arcade/ conflict normal
+            # Verificar conflicto /_Arcade/ normal
             if activegame_content and "/_Arcade/" in activegame_content:
                 if fullpath_content and ("arcade" in fullpath_content.lower()):
                     if not self.is_known_non_arcade_system(corename_content):
@@ -2759,7 +2817,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             if os.path.exists(file_path):
                 info['exists'] = True
                 try:
-                    # Special handling for SAM_Games.log
+                    # Manejo especial para SAM_Games.log
                     if file_name == 'SAM_Games.log':
                         try:
                             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -2797,7 +2855,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         return {
             'timestamp': int(time.time()),
             'files': files_info,
-            'sam_test_result': self.is_sam_active_and_current()  # SAM direct test
+            'sam_test_result': self.is_sam_active_and_current()  # Test directo de SAM
         }
 
     def get_system_type_info(self):
