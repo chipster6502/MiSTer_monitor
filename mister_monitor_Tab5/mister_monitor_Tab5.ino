@@ -139,6 +139,7 @@ bool gameChanged = false;
 bool showingCoreImage = false;
 unsigned long coreImageStartTime = 0;  // Time when image was shown
 unsigned long lastCoreCheck = 0;  // To check core changes while showing image
+String coreDownloadFailedFor = "";  // Core for which ScreenScraper download failed — prevents screensaver retry loop
 
 float cpuUsage = 0.0;
 float memoryUsage = 0.0;
@@ -383,6 +384,7 @@ void handleScreenScraperError(int httpCode, String response);
 
 // ROM details function
 RomDetails getCurrentRomDetails();
+RomDetails getCurrentRomDetailsForced();
 
 // Enhanced extraction functions  
 bool extractBoolValue(String json, String key);
@@ -419,6 +421,7 @@ String currentCoreForCrc = "";         // Core del juego actual
 unsigned long lastCrcRecurrentTime = 0; // Ultimo intento CRC recurrente
 bool crcRecurrentActive = false;       // Si busqueda recurrente esta activa
 int crcRecurrentAttempts = 0;          // Contador de intentos recurrentes
+bool lastRomCrcAvailable = false;      // true when current game's ROM has a valid CRC
 String lastValidCore = "";           // Backup local (solo para casos extremos)
 bool serverHasError = false;         // Si el servidor reporta error 
 String serverErrorType = "";         // Tipo de error del servidor
@@ -831,6 +834,37 @@ void addGameImageFooter(String gameName) {
   M5.Display.print("Touch the screen to show MiSTer monitor");
 }
 
+// Footer for fullscreen core image screens.
+// When a game is active but its CRC could not be detected, shows RESCAN GAME button.
+void drawCoreImageFooter() {
+  M5.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
+  M5.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
+
+  bool showRescan = (currentGame.length() > 0 && !lastRomCrcAvailable);
+
+  if (showRescan) {
+    // Instruction text shifted left to make room for button
+    M5.Display.setTextColor(THEME_GREEN);
+    M5.Display.setTextSize(3);
+    M5.Display.setCursor(40, 660);
+    M5.Display.print("Touch the screen to show MiSTer monitor");
+
+    // RESCAN GAME button — bottom-right corner of footer
+    M5.Display.fillRect(840, 632, 420, 55, THEME_BLACK);
+    M5.Display.drawRect(840, 632, 420, 55, THEME_CYAN);
+    M5.Display.setTextColor(THEME_CYAN);
+    M5.Display.setTextSize(3);
+    M5.Display.setCursor(868, 645);
+    M5.Display.print("[ RESCAN GAME ]");
+  } else {
+    // Standard centered layout
+    M5.Display.setTextColor(THEME_GREEN);
+    M5.Display.setTextSize(3);
+    M5.Display.setCursor(250, 660);
+    M5.Display.print("Touch the screen to show MiSTer monitor");
+  }
+}
+
 void drawFooter() {
   // Footer area at bottom of screen - now adapted for frame02.jpg design
   // Draw separator line at top of footer
@@ -1131,6 +1165,60 @@ RomDetails getCurrentRomDetails() {
   Serial.printf("Free heap after ROM details: %d bytes\n", ESP.getFreeHeap());
   Serial.printf("=== ROM DETAILS COMPLETE ===\n\n");
   
+  return details;
+}
+
+RomDetails getCurrentRomDetailsForced() {
+  // Calls /status/rom/details?force=1 — the server bypasses timestamp checks
+  // and reads CURRENTPATH/ACTIVEGAME directly to compute CRC.
+  RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0};
+
+  Serial.printf("=== FORCED ROM DETAILS (bypass timestamp) ===\n");
+
+  if (ESP.getFreeHeap() < 50000) {
+    details.error = "Low memory";
+    return details;
+  }
+
+  HTTPClient http;
+  String url = String("http://") + misterIP + ":8080/status/rom/details?force=1";
+  Serial.printf("Requesting forced ROM details from: %s\n", url.c_str());
+
+  http.begin(url);
+  http.setTimeout(15000);
+  http.addHeader("User-Agent", "M5Stack-MiSTer-Monitor");
+
+  int code = http.GET();
+  Serial.printf("Forced HTTP Response: %d\n", code);
+
+  if (code == 200) {
+    String response = http.getString();
+    Serial.printf("Forced response (%d bytes): %s\n", response.length(),
+                  response.substring(0, min(200, (int)response.length())).c_str());
+
+    details.filename      = extractStringValue(response, "filename");
+    details.crc32         = extractStringValue(response, "crc32");
+    details.md5           = extractStringValue(response, "md5");
+    details.sha1          = extractStringValue(response, "sha1");
+    details.filesize      = extractIntValue(response,  "size");
+    details.available     = extractBoolValue(response, "available");
+    details.hashCalculated= extractBoolValue(response, "hash_calculated");
+    details.fileTooLarge  = extractBoolValue(response, "file_too_large");
+    details.error         = extractStringValue(response, "error");
+    details.path          = extractStringValue(response, "path");
+    details.timestamp     = extractIntValue(response,  "timestamp");
+
+    Serial.printf("Forced CRC32: '%s' | available=%s | hashOK=%s\n",
+                  details.crc32.c_str(),
+                  details.available ? "YES" : "NO",
+                  details.hashCalculated ? "YES" : "NO");
+  } else {
+    details.error = "Forced HTTP " + String(code);
+    Serial.printf("Forced request failed: %d\n", code);
+  }
+
+  http.end();
+  Serial.printf("=== FORCED ROM DETAILS COMPLETE ===\n\n");
   return details;
 }
 
@@ -1769,8 +1857,9 @@ void showCoreImageScreenWithAutoDownload(String coreName) {
       
       // Try to find any existing image as fallback
       if (!findCoreImage(coreName, imagePath)) {
-        Serial.println("No fallback image available - showing not found screen");
-        showCoreNotFoundScreen(coreName);
+        Serial.println("No fallback image available - showing Menu Image With Core Overlay");
+        coreDownloadFailedFor = coreName;  // Prevent screensaver from retrying this core
+        showMenuImageWithCoreOverlay(coreName);
         return;
       }
     }
@@ -1796,12 +1885,7 @@ void showCoreImageScreenWithAutoDownload(String coreName) {
       Serial.println("Image displayed correctly, adding footer");
       
       // Footer in PHYSICAL coordinates (full screen width, below image area)
-      M5.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
-      M5.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
-      M5.Display.setTextColor(THEME_GREEN);
-      M5.Display.setTextSize(3);  // Larger text for physical coordinates
-      M5.Display.setCursor(250, 660);  // Centered horizontally
-      M5.Display.print("Touch the screen to show MiSTer monitor");
+      drawCoreImageFooter();
       
       Serial.println("Footer added successfully");
       return;
@@ -2171,6 +2255,12 @@ void loop() {
   if (showingCoreImage) {
   // Check timeout for core image display (30 seconds)
   if (millis() - coreImageStartTime > CORE_IMAGE_TIMEOUT) {
+    if (currentCore == coreDownloadFailedFor && currentGame.length() == 0) {
+      // No image available for this core AND no game loaded — re-show menu overlay and stay
+      showMenuImageWithCoreOverlay(currentCore);
+      coreImageStartTime = millis();
+      return;
+    }
     showingCoreImage = false;
     backgroundLoaded = false;
     needsRedraw = true;
@@ -2181,6 +2271,29 @@ void loop() {
   // We don't need to check specific buttons, any touch will do
   auto touch = M5.Touch.getDetail();
   if (touch.wasPressed()) {
+    int tx = touch.x;
+    int ty = touch.y;
+
+    // Check RESCAN GAME button (only visible when CRC is missing and game is active)
+    if (!lastRomCrcAvailable && currentGame.length() > 0 && tx >= 840 && tx < 1260 && ty >= 632 && ty < 687) {
+      Serial.println("RESCAN GAME button pressed - fetching fresh ROM details");
+      RomDetails fresh = getCurrentRomDetailsForced();
+      lastRomCrcAvailable = fresh.available && fresh.hashCalculated && fresh.crc32.length() > 0;
+      Serial.printf("After rescan: CRC available = %s\n", lastRomCrcAvailable ? "YES" : "NO");
+      if (lastRomCrcAvailable) {
+        // CRC obtained: clear search cache so the download is attempted with CRC
+        Serial.printf("CRC obtained — clearing search cache and retrying download\n");
+        lastSearchedGame = "";
+        showGameImageScreen(currentCore, currentGame);
+        coreImageStartTime = millis();
+      } else {
+        // Still no CRC: just redraw footer
+        drawCoreImageFooter();
+      }
+      lastButtonPress = millis();
+      return;
+    }
+
     Serial.println("Touch detected - exiting core image to interface");
     M5.Display.fillRect(0, 0, 1280, 80, THEME_CYAN);
     M5.Display.setTextSize(4);
@@ -2249,6 +2362,7 @@ void loop() {
       // Check if core changed (ALWAYS update core image when core changes, regardless of game state)
       else if (oldCore != currentCore && sdCardAvailable) {
         Serial.printf("Core changed during display: '%s' -> '%s'\n", oldCore.c_str(), currentCore.c_str());
+        coreDownloadFailedFor = "";  // New core — allow download attempt
         // If there's an active game, show game image, otherwise show core image
         if (currentGame.length() > 0) {
           Serial.printf("Core changed with active game, showing game image for new core\n");
@@ -2331,7 +2445,8 @@ if (showingCoreImage) {
   // === NORMAL INTERFACE CODE ===
   
   // Check timeout to activate screensaver
-  if (!showingCoreImage && sdCardAvailable && (millis() - lastButtonPress > SCREENSAVER_TIMEOUT)) {
+  if (!showingCoreImage && sdCardAvailable && (millis() - lastButtonPress > SCREENSAVER_TIMEOUT)
+      && (currentCore != coreDownloadFailedFor || currentGame.length() > 0 || FORCE_CORE_REDOWNLOAD)) {
     Serial.println("=== SCREENSAVER ACTIVATION ANALYSIS ===");
     Serial.printf("Current core: '%s'\n", currentCore.c_str());
     Serial.printf("Current game: '%s'\n", currentGame.c_str());
@@ -3050,12 +3165,7 @@ void showCoreImageScreen(String coreName) {
       Serial.println("Image displayed correctly, adding footer");
       
       // Only add footer with instructions (no header or top overlay)
-      M5.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
-      M5.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
-      M5.Display.setTextColor(THEME_GREEN);
-      M5.Display.setTextSize(3);
-      M5.Display.setCursor(250, 660);
-      M5.Display.print("Touch the screen to show MiSTer monitor");
+      drawCoreImageFooter();
       
       Serial.println("Footer added successfully");
       return;
@@ -3220,8 +3330,8 @@ void showMenuImageWithCoreOverlay(String coreName) {
     
   } else {
     // ========== FALLBACK IF THERE IS NO MENU IMAGE ==========
-    Serial.println("No menu image found, showing fallback screen");
-    showCoreNotFoundScreen(coreName);
+    Serial.println("No menu image found, showing main HUD");
+    displayMainHUD();
   }
 
   // ========== FOOTER WITH ACTIVE CORE (always drawn for non-MENU cores) ==========
@@ -4255,6 +4365,7 @@ void startCrcRecurrentForGame(String gameName, String coreName) {
   crcRecurrentActive = true;
   lastCrcRecurrentTime = 0;  // Force immediate check
   crcRecurrentAttempts = 0;
+  lastRomCrcAvailable = false;  // Unknown until checked
   
   Serial.printf("CRC recurrent started: '%s' core '%s'\n", gameName.c_str(), coreName.c_str());
   Serial.printf("DEBUG: crcRecurrentActive=%s\n", crcRecurrentActive ? "true" : "false");
@@ -7150,6 +7261,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
   Serial.printf("  CRC32 length: %d\n", romDetails.crc32.length());
   
   if (romDetails.available && romDetails.hashCalculated && romDetails.crc32.length() > 0) {
+    lastRomCrcAvailable = true;
     Serial.println("ROM data available - using JSON search");
     showDownloadProgress(20, "JSON CRC search...");
     
@@ -7251,6 +7363,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
       }
     }
   } else {
+    lastRomCrcAvailable = false;
     Serial.println("ROM CRC not available for JSON search");
   }
   

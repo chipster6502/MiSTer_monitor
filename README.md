@@ -8,9 +8,9 @@ information, storage status, and network details in real time.
 
 - Real-time game and core artwork display via ScreenScraper API
 - Automatic game and system detection from OSD, MiSTer Remote web app and Super Attract Mode (SAM)
+- Reliable game load detection using nanosecond-precision filesystem timestamps when loading cores and games through the on-screen menu (OSD)
 - Automatic Arcade subsystem detection
-- System monitor (CPU, memory, uptime)
-- Storage, network, and USB device panels
+- System monitor (CPU, memory, uptime, storage, network, and connected USB devices panels)
 - Touch-based navigation
 - Screenshot capture of the Tab5 display, downloadable over the local network via HTTP
 
@@ -22,8 +22,7 @@ information, storage status, and network details in real time.
 
 ## Software Requirements
 
-- Arduino IDE with M5Unified and M5GFX libraries
-- Python 3 on the MiSTer (included in MiSTer Linux)
+- Arduino IDE
 - ScreenScraper dev account (free) at screenscraper.fr
 
 ## Installation
@@ -31,20 +30,17 @@ information, storage status, and network details in real time.
 ### MiSTer Side
 
 1. Copy `mister/mister_status_server.py` to `/media/fat/Scripts/mister_monitor/`
-2. Copy `mister/detect_game_load.sh` to `/media/fat/Scripts/mister_monitor/`
-3. Copy `mister/start_monitor.sh` to `/media/fat/Scripts/mister_monitor/`
-4. Make the shell scripts executable:
+2. Copy `mister/start_monitor.sh` to `/media/fat/Scripts/mister_monitor/`
+3. Make the shell script executable:
 ```bash
-   chmod +x /media/fat/Scripts/mister_monitor/detect_game_load.sh
    chmod +x /media/fat/Scripts/mister_monitor/start_monitor.sh
 ```
-5. Add the following lines to `/media/fat/linux/user-startup.sh` to launch
-   both scripts automatically on boot:
+4. Add the following line to `/media/fat/linux/user-startup.sh` to launch
+   the server automatically on boot:
 ```bash
    python3 /media/fat/Scripts/mister_monitor/mister_status_server.py &
-   bash /media/fat/Scripts/mister_monitor/detect_game_load.sh &
 ```
-6. Enable log_file_entry in `/media/fat/MiSTer.ini` by setting:
+5. Enable log_file_entry in `/media/fat/MiSTer.ini` by setting:
 ```ini
 log_file_entry=1
 ```
@@ -53,21 +49,18 @@ currently loaded. Without it, core and game artwork lookups will not work.
 
 #### Screenshot HTTP Server
 
-The Tab5 can capture screenshots of its own display and make them available
-for download over the local network. The `mister_status_server.py` script
-includes a lightweight HTTP endpoint for this purpose.
-
-Once the server is running on the MiSTer, any screenshot saved by the Tab5
-to its microSD card is also accessible from a browser or `curl` on the same
-network. To download the latest screenshot, open:
+The Tab5 runs a lightweight HTTP server on port 8080 that captures its own display
+on demand and streams it as a standard 24-bit BMP file directly to the requester.
+To view or download the latest screenshot, open a browser on any device on the same
+network and navigate to:
 
 ```
 http://<Tab5-IP>:8080/screenshot.jpg
 ```
 
-Replace `<Tab5-IP>` with the IP address shown in the Tab5 Network Terminal
-panel. No extra software is required on the MiSTer side — the endpoint is
-served directly by `mister_status_server.py`.
+The root page at `http://<Tab5-IP>:8080/` also provides a live preview that auto-refreshes
+every 5 seconds and a download button. Replace `<Tab5-IP>` with the IP address shown in the
+Tab5 Network Terminal panel.
 
 ### Tab5 Side
 
@@ -100,8 +93,8 @@ below).
 1. Open `mister_monitor_Tab5/mister_monitor_Tab5.ino` in Arduino IDE.
 2. Install required libraries via **Tools → Manage Libraries…**:
    - M5Unified
-   - M5GFX
    - JPEGDEC
+   - ArduinoJson
 3. Select the M5Stack Tab5 board and upload.
 
 ### Tab5 SD Card Setup
@@ -127,7 +120,7 @@ ip=192.168.1.100          ; must be a static IP — see note below
 ss_user=YOUR_SS_USERNAME
 ss_pass=YOUR_SS_PASSWORD
 ss_dev_user=YOUR_SS_USERNAME
-ss_dev_pass=YOUR_SS_PASSWORD
+ss_dev_pass=YOUR_SS_DEV_PASSWORD
 ```
 
 Any key that is absent keeps the built-in default. The full list of available
@@ -157,7 +150,7 @@ keys in the `[images]` section of `config.ini`:
 | Key | Used for |
 |---|---|
 | `core_media_order` | System-level art (non-arcade cores) |
-| `arcade_subsystem_media_order` | Arcade subsystem art (CPS1, Neo Geo, Konami 573…) |
+| `arcade_subsystem_media_order` | Arcade subsystem art (CPS1, Neo Geo, Sega Classics…) |
 | `arcade_media_order` | Arcade game ROMs |
 | `game_media_order` | Non-arcade game ROMs (consoles, computers) |
 
@@ -171,12 +164,11 @@ download succeeds. Available tokens:
 | `wheel` | Plain/transparent background logo wheel |
 | `box3d` | 3-D rendered box art |
 | `box2d` | 2-D flat box scan |
-| `fanart` | Fan art / promotional artwork |
+| `fanart` | 
 | `marquee` | Arcade cabinet marquee header |
 | `screenshot` | In-game title screenshot |
 | `photo` | Real photograph of hardware or cartridge |
 | `illustration` | Promotional illustration or poster |
-| `mix` | MixRBV composite image |
 
 **Region order within each token** — the `region=` key in `[screenscraper]`
 controls which regional variant is tried first. The remaining regions follow
@@ -210,7 +202,7 @@ The repository includes a set of needed images in the
 
 - `frame01.jpg`, `frame02.jpg`, `logomister.jpg` and `menu.jpg` must be placed inside
   the `/cores/` folder.
-- `Arcade.jpg` must be placed inside `/cores/A/Arcade.jpg`.
+- `Arcade.jpg` and `Arcade_75.jpg` must be placed inside `/cores/A/`.
 
 Core and game images that are missing will be downloaded automatically from
 ScreenScraper the first time that core/game is detected.
@@ -245,12 +237,12 @@ with confirmation and instructions for its use. Enter your credentials in
 
 ## Architecture
 
-The system has three components that work together:
+The system has two components that work together:
 
 - **`mister_status_server.py`** — HTTP server on port 8080. Reads MiSTer state
-  files from `/tmp/` and exposes them as JSON/text endpoints.
-- **`detect_game_load.sh`** — Shell script that monitors filesystem events to
-  distinguish a real game load from cursor navigation in the OSD menu.
+  files from `/tmp/` and exposes them as JSON/text endpoints. Detects game loads
+  by comparing `FILESELECT` and `CURRENTPATH` filesystem timestamps at nanosecond
+  precision — no external helper scripts are needed.
 - **Tab5 sketch** — Polls the server every few seconds, downloads artwork from
   ScreenScraper, and renders the HUD interface.
 
@@ -270,6 +262,9 @@ The system has three components that work together:
 
 ## To Do
 
+- **MiSTer Downloader integration** — Implement a custom database for the MiSTer
+  Downloader ecosystem, allowing users to install and update the server-side
+  scripts directly through the standard MiSTer update workflow.
 - **M5Stack Core Basic support** — Port the interface to the original M5Stack
   Core Basic (ESP32, 320×240 display, physical buttons). The ScaledDisplay
   wrapper and layout system are designed to support multiple resolutions, so
