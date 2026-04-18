@@ -69,6 +69,23 @@ def _load_names_txt():
 
 NAMES_TXT = _load_names_txt()
 
+import threading
+
+# ---------------------------------------------------------------------------
+# Centralized state. All access must hold _state_lock.
+# ---------------------------------------------------------------------------
+_state_lock = threading.Lock()
+
+_state = {
+    'core':              'Menu',   # friendly core name
+    'system_name':       'Menu',   # friendly system name
+    'game':              '',       # game name (filename without extension)
+    'game_path':         '',       # absolute path to ROM file
+    'is_arcade':         False,    # True if current core is arcade
+    'rom_details':       None,     # last ScreenScraper result (dict or None)
+    'rom_details_stale': True,     # True = needs refresh on next request
+}
+
 class MiSTerStatusHandler(BaseHTTPRequestHandler):
     
     def __init__(self, *args, **kwargs):
