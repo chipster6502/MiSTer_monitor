@@ -44,6 +44,31 @@ global_has_valid_cache = {
     'rom_details': False
 }
 
+def _load_names_txt():
+    """
+    Reads /media/fat/names.txt and returns a dict {corename: friendly_name}.
+    File format: CORENAME:          Friendly Name
+    """
+    names = {}
+    try:
+        with open('/media/fat/names.txt', 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                line = line.strip()
+                if ':' in line and not line.startswith('#') and not line.startswith('|'):
+                    key, _, value = line.partition(':')
+                    key = key.strip()
+                    value = value.strip()
+                    if key and value:
+                        names[key] = value
+        print(f"✅ names.txt loaded: {len(names)} entries")
+    except FileNotFoundError:
+        print("ℹ️ names.txt not found, using CORE_NAME_MAPPING only")
+    except Exception as e:
+        print(f"⚠️ Error reading names.txt: {e}")
+    return names
+
+NAMES_TXT = _load_names_txt()
+
 class MiSTerStatusHandler(BaseHTTPRequestHandler):
     
     def __init__(self, *args, **kwargs):
@@ -300,6 +325,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             'mastersystem': 'Master System',
             'atari2600': 'Atari 2600',
         }
+        
+        self.CORE_NAME_MAPPING.update(NAMES_TXT)
         
         super().__init__(*args, **kwargs)
 
@@ -2898,8 +2925,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     try:
-        server = HTTPServer(('', 8080), MiSTerStatusHandler)
-        print("MiSTer Status Server OPTIMIZED v2 - Fixed Arcade Detection + Full Game Names on port 8080")
+        server = HTTPServer(('', 8081), MiSTerStatusHandler)
+        print("MiSTer Status Server v2 - inotify-based detection - port 8081")
         print("Available endpoints:")
         print("  /status/core         - Current core (SAM first, then optimized detection)")
         print("  /status/game         - Current game (with fixes applied)")  
