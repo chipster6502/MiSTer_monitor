@@ -290,6 +290,69 @@ def _get_mtime_ns(path):
     except:
         return 0
 
+def _sam_get_current():
+    """
+    Reads SAM_Games.log and returns (is_active, core, game, path).
+    Format: "HH:MM:SS - corename - /full/path/to/game"
+    Returns False tuple if log doesn't exist, is too old, or has no valid entry.
+    """
+    sam_log_path = '/tmp/SAM_Games.log'
+
+    if not os.path.exists(sam_log_path):
+        return False, '', '', ''
+
+    age = time.time() - os.path.getmtime(sam_log_path)
+    if age > 300:  # 5 minutes
+        print(f"🔍 SAM_Games.log too old: {age:.1f}s")
+        return False, '', '', ''
+
+    try:
+        with open(sam_log_path, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()
+    except Exception:
+        return False, '', '', ''
+
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(' - ')
+        if len(parts) >= 3:
+            sam_core_raw = parts[1].strip()
+            sam_path     = ' - '.join(parts[2:])
+            game_filename = sam_path.split('/')[-1]
+            sam_game      = os.path.splitext(game_filename)[0]
+            sam_core      = (CORE_NAME_MAPPING.get(sam_core_raw) or
+                             CORE_NAME_MAPPING_LOWER.get(sam_core_raw.lower()) or
+                             sam_core_raw)
+            print(f"✅ SAM detected — core='{sam_core}' game='{sam_game}'")
+            return True, sam_core, sam_game, sam_path
+
+    return False, '', '', ''
+
+
+def _sam_is_current():
+    """
+    Returns True if SAM_Games.log is active AND is the most recent detection
+    source (i.e. CORENAME/ACTIVEGAME are not significantly newer than the log).
+    """
+    sam_log_path = '/tmp/SAM_Games.log'
+    if not os.path.exists(sam_log_path):
+        return False
+
+    sam_ts = os.path.getmtime(sam_log_path)
+    grace  = 30  # seconds
+
+    for fname in ['CORENAME', 'ACTIVEGAME']:
+        try:
+            fts = os.path.getmtime(f'/tmp/{fname}')
+            if fts > sam_ts + grace:
+                print(f"🔄 {fname} newer than SAM by {fts - sam_ts:.1f}s — SAM not current")
+                return False
+        except:
+            pass
+
+    return True
 
 def _update_state():
     """
@@ -312,6 +375,21 @@ def _update_state():
         # User is browsing OSD — keep current state unchanged
         print("🔀 OSD navigation detected — state unchanged")
         return
+
+    # --- SAM detection (takes priority if active and current) ---
+    if _sam_is_current():
+        sam_active, sam_core, sam_game, sam_path = _sam_get_current()
+        if sam_active and sam_core:
+            print(f"🎮 SAM active — core='{sam_core}' game='{sam_game}'")
+            with _state_lock:
+                _state['core']              = sam_core
+                _state['system_name']       = sam_core
+                _state['game']              = sam_game
+                _state['game_path']         = sam_path
+                _state['is_arcade']         = False
+                _state['rom_details']       = None
+                _state['rom_details_stale'] = True
+            return
 
     # --- Menu ---
     if not corename or corename.upper() == 'MENU':
