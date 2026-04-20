@@ -440,12 +440,30 @@ def _update_state():
 
     else:
         # Non-arcade — prefer ACTIVEGAME, fall back to CURRENTPATH
-        if activegame and not activegame.lower().endswith('.ini'):
+        
+        # Detect "core loaded without game": CURRENTPATH contains the core name
+        # (no extension, no path separator) and ACTIVEGAME is from a different core
+        currentpath_is_core_name = (
+            currentpath and 
+            '/' not in currentpath and 
+            '.' not in currentpath
+        )
+        
+        if currentpath_is_core_name:
+            # Core loaded without a game — clear game state
+            game_name = ''
+            game_path = ''
+            print(f"🎮 Non-arcade: core={corename} loaded without game (CURRENTPATH='{currentpath}')")
+        elif activegame and not activegame.lower().endswith('.ini'):
             game_name = os.path.splitext(os.path.basename(activegame))[0]
             game_path = activegame
         elif currentpath and not currentpath.lower().endswith('.ini'):
             game_name = os.path.splitext(os.path.basename(currentpath))[0]
             game_path = currentpath
+        else:
+            game_name = ''
+            game_path = ''
+        
         print(f"🎮 Non-arcade: core={corename} game={game_name}")
 
     with _state_lock:
