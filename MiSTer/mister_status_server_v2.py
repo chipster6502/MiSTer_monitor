@@ -69,6 +69,174 @@ def _load_names_txt():
 
 NAMES_TXT = _load_names_txt()
 
+# ---------------------------------------------------------------------------
+# System constants — moved to module level for access by _update_state()
+# ---------------------------------------------------------------------------
+
+KNOWN_NON_ARCADE_SYSTEMS = [
+    'nes', 'nintendo', 'famicom', 'snes', 'super nintendo', 'n64', 'nintendo64',
+    'gameboy', 'gbc', 'gba', 'fds', 'sgb',
+    'genesis', 'megadrive', 'sega', 'mastersystem', 'sms', 'gamegear', 'gg',
+    'saturn', 'dreamcast', 'megacd', 'segacd', 's32x', 'sg1000',
+    'psx', 'playstation', 'ps1',
+    'atari2600', 'atari5200', 'atari7800', 'atarilynx', 'atari800', 'atarist',
+    'colecovision', 'intellivision', 'vectrex', 'odyssey2', 'channelf',
+    'astrocade', 'creativision', 'tutor', 'supervision', 'gamate', 'pokemonmini',
+    'msx', 'msx1', 'msx2', 'msx2plus', 'x68000', 'pc8801', 'sharp', 'x1', 'pc88', 'mz',
+    'turbografx16', 'pcengine', 'tgfx16', 'tgfx16cd', 'supergrafx',
+    'wonderswan', 'wonderswancolor', 'ngp', 'ngpc',
+    'gx4000', 'amstradcpc', 'amstrad', 'cpc6128', 'zx48', 'zxspectrum', 'zx81', 'zx80',
+    'oric', 'bbcmicro', 'acorn', 'electron', 'archimedes', 'enterprise', 'samcoupe',
+    'aquarius', 'microbee', 'atom', 'laser500',
+    'vic20', 'c64', 'c128', 'c16', 'plus4', 'pet2001', 'ti99', 'trs80', 'coco', 'dragon', 'mc10',
+    'trs80coco2', 'coleco', 'adam', 'apple2', 'applei', 'macplus',
+    'svi318', 'fmtowns', 'amiga', 'ao486', 'pcxt',
+    'amiga', 'amigacd32', 'ao486', 'atari2600', 'atari5200', 'atari7800',
+    'atarilynx', 'c64', 'fds', 'gb', 'gbc', 'gba', 'genesis', 'megacd',
+    'n64', 'neogeo', 's32x', 'saturn', 'sms', 'snes', 'tgfx16', 'tgfx16cd',
+    'psx', 'x68k',
+    'APOGEE', 'ARCHIE', 'AY-3-8500', 'AcornElectron', 'Adam', 'Altair8800',
+    'Amstrad PCW', 'BBCMicro', 'BK0011M', 'Casio_PV-2000', 'COCO3', 'CoCo2',
+    'EDSAC', 'EpochGalaxyII', 'Galaksija', 'Interact', 'Laser', 'Lynx48',
+    'MultiComp', 'ORAO', 'Ondra_SPO186', 'Oric', 'PMD85', 'RX78', 'Sord M5',
+    'SuperVision', 'TI-99_4A', 'TRS-80', 'TSConf', 'TatungEinstein',
+    'TomyScramble', 'UK101', 'VECTOR06', 'Homelab', 'BBCBridgeCompanion',
+    'PocketChallengeV2', 'MyVision', 'SuperVision8000', 'VT52', 'CreatiVision',
+    'Atari2600', 'ATARI5200', 'ATARI7800', 'ATARI800', 'AtariST',
+    'WonderSwan', 'WonderSwanColor', 'Saturn', 'FDS', 'SGB',
+    'VECTREX', 'Coleco', 'Intellivision', 'ODYSSEY2', 'ChannelF',
+    'Astrocade', 'Gamate', 'PokemonMini', 'SG1000', 'SG-1000', 'TomyTutor',
+    'SCV', 'SuperGrafx', 'PDP1',
+    'C64', 'C16', 'C128', 'VIC20', 'Amiga', 'AO486', 'PCXT', 'Amstrad',
+    'Spectrum', 'ZX81', 'ZXNext', 'zx48', 'MSX', 'MSX1', 'X68000',
+    'Apple-II', 'APPLE-I', 'MACPLUS', 'SAM', 'SAMCOUPE',
+]
+
+CORE_NAME_MAPPING = {
+    'NES': 'Nintendo Entertainment System',
+    'SNES': 'Super Nintendo Entertainment System',
+    'N64': 'Nintendo 64',
+    'FDS': 'Family Computer Disk System',
+    'GB': 'Nintendo Game Boy',
+    'GBC': 'Game Boy Color',
+    'GBA': 'Game Boy Advance',
+    'GBA2P': 'Game Boy Advance',
+    'SGB': 'Super Game Boy',
+    'GameNWatch': 'Game & Watch',
+    'GAMEBOY2P': 'Game Boy Color',
+    'Genesis': 'Sega Genesis/Mega Drive',
+    'MegaDrive': 'Megadrive',
+    'SMS': 'Master System',
+    'GG': 'Sega Game Gear',
+    'Saturn': 'Sega Saturn',
+    'S32X': 'Megadrive 32X',
+    'MegaCD': 'Mega-CD',
+    'SegaCD': 'Sega CD/Mega CD',
+    'SG1000': 'SG-1000',
+    'GameGear': 'Game Gear',
+    'PSX': 'PlayStation',
+    'PlayStation': 'Sony PlayStation',
+    'TurboGrafx16': 'TurboGrafx-16/PC Engine',
+    'PCEngine': 'TurboGrafx-16/PC Engine',
+    'TGFX16': 'PC Engine',
+    'TGFX16-CD': 'PC Engine CD-Rom',
+    'SuperGrafx': 'PC Engine SuperGrafx',
+    'Atari2600': 'Atari 2600',
+    'ATARI5200': 'Atari 5200',
+    'ATARI7800': 'Atari 7800',
+    'AtariLynx': 'Lynx',
+    'ATARI800': 'Atari 8bit',
+    'AtariST': 'Atari ST',
+    'MAME': 'Multiple Arcade Machine Emulator',
+    'mame': 'Multiple Arcade Machine Emulator',
+    'Arcade': 'Multiple Arcade Machine Emulator',
+    'PET2001': 'PET',
+    'C64': 'Commodore 64',
+    'C128': 'Commodore 128',
+    'VIC20': 'Vic-20',
+    'Minimig': 'Commodore Amiga',
+    'AO486': 'PC Dos',
+    'PCXT': 'PC Dos',
+    'Jupiter': 'Jupiter Ace',
+    'PC8801': 'NEC PC-8801',
+    'BK0011M': 'BK',
+    'eg2000': 'EG2000 Colour Genie',
+    'lynx48': 'Camputers Lynx',
+    'AQUARIUS': 'Mattel Aquarius',
+    'sharpmz': 'SHARP MZ Series',
+    'QL': 'Sinclair QL',
+    'SPMX': 'Specialist MX',
+    'SVI328': 'Spectravideo SVI-328',
+    'AliceMC10': 'Alice 4K / Tandy MC-10',
+    'MSX': 'MSX',
+    'MSX1': 'MSX',
+    'MSX2': 'MSX2 Computer',
+    'MSX2Plus': 'MSX2+ Computer',
+    'Spectrum': 'ZX Spectrum',
+    'zx48': 'ZX Spectrum',
+    'ZX81': 'ZX81',
+    'ZXNext': 'ZX Spectrum Next',
+    'Amstrad': 'CPC',
+    'AmstradCPC': 'Amstrad CPC',
+    'GX4000': 'Amstrad GX4000',
+    'Apple-II': 'Apple II',
+    'APPLE-I': 'Apple I',
+    'MACPLUS': 'Mac OS',
+    'X68000': 'Sharp X68000',
+    'Coleco': 'Colecovision',
+    'Intellivision': 'Intellivision',
+    'VECTREX': 'Vectrex',
+    'ODYSSEY2': 'Videopac G7000',
+    'ChannelF': 'Channel F',
+    'CreatiVision': 'CreatiVision',
+    'SuperVision': 'Watara Supervision',
+    'WonderSwan': 'WonderSwan',
+    'WonderSwanColor': 'WonderSwan Color',
+    'NGP': 'Neo Geo Pocket',
+    'NGPC': 'Neo Geo Pocket Color',
+    'PokemonMini': 'Pokemon Mini',
+    'Gamate': 'Bit Corporation Gamate',
+    'AVision': 'Adventure Vision',
+    'Arcadia': 'Arcadia 2001',
+    'CD-i': 'CD-i',
+    'MegaDuck': 'Mega Duck',
+    'NEOGEO': 'Neo-Geo',
+    'NeoGeo-CD': 'Neo-Geo CD',
+    'NeoGeoPocket': 'Neo-Geo Pocket',
+    'Casio_PV-1000': 'PV-1000',
+    'VC4000': 'VC 4000',
+    'PocketChallenge': 'Pocket Challenge V2',
+    'BBCMicro': 'BBC Micro',
+    'AcornElectron': 'Electron',
+    'ARCHIE': 'Archimedes',
+    'AcornAtom': 'Atom',
+    'TI-99_4A': 'TI-99/4A',
+    'TRS-80': 'TRS-80 Color Computer',
+    'COCO3': 'TRS-80 Color Computer 3',
+    'CoCo2': 'TRS-80 Color Computer 2',
+    'SAM': 'SAM Coupé',
+    'SAMCOUPE': 'MGT SAM Coupé',
+    'Oric': 'Oric 1 / Atmos',
+    'nes': 'Nintendo Entertainment System',
+    'snes': 'Super Nintendo Entertainment System',
+    'genesis': 'Sega Genesis/Mega Drive',
+    'megadrive': 'Sega Genesis/Mega Drive',
+    'gameboy': 'Game Boy',
+    'gameboycolor': 'Game Boy Color',
+    'gameboyadvance': 'Game Boy Advance',
+    'nintendo64': 'Nintendo 64',
+    'supernintendo': 'Super Nintendo',
+    'playstation': 'PlayStation',
+    'commodore64': 'Commodore 64',
+    'pcengine': 'PC Engine',
+    'turbografx16': 'TurboGrafx-16',
+    'mastersystem': 'Master System',
+    'atari2600': 'Atari 2600',
+}
+
+# names.txt overrides hardcoded mapping
+CORE_NAME_MAPPING.update(NAMES_TXT)
+
 import threading
 
 # ---------------------------------------------------------------------------
@@ -97,6 +265,113 @@ _WATCHED_FILES = [
     '/tmp/FULLPATH',
 ]
 
+def _is_known_non_arcade(corename):
+    """Returns True if corename belongs to a known non-arcade system."""
+    return (corename.lower() in [s.lower() for s in KNOWN_NON_ARCADE_SYSTEMS])
+
+
+def _read_file(path):
+    """Reads a /tmp/ file and returns its content stripped, or '' on error."""
+    try:
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            return f.read().strip()
+    except:
+        return ''
+
+
+def _get_mtime_ns(path):
+    """Returns mtime in nanoseconds, or 0 on error."""
+    try:
+        return os.stat(path).st_mtime_ns
+    except:
+        return 0
+
+
+def _update_state():
+    """
+    Reads /tmp/ files and updates _state.
+    Called by the watcher thread on every relevant filesystem event.
+    """
+    corename    = _read_file('/tmp/CORENAME')
+    activegame  = _read_file('/tmp/ACTIVEGAME')
+    currentpath = _read_file('/tmp/CURRENTPATH')
+    fullpath    = _read_file('/tmp/FULLPATH')
+
+    # --- Navigation vs real load ---
+    # MiSTer writes FILESELECT and CURRENTPATH at the exact same nanosecond
+    # during OSD navigation. After a real load, only FILESELECT is updated.
+    fs_ns  = _get_mtime_ns('/tmp/FILESELECT')
+    cp_ns  = _get_mtime_ns('/tmp/CURRENTPATH')
+    is_navigation = (fs_ns == cp_ns)
+
+    if is_navigation:
+        # User is browsing OSD — keep current state unchanged
+        print("🔀 OSD navigation detected — state unchanged")
+        return
+
+    # --- Menu ---
+    if not corename or corename.upper() == 'MENU':
+        print("📋 MENU detected")
+        with _state_lock:
+            _state['core']              = 'Menu'
+            _state['system_name']       = 'Menu'
+            _state['game']              = ''
+            _state['game_path']         = ''
+            _state['is_arcade']         = False
+            _state['rom_details']       = None
+            _state['rom_details_stale'] = True
+        return
+
+    # --- Resolve friendly core name ---
+    friendly_name = CORE_NAME_MAPPING.get(corename, corename)
+
+    # --- Arcade detection ---
+    ARCADE_FRESHNESS = 30  # seconds
+    corename_ts   = _get_mtime_ns('/tmp/CORENAME') / 1e9
+    activegame_ts = _get_mtime_ns('/tmp/ACTIVEGAME') / 1e9
+
+    activegame_arcade_fresh = (
+        activegame and
+        '/_Arcade/' in activegame and
+        activegame_ts >= corename_ts - ARCADE_FRESHNESS
+    )
+
+    is_arcade = False
+    game_name = ''
+    game_path = ''
+
+    if activegame_arcade_fresh:
+        # Arcade launched via Remote — use ACTIVEGAME
+        is_arcade = True
+        game_name = os.path.splitext(os.path.basename(activegame))[0]
+        game_path = activegame
+        print(f"🕹️ Arcade (Remote launch): {game_name}")
+
+    elif fullpath and 'arcade' in fullpath.lower() and not _is_known_non_arcade(corename):
+        # Arcade launched via OSD
+        is_arcade = True
+        game_name = os.path.splitext(os.path.basename(currentpath))[0]
+        game_path = currentpath
+        print(f"🕹️ Arcade (OSD launch): {game_name}")
+
+    else:
+        # Non-arcade — ignore .ini files
+        if activegame and not activegame.lower().endswith('.ini'):
+            game_name = os.path.splitext(os.path.basename(activegame))[0]
+            game_path = activegame
+        print(f"🎮 Non-arcade: core={corename} game={game_name}")
+
+    with _state_lock:
+        _state['core']        = 'Arcade' if is_arcade else friendly_name
+        _state['system_name'] = 'Arcade' if is_arcade else friendly_name
+        _state['game']              = game_name
+        _state['game_path']         = game_path
+        _state['is_arcade']         = is_arcade
+        _state['rom_details']       = None
+        _state['rom_details_stale'] = True
+
+    print(f"✅ State updated: core='{_state['core']}' game='{game_name}' arcade={is_arcade}")
+
 def _watcher_thread():
     """
     Runs inotifywait in monitor mode and reacts to filesystem events.
@@ -116,8 +391,12 @@ def _watcher_thread():
                 line = line.strip()
                 if not line:
                     continue
+                # Skip FILESELECT-only events — they don't carry new game info
+                if '/tmp/FILESELECT' in line and '/tmp/CORENAME' not in line:
+                    print(f"📂 inotify event (skipped): {line}")
+                    continue
                 print(f"📂 inotify event: {line}")
-                # Step 4 will call _update_state() here
+                _update_state()
             proc.wait()
         except Exception as e:
             print(f"⚠️ Watcher thread error: {e}")
@@ -156,239 +435,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         self.cached_rom_details = global_cache_state['rom_details']
         self.is_first_call = global_is_first_call
         self.has_valid_cache = global_has_valid_cache
-        
-        # Lista completa de sistemas conocidos no-arcade
-        self.KNOWN_NON_ARCADE_SYSTEMS = [
-            # === Consolas Nintendo ===
-            'nes', 'nintendo', 'famicom', 'snes', 'super nintendo', 'n64', 'nintendo64',
-            'gameboy', 'gbc', 'gba', 'fds', 'sgb',
-            
-            # === Consolas Sega ===
-            'genesis', 'megadrive', 'sega', 'mastersystem', 'sms', 'gamegear', 'gg',
-            'saturn', 'dreamcast', 'megacd', 'segacd', 's32x', 'sg1000',
-            
-            # === Consolas Sony/Otras ===
-            'psx', 'playstation', 'ps1',
-            
-            # === Consolas Atari ===
-            'atari2600', 'atari5200', 'atari7800', 'atarilynx', 'atari800', 'atarist',
-            
-            # === Classic consoles ===
-            'colecovision', 'intellivision', 'vectrex', 'odyssey2', 'channelf', 
-            'astrocade', 'creativision', 'tutor', 'supervision', 'gamate', 'pokemonmini',
-            
-            # === MSX y ordenadores japoneses ===
-            'msx', 'msx1', 'msx2', 'msx2plus', 'x68000', 'pc8801', 'sharp', 'x1', 'pc88', 'mz',
-            
-            # === PC Engine / TurboGrafx ===
-            'turbografx16', 'pcengine', 'tgfx16', 'tgfx16cd', 'supergrafx',
-            
-            # === Handhelds ===
-            'wonderswan', 'wonderswancolor', 'ngp', 'ngpc', 'gamegear',
-            
-            # === Ordenadores europeos ===
-            'gx4000', 'amstradcpc', 'amstrad', 'cpc6128', 'zx48', 'zxspectrum', 'zx81', 'zx80',
-            'oric', 'bbcmicro', 'acorn', 'electron', 'archimedes', 'enterprise', 'samcoupe',
-            'aquarius', 'microbee', 'atom', 'laser500',
-            
-            # === Ordenadores americanos ===
-            'vic20', 'c64', 'c128', 'c16', 'plus4', 'pet2001', 'ti99', 'trs80', 'coco', 'dragon', 'mc10',
-            'trs80coco2', 'coleco', 'adam', 'apple2', 'applei', 'macplus',
-            
-            # === Sistemas diversos ===
-            'svi318', 'creativision', 'tutor', 'laser500', 'fmtowns', 'amiga', 'ao486', 'pcxt',
-            
-            # === Names from SAM (lowercase) ===
-            'amiga', 'amigacd32', 'ao486', 'atari2600', 'atari5200', 'atari7800', 
-            'atarilynx', 'c64', 'fds', 'gb', 'gbc', 'gba', 'genesis', 'megacd', 
-            'n64', 'neogeo', 's32x', 'saturn', 'sms', 'snes', 'tgfx16', 'tgfx16cd', 
-            'psx', 'x68k',
-            
-            # === Sistemas adicionales ===
-            'APOGEE', 'ARCHIE', 'AY-3-8500', 
-            'AcornElectron', 'Adam', 'Altair8800', 'Amstrad PCW', 
-            'BBCMicro', 'BK0011M', 'Casio_PV-2000', 'COCO3', 'CoCo2', 'EDSAC', 
-            'EpochGalaxyII', 'Galaksija', 'Interact', 
-            'Laser', 'Lynx48', 'MultiComp', 'ORAO', 'Ondra_SPO186', 'Oric', 
-            'PMD85', 'RX78', 
-            'Sord M5', 'SuperVision', 'TI-99_4A', 'TRS-80', 'TSConf', 
-            'TatungEinstein', 'TomyScramble', 'UK101', 'VECTOR06', 
-            'Homelab', 'BBCBridgeCompanion', 'PocketChallengeV2', 'MyVision', 
-            'SuperVision8000', 'VT52', 'CreatiVision',
-            
-            # === Consolas menos comunes completas ===
-            'Atari2600', 'ATARI5200', 'ATARI7800', 'ATARI800', 'AtariST', 
-            'WonderSwan', 'WonderSwanColor', 'Saturn', 'FDS', 'SGB', 
-            'VECTREX', 'Coleco', 'Intellivision', 'ODYSSEY2', 'ChannelF', 
-            'Astrocade', 'Gamate', 'PokemonMini', 'SG1000', 
-            'SG-1000', 'TomyTutor', 'SCV', 'SuperGrafx', 'PDP1', 
-
-            # === Ordenadores completos ===
-            'C64', 'C16', 'C128', 'VIC20', 'Amiga', 'AO486', 'PCXT', 'Amstrad', 
-            'Spectrum', 'ZX81', 'ZXNext', 'zx48', 'MSX', 'MSX1', 'X68000', 
-            'Apple-II', 'APPLE-I', 'MACPLUS', 'SAM', 'SAMCOUPE',
-        ]
-        
-        # Mapeo completo de nombres de cores
-        self.CORE_NAME_MAPPING = {
-            # === Nintendo ===
-            'NES': 'Nintendo Entertainment System',
-            'SNES': 'Super Nintendo Entertainment System', 
-            'N64': 'Nintendo 64',
-            'FDS': 'Family Computer Disk System',
-            'GB': 'Nintendo Game Boy',
-            'GBC': 'Game Boy Color',
-            'GBA': 'Game Boy Advance',
-            'GBA2P': 'Game Boy Advance',
-            'SGB': 'Super Game Boy',
-            'GameNWatch' : 'Game & Watch',
-            'GAMEBOY2P' : 'Game Boy Color',
-            
-            # === Sega ===
-            'Genesis': 'Sega Genesis/Mega Drive',
-            'MegaDrive': 'Megadrive',
-            'SMS': 'Master System',
-            'GG': 'Sega Game Gear',
-            'Saturn': 'Sega Saturn',
-            'S32X': 'Megadrive 32X',
-            'MegaCD': 'Mega-CD',
-            'SegaCD': 'Sega CD/Mega CD',
-            'SG1000': 'SG-1000',
-            'GameGear' : 'Game Gear',
-            
-            # === Sony ===
-            'PSX': 'PlayStation',
-            'PlayStation': 'Sony PlayStation',
-            
-            # === PC Engine / TurboGrafx ===
-            'TurboGrafx16': 'TurboGrafx-16/PC Engine',
-            'PCEngine': 'TurboGrafx-16/PC Engine',
-            'TGFX16': 'PC Engine',
-            'TGFX16-CD': 'PC Engine CD-Rom',
-            'SuperGrafx': 'PC Engine SuperGrafx',
-            
-            # === Atari ===
-            'Atari2600': 'Atari 2600',
-            'ATARI5200': 'Atari 5200',
-            'ATARI7800': 'Atari 7800',
-            'AtariLynx': 'Lynx',
-            'ATARI800': 'Atari 8bit',
-            'AtariST': 'Atari ST',
-            
-            # === Arcade ===
-            'MAME': 'Multiple Arcade Machine Emulator',
-            'mame': 'Multiple Arcade Machine Emulator',
-            'Arcade': 'Multiple Arcade Machine Emulator',
-            
-            # === Ordenadores ===
-            'PET2001' : 'PET',
-            'C64': 'Commodore 64',
-            'C128': 'Commodore 128',
-            'VIC20': 'Vic-20',
-            'Minimig': 'Commodore Amiga',
-            'AO486': 'PC Dos',
-            'PCXT': 'PC Dos',
-            'Jupiter' : 'Jupiter Ace',
-            'PC8801' : 'NEC PC-8801',
-            'BK0011M' : "BK",
-            'eg2000' : 'EG2000 Colour Genie',
-            'lynx48' : 'Camputers Lynx',
-            'AQUARIUS' : "Mattel Aquarius",
-            'sharpmz' : 'SHARP MZ Series',
-            'QL' : 'Sinclair QL',
-            'SPMX' : 'Specialist MX',
-            'SVI328' : 'Spectravideo SVI-328',
-            'AliceMC10' : 'Alice 4K / Tandy MC-10',            
-            
-            # === MSX ===
-            'MSX': 'MSX',
-            'MSX1': 'MSX',
-            'MSX2': 'MSX2 Computer',
-            'MSX2Plus': 'MSX2+ Computer',
-            
-            # === Spectrum ===
-            'Spectrum': 'ZX Spectrum',
-            'zx48': 'ZX Spectrum',
-            'ZX81': 'ZX81',
-            'ZXNext': 'ZX Spectrum Next',
-            
-            # === Amstrad ===
-            'Amstrad': 'CPC',
-            'AmstradCPC': 'Amstrad CPC',
-            'GX4000': 'Amstrad GX4000',
-            
-            # === Apple ===
-            'Apple-II': 'Apple II',
-            'APPLE-I': 'Apple I',
-            'MACPLUS': 'Mac OS',
-            
-            # === Diversos ===
-            'X68000': 'Sharp X68000',
-            'Coleco': 'Colecovision',
-            'Intellivision': 'Intellivision',
-            'VECTREX': 'Vectrex',
-            'ODYSSEY2': 'Videopac G7000',
-            'ChannelF': 'Channel F',
-            'CreatiVision': 'CreatiVision',
-            'SuperVision': 'Watara Supervision',
-            'WonderSwan': 'WonderSwan',
-            'WonderSwanColor': 'WonderSwan Color',
-            'NGP': 'Neo Geo Pocket',
-            'NGPC': 'Neo Geo Pocket Color',
-            'PokemonMini': 'Pokemon Mini',
-            'Gamate': 'Bit Corporation Gamate',
-            'AVision' : 'Adventure Vision',
-            'Arcadia' : 'Arcadia 2001',
-            'CD-i' : 'CD-i',
-            'MegaDuck' : 'Mega Duck',
-            'NEOGEO' : 'Neo-Geo',
-            'NeoGeo-CD' : 'Neo-Geo CD',
-            'NeoGeoPocket' : 'Neo-Geo Pocket',
-            'Casio_PV-1000' : 'PV-1000',
-            'VC4000' : 'VC 4000',
-            'PocketChallenge' : 'Pocket Challenge V2',
-            
-            # === BBC/Acorn ===
-            'BBCMicro': 'BBC Micro',
-            'AcornElectron': 'Electron',
-            'ARCHIE': 'Archimedes',
-            'AcornAtom' : 'Atom',
-            
-            # === Texas Instruments ===
-            'TI-99_4A': 'TI-99/4A',
-            
-            # === Tandy/Radio Shack ===
-            'TRS-80': 'TRS-80 Color Computer',
-            'COCO3': 'TRS-80 Color Computer 3',
-            'CoCo2': 'TRS-80 Color Computer 2',
-            
-            # === SAM specific ===
-            'SAM': 'SAM Coupé',
-            'SAMCOUPE': 'MGT SAM Coupé',
-            
-            # === Oric ===
-            'Oric': 'Oric 1 / Atmos',
-            
-            # === Special lowercase mappings ===
-            'nes': 'Nintendo Entertainment System',
-            'snes': 'Super Nintendo Entertainment System',
-            'genesis': 'Sega Genesis/Mega Drive',
-            'megadrive': 'Sega Genesis/Mega Drive',
-            'gameboy': 'Game Boy',
-            'gameboycolor': 'Game Boy Color',
-            'gameboyadvance': 'Game Boy Advance',
-            'nintendo64': 'Nintendo 64',
-            'supernintendo': 'Super Nintendo',
-            'playstation': 'PlayStation',
-            'commodore64': 'Commodore 64',
-            'pcengine': 'PC Engine',
-            'turbografx16': 'TurboGrafx-16',
-            'mastersystem': 'Master System',
-            'atari2600': 'Atari 2600',
-        }
-        
-        self.CORE_NAME_MAPPING.update(NAMES_TXT)
-        
+           
         super().__init__(*args, **kwargs)
 
     def _is_ini_file(self, file_path):
@@ -1341,37 +1388,11 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
     def normalize_core_name(self, core_name):
         """
-        Normaliza nombres de cores usando el mapeo existente
+        Normalizes core names using the module-level CORE_NAME_MAPPING.
         """
         if not core_name:
             return "Menu"
-        
-        # Buscar en el mapeo
-        if core_name in self.CORE_NAME_MAPPING:
-            return self.CORE_NAME_MAPPING[core_name]
-        
-        # Casos especiales adicionales
-        core_lower = core_name.lower()
-        special_mappings = {
-            'mame': 'Arcade',
-            'hbmame': 'Arcade',
-            'megadrive': 'Megadrive',
-            'mastersystem': 'Master System',
-            'gameboy': 'Game Boy',
-            'gameboycolor': 'Game Boy Color',
-            'gameboyadvance': 'Game Boy Advance',
-            'nintendo64': 'Nintendo 64',
-            'supernintendo': 'Super Nintendo',
-            'playstation': 'PlayStation',
-            'commodore64': 'Commodore 64',
-            'pcengine': 'PC Engine',
-        }
-        
-        if core_lower in special_mappings:
-            return special_mappings[core_lower]
-        
-        # If not in mapping, return as-is
-        return core_name
+        return CORE_NAME_MAPPING.get(core_name, core_name)
 
     def extract_game_name(self, game_path, preserve_parentheses=True):
         """
