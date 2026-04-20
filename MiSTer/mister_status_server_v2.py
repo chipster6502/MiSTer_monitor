@@ -328,6 +328,24 @@ def _sam_is_current():
 
     return True
 
+_KNOWN_ROM_EXTS = {
+    '.zip', '.mra', '.mgl', '.rom', '.bin', '.iso', '.chd',
+    '.nes', '.sfc', '.smd', '.md', '.gba', '.gb', '.gbc',
+    '.a78', '.a52', '.a26', '.n64', '.z64', '.pce', '.cue',
+    '.lnx', '.ngp', '.ngc', '.ws', '.wsc', '.sg', '.sms',
+    '.gg', '.col', '.vec', '.int', '.psx', '.img',
+}
+
+def _game_name_from_path(path):
+    """
+    Extracts game name from a file path.
+    Only strips the extension if it is a known ROM extension.
+    Avoids stripping version suffixes like '.000' or '.001'.
+    """
+    base = os.path.basename(path)
+    ext  = os.path.splitext(base)[1].lower()
+    return os.path.splitext(base)[0] if ext in _KNOWN_ROM_EXTS else base
+
 def _update_state():
     """
     Reads /tmp/ files and updates _state.
@@ -401,14 +419,14 @@ def _update_state():
     if activegame_arcade_fresh:
         # Arcade launched via Remote — use ACTIVEGAME
         is_arcade = True
-        game_name = os.path.splitext(os.path.basename(activegame))[0]
+        game_name = _game_name_from_path(activegame)
         game_path = activegame
         print(f"🕹️ Arcade (Remote launch): {game_name}")
 
     elif fullpath and 'arcade' in fullpath.lower() and not _is_known_non_arcade(corename):
         # Arcade launched via OSD
         is_arcade = True
-        game_name = os.path.splitext(os.path.basename(currentpath))[0]
+        game_name = _game_name_from_path(currentpath)
         game_path = currentpath
         print(f"🕹️ Arcade (OSD launch): {game_name}")
 
@@ -429,10 +447,10 @@ def _update_state():
             game_path = ''
             print(f"🎮 Non-arcade: core={corename} loaded without game (CURRENTPATH='{currentpath}')")
         elif activegame and not activegame.lower().endswith('.ini'):
-            game_name = os.path.splitext(os.path.basename(activegame))[0]
+            game_name = _game_name_from_path(activegame)
             game_path = activegame
         elif currentpath and not currentpath.lower().endswith('.ini'):
-            game_name = os.path.splitext(os.path.basename(currentpath))[0]
+            game_name = _game_name_from_path(currentpath)
             game_path = currentpath
         else:
             game_name = ''
@@ -1174,102 +1192,44 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
     
     def get_rom_details(self):
         """
-        ENHANCED METHOD: Get complete ROM details with improved path detection logic
-        New logic: Check /status/game first, then SAM_Games.log, then CORENAME-based detection
-        Includes: filename, size, CRC32, MD5, SHA1, path
-        ADDED: First call validation for CURRENTPATH-only changes
+        Returns ROM details (CRC, hashes, path).
+        Uses _state['rom_details'] as cache — refreshed when rom_details_stale is True.
         """
-        try:
-            print(f"[{time.strftime('%H:%M:%S')}] Getting ROM details with enhanced caching...")
-            
-            # Apply new cache logic
-            use_cache, cache_reason, *default_value = self._handle_cache_logic(
-                'rom_details', self.cached_rom_details, self.has_valid_cache['rom_details']
-            )
-            
-            if use_cache:
-                if cache_reason == "first_call_default":
-                    result = default_value[0] if default_value else {
-                        "filename": "", "size": 0, "crc32": "", "md5": "", "sha1": "", "path": ""
-                    }
-                    self._update_global_cache('rom_details', result)
-                    return result
-                elif cache_reason == "first_call_currentpath_only":
-                    # ✅ NEW: Handle first call with only CURRENTPATH changed
-                    result = default_value[0] if default_value else {
-                        "filename": "", "size": 0, "crc32": "", "md5": "", "sha1": "", "path": "",
-                        "available": False, "error": "Menu navigation (first call)", 
-                        "detection_method": "first_call_currentpath_only", "timestamp": int(time.time())
-                    }
-                    print(f"🎯 First call + only CURRENTPATH changed since start - returning default ROM details")
-                    self._update_global_cache('rom_details', result)
-                    return result
-                elif cache_reason == "cache_used":
-                    return self.cached_rom_details
-            
-            # Mark that this is no longer first call
-            self.is_first_call['rom_details'] = False
-            
-            print("📄 Processing ROM details detection due to significant changes...")
-            
-            # Get ROM path using enhanced detection logic
-            rom_path = self._get_enhanced_rom_path()
-            
-            if not rom_path:
-                print("No ROM path found with enhanced detection")
-                result = {
-                    "filename": "",
-                    "size": 0,
-                    "crc32": "",
-                    "md5": "",
-                    "sha1": "",
-                    "path": "",
-                    "available": False,
-                    "error": "No active ROM found",
-                    "detection_method": "none",
-                    "timestamp": int(time.time())
-                }
-                self._update_global_cache('rom_details', result)
-                return result
-            
-            print(f"Enhanced detection found ROM path: {rom_path}")
-            
-            # Check if the ROM is inside a ZIP file
-            is_zip, zip_path, internal_path = self.is_zip_path(rom_path)
-            
-            if is_zip:
-                print(f"ROM is inside ZIP: {zip_path} -> {internal_path}")
-                result = self.get_rom_details_from_zip(rom_path, zip_path, internal_path)
-            else:
-                print(f"ROM is regular file: {rom_path}")
-                result = self.get_rom_details_from_file(rom_path)
-            
-            # Add detection method info to result
-            result["detection_method"] = getattr(self, '_last_detection_method', 'unknown')
-            
-            # Update cache
-            self._update_global_cache('rom_details', result)
-            return result
-                    
-        except Exception as e:
-            error_msg = f"Unexpected error in get_rom_details: {str(e)}"
-            print(f"CRITICAL ERROR: {error_msg}")
-            import traceback
-            traceback.print_exc()
+        print(f"[{time.strftime('%H:%M:%S')}] Getting ROM details...")
+
+        with _state_lock:
+            stale   = _state['rom_details_stale']
+            cached  = _state['rom_details']
+
+        if not stale and cached is not None:
+            print("📋 Using cached ROM details")
+            return cached
+
+        print("📄 Computing ROM details...")
+
+        rom_path = self._get_enhanced_rom_path()
+
+        if not rom_path:
             result = {
-                "filename": "",
-                "size": 0,
-                "crc32": "",
-                "md5": "",
-                "sha1": "",
-                "path": "",
-                "available": False,
-                "error": error_msg,
-                "detection_method": "error",
+                "filename": "", "size": 0, "crc32": "", "md5": "", "sha1": "",
+                "path": "", "available": False,
+                "error": "No active ROM found",
+                "detection_method": "none",
                 "timestamp": int(time.time())
             }
-            self._update_global_cache('rom_details', result)
-            return result
+        else:
+            is_zip, zip_path, internal_path = self.is_zip_path(rom_path)
+            if is_zip:
+                result = self.get_rom_details_from_zip(rom_path, zip_path, internal_path)
+            else:
+                result = self.get_rom_details_from_file(rom_path)
+            result["detection_method"] = getattr(self, '_last_detection_method', 'unknown')
+
+        with _state_lock:
+            _state['rom_details']       = result
+            _state['rom_details_stale'] = False
+
+        return result
     
     def get_rom_details_forced(self):
         """
@@ -1309,7 +1269,9 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
             result["detection_method"] = "forced"
             # Update cache so subsequent normal calls benefit from this result
-            self._update_global_cache('rom_details', result)
+            with _state_lock:
+                _state['rom_details']       = result
+                _state['rom_details_stale'] = False
             return result
 
         except Exception as e:
@@ -1544,8 +1506,21 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         except:
             pass
 
-        currentpath, currentpath_timestamp, fullpath, path_source = \
-            self._read_stable_path_sources()
+        currentpath = ''
+        currentpath_timestamp = 0
+        fullpath = ''
+        path_source = 'CURRENTPATH'
+        try:
+            with open('/tmp/CURRENTPATH', 'r') as f:
+                currentpath = f.read().strip()
+            currentpath_timestamp = os.path.getmtime('/tmp/CURRENTPATH')
+        except:
+            pass
+        try:
+            with open('/tmp/FULLPATH', 'r') as f:
+                fullpath = f.read().strip()
+        except:
+            pass
 
         print(f"📄 ACTIVEGAME:       '{activegame}' (ts: {activegame_timestamp})")
         print(f"📄 {path_source}: '{currentpath}' (ts: {currentpath_timestamp})")
