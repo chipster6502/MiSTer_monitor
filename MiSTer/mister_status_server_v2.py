@@ -117,6 +117,7 @@ CORE_NAME_MAPPING = {
     'SNES': 'Super Nintendo Entertainment System',
     'N64': 'Nintendo 64',
     'FDS': 'Family Computer Disk System',
+    'GAMEBOY': 'Nintendo Game Boy',
     'GB': 'Nintendo Game Boy',
     'GBC': 'Game Boy Color',
     'GBA': 'Game Boy Advance',
@@ -237,6 +238,9 @@ CORE_NAME_MAPPING = {
 # names.txt overrides hardcoded mapping
 CORE_NAME_MAPPING.update(NAMES_TXT)
 
+# Case-insensitive lookup dict — keys are lowercased
+CORE_NAME_MAPPING_LOWER = {k.lower(): v for k, v in CORE_NAME_MAPPING.items()}
+
 import threading
 
 # ---------------------------------------------------------------------------
@@ -323,7 +327,9 @@ def _update_state():
         return
 
     # --- Resolve friendly core name ---
-    friendly_name = CORE_NAME_MAPPING.get(corename, corename)
+    friendly_name = (CORE_NAME_MAPPING.get(corename) or
+                    CORE_NAME_MAPPING_LOWER.get(corename.lower()) or
+                    corename)
 
     # --- Arcade detection ---
     ARCADE_FRESHNESS = 30  # seconds
