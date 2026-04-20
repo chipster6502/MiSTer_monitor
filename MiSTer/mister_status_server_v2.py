@@ -86,6 +86,50 @@ _state = {
     'rom_details_stale': True,     # True = needs refresh on next request
 }
 
+# ---------------------------------------------------------------------------
+# Background watcher thread — monitors /tmp/ files via inotifywait
+# ---------------------------------------------------------------------------
+_WATCHED_FILES = [
+    '/tmp/CORENAME',
+    '/tmp/ACTIVEGAME',
+    '/tmp/CURRENTPATH',
+    '/tmp/FILESELECT',
+    '/tmp/FULLPATH',
+]
+
+def _watcher_thread():
+    """
+    Runs inotifywait in monitor mode and reacts to filesystem events.
+    Calls _update_state() whenever a relevant file changes.
+    Restarts automatically if inotifywait dies unexpectedly.
+    """
+    print("👁️ Watcher thread started")
+    while True:
+        try:
+            proc = subprocess.Popen(
+                ['inotifywait', '-m', '-e', 'close_write,create'] + _WATCHED_FILES,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True
+            )
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                print(f"📂 inotify event: {line}")
+                # Step 4 will call _update_state() here
+            proc.wait()
+        except Exception as e:
+            print(f"⚠️ Watcher thread error: {e}")
+        print("🔄 Watcher thread restarting...")
+        time.sleep(1)
+
+
+def _start_watcher():
+    """Starts the background watcher thread as a daemon."""
+    t = threading.Thread(target=_watcher_thread, daemon=True)
+    t.start()
+
 class MiSTerStatusHandler(BaseHTTPRequestHandler):
     
     def __init__(self, *args, **kwargs):
@@ -2942,6 +2986,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     try:
+        _start_watcher()
         server = HTTPServer(('', 8081), MiSTerStatusHandler)
         print("MiSTer Status Server v2 - inotify-based detection - port 8081")
         print("Available endpoints:")
