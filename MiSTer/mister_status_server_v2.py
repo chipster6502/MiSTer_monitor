@@ -87,54 +87,54 @@ KNOWN_NON_ARCADE_SYSTEMS = [
 ]
 
 CORE_NAME_MAPPING = {
-    'NES': 'Nintendo Entertainment System',
-    'SNES': 'Super Nintendo Entertainment System',
+    'NES': 'Nintendo NES/Famicom',
+    'SNES': 'Super Nintendo/Super Famicom',
     'N64': 'Nintendo 64',
-    'FDS': 'Family Computer Disk System',
+    'FDS': 'Famicom Disk System',
     'GAMEBOY': 'Nintendo Game Boy',
     'GB': 'Nintendo Game Boy',
-    'GBC': 'Game Boy Color',
-    'GBA': 'Game Boy Advance',
-    'GBA2P': 'Game Boy Advance',
-    'SGB': 'Super Game Boy',
-    'GameNWatch': 'Game & Watch',
-    'GAMEBOY2P': 'Game Boy Color',
+    'GBC': 'Nintendo Game Boy Color',
+    'GBA': 'Nintendo Game Boy Advance',
+    'GBA2P': 'Nintendo Game Boy Advance 2P',
+    'SGB': 'Nintendo Super Game Boy',
+    'GameNWatch': 'Nintendo Game & Watch',
+    'GAMEBOY2P': 'Nintendo Game Boy Color',
     'Genesis': 'Sega Genesis/Mega Drive',
-    'MegaDrive': 'Megadrive',
-    'SMS': 'Master System',
+    'MegaDrive': 'Sega Genesis/Mega Drive',
+    'SMS': 'Sega Master System',
     'GG': 'Sega Game Gear',
     'Saturn': 'Sega Saturn',
-    'S32X': 'Megadrive 32X',
-    'MegaCD': 'Mega-CD',
-    'SegaCD': 'Sega CD/Mega CD',
-    'SG1000': 'SG-1000',
-    'GameGear': 'Game Gear',
-    'PSX': 'PlayStation',
+    'S32X': 'Sega Genesis/Megadrive 32X',
+    'MegaCD': 'Sega CD/Mega-CD',
+    'SegaCD': 'Sega CD/Mega-CD',
+    'SG1000': 'Sega SG-1000',
+    'GameGear': 'Sega Game Gear',
+    'PSX': 'Sony PlayStation',
     'PlayStation': 'Sony PlayStation',
     'TurboGrafx16': 'TurboGrafx-16/PC Engine',
     'PCEngine': 'TurboGrafx-16/PC Engine',
-    'TGFX16': 'PC Engine',
-    'TGFX16-CD': 'PC Engine CD-Rom',
+    'TGFX16': 'TurboGrafx-16/PC Engine',
+    'TGFX16-CD': 'TurboGrafx-16/PC Engine CD-Rom',
     'SuperGrafx': 'PC Engine SuperGrafx',
     'Atari2600': 'Atari 2600',
     'ATARI5200': 'Atari 5200',
     'ATARI7800': 'Atari 7800',
-    'AtariLynx': 'Lynx',
+    'AtariLynx': 'Atari Lynx',
     'ATARI800': 'Atari 8bit',
-    'AtariST': 'Atari ST',
+    'AtariST': 'Atari ST/STE',
     'MAME': 'Multiple Arcade Machine Emulator',
     'mame': 'Multiple Arcade Machine Emulator',
     'Arcade': 'Multiple Arcade Machine Emulator',
-    'PET2001': 'PET',
+    'PET2001': 'Conmodore PET',
     'C64': 'Commodore 64',
     'C128': 'Commodore 128',
-    'VIC20': 'Vic-20',
+    'VIC20': 'Conmodore Vic-20',
     'Minimig': 'Commodore Amiga',
     'AO486': 'PC Dos',
     'PCXT': 'PC Dos',
     'Jupiter': 'Jupiter Ace',
     'PC8801': 'NEC PC-8801',
-    'BK0011M': 'BK',
+    'BK0011M': 'BK0011M',
     'eg2000': 'EG2000 Colour Genie',
     'lynx48': 'Camputers Lynx',
     'AQUARIUS': 'Mattel Aquarius',
@@ -151,40 +151,42 @@ CORE_NAME_MAPPING = {
     'zx48': 'ZX Spectrum',
     'ZX81': 'ZX81',
     'ZXNext': 'ZX Spectrum Next',
-    'Amstrad': 'CPC',
+    'Amstrad': 'Amstrad CPC',
     'AmstradCPC': 'Amstrad CPC',
     'GX4000': 'Amstrad GX4000',
     'Apple-II': 'Apple II',
     'APPLE-I': 'Apple I',
-    'MACPLUS': 'Mac OS',
+    'MACPLUS': 'Macintosh Plus',
     'X68000': 'Sharp X68000',
-    'Coleco': 'Colecovision',
+    'Coleco': 'ColecoVision',
     'Intellivision': 'Intellivision',
     'VECTREX': 'Vectrex',
-    'ODYSSEY2': 'Videopac G7000',
+    'ODYSSEY2': 'Videopac G7000/Odyssey 2',
     'ChannelF': 'Channel F',
     'CreatiVision': 'CreatiVision',
     'SuperVision': 'Watara Supervision',
     'WonderSwan': 'WonderSwan',
     'WonderSwanColor': 'WonderSwan Color',
-    'NGP': 'Neo Geo Pocket',
-    'NGPC': 'Neo Geo Pocket Color',
+    'NGP': 'SNK Neo Geo Pocket',
+    'NGPC': 'SNK Neo Geo Pocket Color',
     'PokemonMini': 'Pokemon Mini',
     'Gamate': 'Bit Corporation Gamate',
     'AVision': 'Adventure Vision',
     'Arcadia': 'Arcadia 2001',
-    'CD-i': 'CD-i',
+    'CD-i': 'Philips CD-i',
+    'cdi': 'Philips CD-i',
     'MegaDuck': 'Mega Duck',
-    'NEOGEO': 'Neo-Geo',
-    'NeoGeo-CD': 'Neo-Geo CD',
-    'NeoGeoPocket': 'Neo-Geo Pocket',
-    'Casio_PV-1000': 'PV-1000',
-    'VC4000': 'VC 4000',
+    'NEOGEO': 'SNK Neo Geo AES/MVS',
+    'NeoGeo-CD': 'SNK Neo Geo CD',
+    'NeoGeoPocket': 'SNK Neo Geo Pocket',
+    'Casio_PV-1000': 'Casio PV-1000',
+    'VC4000': 'Interton VC 4000',
     'PocketChallenge': 'Pocket Challenge V2',
+    'PocketChallengeV2': 'Pocket Challenge V2',
     'BBCMicro': 'BBC Micro',
-    'AcornElectron': 'Electron',
-    'ARCHIE': 'Archimedes',
-    'AcornAtom': 'Atom',
+    'AcornElectron': 'Acorn Electron',
+    'ARCHIE': 'Acorn Archimedes',
+    'AcornAtom': 'Acorn Atom',
     'TI-99_4A': 'TI-99/4A',
     'TRS-80': 'TRS-80 Color Computer',
     'COCO3': 'TRS-80 Color Computer 3',
@@ -192,25 +194,36 @@ CORE_NAME_MAPPING = {
     'SAM': 'SAM Coupé',
     'SAMCOUPE': 'MGT SAM Coupé',
     'Oric': 'Oric 1 / Atmos',
-    'nes': 'Nintendo Entertainment System',
-    'snes': 'Super Nintendo Entertainment System',
+    'nes': 'Nintendo NES/Famicom',
+    'snes': 'Super Nintendo/Super Famicom',
     'genesis': 'Sega Genesis/Mega Drive',
     'megadrive': 'Sega Genesis/Mega Drive',
-    'gameboy': 'Game Boy',
-    'gameboycolor': 'Game Boy Color',
-    'gameboyadvance': 'Game Boy Advance',
+    'gameboy': 'Nintendo Game Boy',
+    'gameboycolor': 'Nintendo Game Boy Color',
+    'gameboyadvance': 'Nintendo Game Boy Advance',
     'nintendo64': 'Nintendo 64',
     'supernintendo': 'Super Nintendo',
-    'playstation': 'PlayStation',
+    'playstation': 'Sony PlayStation',
     'commodore64': 'Commodore 64',
-    'pcengine': 'PC Engine',
-    'turbografx16': 'TurboGrafx-16',
-    'mastersystem': 'Master System',
+    'pcengine': 'TurboGrafx-16/PC Engine',
+    'turbografx16': 'TurboGrafx-16/PC Engine',
+    'mastersystem': 'Sega Master System',
     'atari2600': 'Atari 2600',
+    'SCV' : 'Super Cassette Vision',
+    'SuperVision8000' : 'Bandai Super Vision 8000',
+    'amiga': 'Commodore Amiga',
+    'amigacd32' : 'Commodore Amiga CD32',
+    'neogeocd' : 'SNK Neo Geo CD'
 }
 
-# names.txt overrides hardcoded mapping
-CORE_NAME_MAPPING.update(NAMES_TXT)
+# names.txt fills in cores not already in CORE_NAME_MAPPING
+for k, v in NAMES_TXT.items():
+    if k not in CORE_NAME_MAPPING:
+        CORE_NAME_MAPPING[k] = v
+
+# Set of all known system friendly names — used to detect CURRENTPATH = core name
+KNOWN_SYSTEM_NAMES = set(v.lower() for v in CORE_NAME_MAPPING.values()) | \
+                     set(v.lower() for v in NAMES_TXT.values())
 
 # Case-insensitive lookup dict — keys are lowercased
 CORE_NAME_MAPPING_LOWER = {k.lower(): v for k, v in CORE_NAME_MAPPING.items()}
@@ -334,6 +347,16 @@ _KNOWN_ROM_EXTS = {
     '.a78', '.a52', '.a26', '.n64', '.z64', '.pce', '.cue',
     '.lnx', '.ngp', '.ngc', '.ws', '.wsc', '.sg', '.sms',
     '.gg', '.col', '.vec', '.int', '.psx', '.img',
+    # 8-bit computers
+    '.prg', '.d64', '.t64', '.tap', '.crt', '.g64',  # Commodore
+    '.atr', '.xex', '.cas', '.car',                   # Atari 8bit
+    '.dsk', '.st', '.msa', '.stx', '.dim',            # Atari ST
+    '.tzx', '.tap', '.z80', '.sna', '.trd', '.scl',  # Spectrum
+    '.vhd', '.hdf', '.adf', '.adz',                   # Amiga
+    '.do', '.po', '.2mg', '.dsk',                     # Apple II
+    '.mx1', '.mx2', '.rom', '.cas',                   # MSX
+    '.col', '.cv',                                     # ColecoVision
+    '.m3u',                                            # playlists
 }
 
 def _game_name_from_path(path):
@@ -373,12 +396,15 @@ def _update_state():
         sam_active, sam_core, sam_game, sam_path = _sam_get_current()
         if sam_active and sam_core:
             print(f"🎮 SAM active — core='{sam_core}' game='{sam_game}'")
+            # Normalize arcade core name
+            sam_is_arcade = '/_Arcade/' in sam_path or sam_core.lower() in ('arcade', 'multiple arcade machine emulator')
+            display_core = 'Arcade' if sam_is_arcade else sam_core
             with _state_lock:
-                _state['core']              = sam_core
-                _state['system_name']       = sam_core
+                _state['core']              = display_core
+                _state['system_name']       = display_core
                 _state['game']              = sam_game
                 _state['game_path']         = sam_path
-                _state['is_arcade']         = False
+                _state['is_arcade']         = sam_is_arcade
                 _state['rom_details']       = None
                 _state['rom_details_stale'] = True
             return
@@ -433,12 +459,26 @@ def _update_state():
     else:
         # Non-arcade — prefer ACTIVEGAME, fall back to CURRENTPATH
         
-        # Detect "core loaded without game": CURRENTPATH contains the core name
-        # (no extension, no path separator) and ACTIVEGAME is from a different core
+        cp_ext = os.path.splitext(currentpath)[1].lower() if currentpath else ''
         currentpath_is_core_name = (
-            currentpath and 
-            '/' not in currentpath and 
-            '.' not in currentpath
+            currentpath and
+            cp_ext not in _KNOWN_ROM_EXTS and
+            (
+                currentpath.lower() in KNOWN_SYSTEM_NAMES or
+                (
+                    '(' not in currentpath and
+                    (
+                        currentpath == '..' or
+                        currentpath.startswith('_@') or
+                        currentpath.lower() == corename.lower() or
+                        currentpath.lower() == friendly_name.lower() or
+                        currentpath.lower().replace(' ', '').replace('/', '') == corename.lower() or
+                        currentpath.lower() in friendly_name.lower() or
+                        friendly_name.lower().endswith(currentpath.lower()) or
+                        corename.lower() in currentpath.lower().replace(' ', '').replace('+', '')
+                    )
+                )
+            )
         )
         
         if currentpath_is_core_name:
@@ -492,11 +532,15 @@ def _watcher_thread():
                 if not line:
                     continue
                 print(f"📂 inotify event: {line}")
+
+                # CORENAME changes always trigger _update_state immediately
+                # Other events are debounced to avoid noise during navigation
+                is_corename = '/tmp/CORENAME' in line
                 
                 # Debounce: ignore events that arrive too close together
                 now = time.time()
                 global _last_event_time
-                if now - _last_event_time < _DEBOUNCE_SECONDS:
+                if not is_corename and (now - _last_event_time < _DEBOUNCE_SECONDS):
                     print(f"⏱️ Debounced")
                     _last_event_time = now
                     continue
