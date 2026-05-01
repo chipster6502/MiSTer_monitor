@@ -452,18 +452,10 @@ void playScanButtonSound();
 void playNextButtonSound();
 
 // Global variables to add (add these at the top of your .ino file)
-unsigned long lastSubsystemUpdate = 0;           // Timestamp of last successful subsystem update
-const unsigned long SUBSYSTEM_UPDATE_INTERVAL = 60000;  // Only update every 60 seconds
-String lastConfirmedGameName = "";               // Last game name that had a confirmed subsystem
-bool subsystemConfirmed = false;                 // Flag to indicate if current subsystem is confirmed
+
 String lastProcessedGame = "";           // Last game we processed for subsystem
 bool forceSubsystemUpdate = false;       // Flag to force subsystem update
 unsigned long gameChangeTime = 0;        // When the game changed
-
-// ========== SCALED DISPLAY WRAPPER CLASS ==========
-// This class wraps M5.Display to automatically scale all drawing operations
-// from logical coordinates (320x240) to physical M5Tab coordinates (1280x720)
-// This allows us to keep the original code's coordinate system unchanged
 
 // ========== SCALED DISPLAY WRAPPER CLASS ==========
 // This class wraps M5.Display to automatically scale all drawing operations
@@ -919,6 +911,81 @@ void drawFooter() {
   }
 }
 
+// Parses a ROM details JSON response into `details`.
+// Handles: response preview, size truncation, memory check, all field extraction, and summary log.
+// `prefix` is "" for a first attempt or "Retry " for a retry — used in log messages.
+// Returns false if memory was insufficient; in that case `response` is freed and
+// `details.error` is set. The caller must call http.end() and return `details`.
+static bool _parseRomDetailsJson(String& response, RomDetails& details, const char* prefix) {
+  Serial.printf("%sROM details response: %d bytes\n", prefix, response.length());
+  Serial.printf("%sResponse preview:\n%s\n", prefix,
+                response.substring(0, min(200, (int)response.length())).c_str());
+
+  if (response.length() > 5000) {
+    Serial.printf("Large ROM response (%d bytes), truncating\n", response.length());
+    response = response.substring(0, 5000);
+  }
+
+  if (ESP.getFreeHeap() < 40000) {
+    Serial.printf("Low memory after ROM response (%d bytes)\n", ESP.getFreeHeap());
+    response = "";
+    details.error = prefix[0] ? "Memory insufficient on retry" : "Memory insufficient";
+    return false;
+  }
+
+  Serial.printf("Extracting ROM details from %sJSON...\n", prefix);
+
+  details.filename       = extractStringValue(response, "filename");
+  Serial.printf("  %sFilename: '%s'\n", prefix, details.filename.c_str());
+
+  details.crc32          = extractStringValue(response, "crc32");
+  Serial.printf("  %sCRC32: '%s' (length: %d)\n", prefix, details.crc32.c_str(), details.crc32.length());
+
+  details.md5            = extractStringValue(response, "md5");
+  Serial.printf("  %sMD5: '%s' (length: %d)\n", prefix, details.md5.c_str(), details.md5.length());
+
+  details.sha1           = extractStringValue(response, "sha1");
+  Serial.printf("  %sSHA1: '%s' (length: %d)\n", prefix, details.sha1.c_str(), details.sha1.length());
+
+  details.filesize       = extractIntValue(response, "size");
+  Serial.printf("  %sFile size: %ld bytes\n", prefix, details.filesize);
+
+  details.available      = extractBoolValue(response, "available");
+  Serial.printf("  %sAvailable: %s\n", prefix, details.available ? "YES" : "NO");
+
+  details.hashCalculated = extractBoolValue(response, "hash_calculated");
+  Serial.printf("  %sHash calculated: %s\n", prefix, details.hashCalculated ? "YES" : "NO");
+
+  details.fileTooLarge   = extractBoolValue(response, "file_too_large");
+  Serial.printf("  %sFile too large: %s\n", prefix, details.fileTooLarge ? "YES" : "NO");
+
+  details.error          = extractStringValue(response, "error");
+  if (details.error.length() > 0) {
+    Serial.printf("  %sError: '%s'\n", prefix, details.error.c_str());
+  }
+
+  details.path           = extractStringValue(response, "path");
+  Serial.printf("  %sPath: '%s'\n", prefix, details.path.c_str());
+
+  details.timestamp      = extractIntValue(response, "timestamp");
+
+  response = ""; // Free memory explicitly
+
+  Serial.printf("ROM Details %sSummary:\n", prefix);
+  if (details.available) {
+    Serial.printf("  ROM available: %s (%ld bytes)\n", details.filename.c_str(), details.filesize);
+    if (details.hashCalculated && details.crc32.length() > 0) {
+      Serial.printf("  CRC32 available for precise search: %s\n", details.crc32.c_str());
+    } else {
+      Serial.printf("  No CRC32 - will use name-based search\n");
+    }
+  } else {
+    Serial.printf("  ROM not available or accessible\n");
+  }
+
+  return true;
+}
+
 RomDetails getCurrentRomDetails() {
   RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0};
   
@@ -949,78 +1016,11 @@ RomDetails getCurrentRomDetails() {
   
   if (code == 200) {
     String response = http.getString();
-    Serial.printf("ROM details response: %d bytes\n", response.length());
-    
-    // Show response preview
-    Serial.printf("Response preview (first 200 chars):\n%s\n", 
-                  response.substring(0, min(200, (int)response.length())).c_str());
-    
-    // SAFETY: Limit response size
-    if (response.length() > 5000) {
-      Serial.printf("Large ROM response (%d bytes), truncating\n", response.length());
-      response = response.substring(0, 5000);
-    }
-    
-    // Check memory after getting response
-    if (ESP.getFreeHeap() < 40000) {
-      Serial.printf("Low memory after ROM response (%d bytes)\n", ESP.getFreeHeap());
-      response = ""; // Free response
+    if (!_parseRomDetailsJson(response, details, "")) {
       http.end();
-      details.error = "Memory insufficient";
+      Serial.printf("Free heap after ROM details: %d bytes\n", ESP.getFreeHeap());
+      Serial.printf("=== ROM DETAILS COMPLETE (MEMORY FAIL) ===\n\n");
       return details;
-    }
-    
-    // Extract fields with improved error handling
-    Serial.printf("Extracting ROM details from JSON...\n");
-    
-    details.filename = extractStringValue(response, "filename");
-    Serial.printf("  Filename: '%s'\n", details.filename.c_str());
-    
-    details.crc32 = extractStringValue(response, "crc32");
-    Serial.printf("  CRC32: '%s' (length: %d)\n", details.crc32.c_str(), details.crc32.length());
-    
-    details.md5 = extractStringValue(response, "md5");
-    Serial.printf("  MD5: '%s' (length: %d)\n", details.md5.c_str(), details.md5.length());
-    
-    details.sha1 = extractStringValue(response, "sha1");
-    Serial.printf("  SHA1: '%s' (length: %d)\n", details.sha1.c_str(), details.sha1.length());
-    
-    details.filesize = extractIntValue(response, "size");
-    Serial.printf("  File size: %ld bytes\n", details.filesize);
-    
-    details.available = extractBoolValue(response, "available");
-    Serial.printf("  Available: %s\n", details.available ? "YES" : "NO");
-    
-    details.hashCalculated = extractBoolValue(response, "hash_calculated");
-    Serial.printf("  Hash calculated: %s\n", details.hashCalculated ? "YES" : "NO");
-    
-    details.fileTooLarge = extractBoolValue(response, "file_too_large");
-    Serial.printf("  File too large: %s\n", details.fileTooLarge ? "YES" : "NO");
-    
-    details.error = extractStringValue(response, "error");
-    if (details.error.length() > 0) {
-      Serial.printf("  Error: '%s'\n", details.error.c_str());
-    }
-    
-    details.path = extractStringValue(response, "path");
-    Serial.printf("  Path: '%s'\n", details.path.c_str());
-    
-    details.timestamp = extractIntValue(response, "timestamp");
-    
-    // Free response memory explicitly
-    response = "";
-    
-    // Summary
-    Serial.printf("ROM Details Summary:\n");
-    if (details.available) {
-      Serial.printf("ROM available: %s (%ld bytes)\n", details.filename.c_str(), details.filesize);
-      if (details.hashCalculated && details.crc32.length() > 0) {
-        Serial.printf("CRC32 available for precise search: %s\n", details.crc32.c_str());
-      } else {
-        Serial.printf("No CRC32 - will use name-based search\n");
-      }
-    } else {
-      Serial.printf("ROM not available or accessible\n");
     }
     
   } else {
@@ -1072,80 +1072,11 @@ RomDetails getCurrentRomDetails() {
     
     if (retryCode == 200) {
       String retryResponse = httpRetry.getString();
-      Serial.printf("ROM details retry response: %d bytes\n", retryResponse.length());
-      
-      // Show response preview
-      Serial.printf("Retry response preview (first 200 chars):\n%s\n", 
-                    retryResponse.substring(0, min(200, (int)retryResponse.length())).c_str());
-      
-      // SAFETY: Limit response size
-      if (retryResponse.length() > 5000) {
-        Serial.printf("Large ROM retry response (%d bytes), truncating\n", retryResponse.length());
-        retryResponse = retryResponse.substring(0, 5000);
-      }
-      
-      // Check memory after getting retry response
-      if (ESP.getFreeHeap() < 40000) {
-        Serial.printf("Low memory after ROM retry response (%d bytes)\n", ESP.getFreeHeap());
-        retryResponse = ""; // Free response
+      if (!_parseRomDetailsJson(retryResponse, details, "Retry ")) {
         httpRetry.end();
-        details.error = "Memory insufficient on retry";
         Serial.printf("Free heap after ROM details: %d bytes\n", ESP.getFreeHeap());
         Serial.printf("=== ROM DETAILS COMPLETE (RETRY MEMORY FAIL) ===\n\n");
         return details;
-      }
-      
-      // Extract fields with improved error handling (RETRY)
-      Serial.printf("Extracting ROM details from retry JSON...\n");
-      
-      details.filename = extractStringValue(retryResponse, "filename");
-      Serial.printf("  Retry Filename: '%s'\n", details.filename.c_str());
-      
-      details.crc32 = extractStringValue(retryResponse, "crc32");
-      Serial.printf("  Retry CRC32: '%s' (length: %d)\n", details.crc32.c_str(), details.crc32.length());
-      
-      details.md5 = extractStringValue(retryResponse, "md5");
-      Serial.printf("  Retry MD5: '%s' (length: %d)\n", details.md5.c_str(), details.md5.length());
-      
-      details.sha1 = extractStringValue(retryResponse, "sha1");
-      Serial.printf("  Retry SHA1: '%s' (length: %d)\n", details.sha1.c_str(), details.sha1.length());
-      
-      details.filesize = extractIntValue(retryResponse, "size");
-      Serial.printf("  Retry File size: %ld bytes\n", details.filesize);
-      
-      details.available = extractBoolValue(retryResponse, "available");
-      Serial.printf("  Retry Available: %s\n", details.available ? "YES" : "NO");
-      
-      details.hashCalculated = extractBoolValue(retryResponse, "hash_calculated");
-      Serial.printf("  Retry Hash calculated: %s\n", details.hashCalculated ? "YES" : "NO");
-      
-      details.fileTooLarge = extractBoolValue(retryResponse, "file_too_large");
-      Serial.printf("  Retry File too large: %s\n", details.fileTooLarge ? "YES" : "NO");
-      
-      details.error = extractStringValue(retryResponse, "error");
-      if (details.error.length() > 0) {
-        Serial.printf("  Retry Error: '%s'\n", details.error.c_str());
-      }
-      
-      details.path = extractStringValue(retryResponse, "path");
-      Serial.printf("  Retry Path: '%s'\n", details.path.c_str());
-      
-      details.timestamp = extractIntValue(retryResponse, "timestamp");
-      
-      // Free retry response memory explicitly
-      retryResponse = "";
-      
-      // Summary for retry success
-      Serial.printf("ROM Details RETRY Summary:\n");
-      if (details.available) {
-        Serial.printf("  ROM available on retry: %s (%ld bytes)\n", details.filename.c_str(), details.filesize);
-        if (details.hashCalculated && details.crc32.length() > 0) {
-          Serial.printf("  CRC32 available for precise search: %s\n", details.crc32.c_str());
-        } else {
-          Serial.printf("  No CRC32 on retry - will use name-based search\n");
-        }
-      } else {
-        Serial.printf("  ROM not available or accessible on retry\n");
       }
       
     } else {
@@ -1222,55 +1153,6 @@ RomDetails getCurrentRomDetailsForced() {
   return details;
 }
 
-MediaUrls extractMediaUrlsFromJeuInfos(String jeuInfosResponse) {
-  MediaUrls urls = {"", "", "", "", "", "", "", "", "", "", "", ""};
-  
-  Serial.println("Extracting media URLs from jeuInfos response...");
-  
-  // Search for media section
-  int mediasStart = jeuInfosResponse.indexOf("\"medias\":");
-  if (mediasStart == -1) {
-    Serial.println("No medias section found");
-    return urls;
-  }
-  
-  // Extract 3D URLs (HIGH PRIORITY)
-  urls.box3d_wor = extractMediaUrl(jeuInfosResponse, "media_boitier_3d_wor");
-  urls.box3d_us = extractMediaUrl(jeuInfosResponse, "media_boitier_3d_us");
-  urls.box3d_eu = extractMediaUrl(jeuInfosResponse, "media_boitier_3d_eu");
-  
-  // Extract 2D URLs (FALLBACK)
-  urls.box2d_wor = extractMediaUrl(jeuInfosResponse, "media_boitier_2d_wor");
-  urls.box2d_us = extractMediaUrl(jeuInfosResponse, "media_boitier_2d_us");
-  urls.box2d_eu = extractMediaUrl(jeuInfosResponse, "media_boitier_2d_eu");
-  
-  // Extract other types
-  urls.wheel_wor = extractMediaUrl(jeuInfosResponse, "media_wheel_wor");
-  urls.wheel_us = extractMediaUrl(jeuInfosResponse, "media_wheel_us");
-  urls.marquee = extractMediaUrl(jeuInfosResponse, "media_marquee");
-  urls.fanart = extractMediaUrl(jeuInfosResponse, "media_fanart");
-  urls.screenshot = extractMediaUrl(jeuInfosResponse, "media_screenshot");
-  urls.video = extractMediaUrl(jeuInfosResponse, "media_video");
-  
-  // Show results
-  Serial.printf("Media URLs found:\n");
-  int count3D = 0, count2D = 0, countOther = 0;
-  
-  if (urls.box3d_wor.length() > 0) { Serial.println("   3D Box (World)"); count3D++; }
-  if (urls.box3d_us.length() > 0) { Serial.println("   3D Box (USA)"); count3D++; }
-  if (urls.box3d_eu.length() > 0) { Serial.println("   3D Box (Europe)"); count3D++; }
-  if (urls.box2d_wor.length() > 0) { Serial.println("  2D Box (World)"); count2D++; }
-  if (urls.box2d_us.length() > 0) { Serial.println("   2D Box (USA)"); count2D++; }
-  if (urls.box2d_eu.length() > 0) { Serial.println("   2D Box (Europe)"); count2D++; }
-  if (urls.wheel_wor.length() > 0) { Serial.println("  Wheel (World)"); countOther++; }
-  if (urls.wheel_us.length() > 0) { Serial.println("   Wheel (USA)"); countOther++; }
-  if (urls.marquee.length() > 0) { Serial.println("   Marquee"); countOther++; }
-  if (urls.fanart.length() > 0) { Serial.println("   Fanart"); countOther++; }
-  
-  Serial.printf("Summary: %dx3D, %dx2D, %dxOther media types\n", count3D, count2D, countOther);
-  
-  return urls;
-}
 
 String extractMediaUrl(String response, String mediaKey) {
   String searchKey = "\"" + mediaKey + "\":\"";
@@ -1295,62 +1177,6 @@ String extractMediaUrl(String response, String mediaKey) {
   return url;
 }
 
-// ========== BEST MEDIA SELECTION ==========
-
-String selectBestMediaUrl(MediaUrls urls) {
-  Serial.println("Selecting best media URL with 3D priority...");
-  
-  if (urls.box3d_wor.length() > 0) {
-    Serial.println("  Using 3D Box (World) - HIGHEST QUALITY");
-    return urls.box3d_wor;
-  }
-  if (urls.box3d_us.length() > 0) {
-    Serial.println("   Using 3D Box (USA) - HIGH QUALITY");
-    return urls.box3d_us;
-  }
-  if (urls.box3d_eu.length() > 0) {
-    Serial.println("   Using 3D Box (Europe) - HIGH QUALITY");
-    return urls.box3d_eu;
-  }
-  
-  if (urls.box2d_wor.length() > 0) {
-    Serial.println("   Fallback to 2D Box (World)");
-    return urls.box2d_wor;
-  }
-  if (urls.box2d_us.length() > 0) {
-    Serial.println("   Fallback to 2D Box (USA)");
-    return urls.box2d_us;
-  }
-  if (urls.box2d_eu.length() > 0) {
-    Serial.println("   Fallback to 2D Box (Europe)");
-    return urls.box2d_eu;
-  }
-  
-  if (urls.wheel_wor.length() > 0) {
-    Serial.println("   Fallback to Wheel (World)");
-    return urls.wheel_wor;
-  }
-  if (urls.wheel_us.length() > 0) {
-    Serial.println("   Fallback to Wheel (USA)");
-    return urls.wheel_us;
-  }
-  
-  if (urls.marquee.length() > 0) {
-    Serial.println("   Fallback to Marquee");
-    return urls.marquee;
-  }
-  if (urls.fanart.length() > 0) {
-    Serial.println("   Fallback to Fanart");
-    return urls.fanart;
-  }
-  if (urls.screenshot.length() > 0) {
-    Serial.println("   Fallback to Screenshot");
-    return urls.screenshot;
-  }
-  
-  Serial.println("   No suitable media found");
-  return "";
-}
 
 String urlEncode(String str) {
   String encoded = "";
@@ -1453,7 +1279,7 @@ String getCoreSavePath(String searchCore) {
   String searchCoreLower = searchCore;
   searchCoreLower.toLowerCase();
   if (searchCoreLower == "arcade" && lastArcadeSystemeId.length() > 0) {
-    // Usar nombre ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Âºnico que incluya el ID del subsistema
+    // Use a unique name that includes the subsystem ID
     finalCoreName = "Arcade_" + lastArcadeSystemeId;
     Serial.printf("Using subsystem-specific core name: %s\n", finalCoreName.c_str());
   }
@@ -1743,7 +1569,7 @@ void showCoreImageScreenWithAutoDownload(String coreName) {
                 lastArcadeSystemeId.c_str(), lastArcadeSystemeId.length());
   
   if (!sdCardAvailable) {
-    Serial.println("ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â SD not available, showing SD error");
+    Serial.println("SD not available, showing SD error");
     showSDCardError();
     return;
   }
@@ -2877,7 +2703,6 @@ bool findCoreImage(String coreName, String &imagePath) {
   Serial.printf("=== ENHANCED CORE IMAGE FINDER ===\n");
   Serial.printf("Core: '%s'\n", coreName.c_str());
   Serial.printf("lastArcadeSystemeId: '%s' (length: %d)\n", lastArcadeSystemeId.c_str(), lastArcadeSystemeId.length());
-  Serial.printf("Subsystem confirmed: %s\n", subsystemConfirmed ? "YES" : "NO");
   
   // Enhanced logic for Arcade: prioritize subsystem image if available and confirmed
   String coreNameLower = coreName;
@@ -2903,9 +2728,10 @@ bool findCoreImage(String coreName, String &imagePath) {
     } else {
       Serial.printf("Subsystem-specific image not found: %s\n", subsystemPath.c_str());
       
-      // Enhanced emergency download logic
-      if (ENABLE_AUTO_DOWNLOAD && WiFi.status() == WL_CONNECTED && !downloadInProgress && subsystemConfirmed) {
-        Serial.printf("Attempting emergency download of confirmed subsystem image...\n");
+      // Emergency download: lastArcadeSystemeId present means ScreenScraper
+      // already validated this subsystem — attempt download immediately.
+      if (ENABLE_AUTO_DOWNLOAD && WiFi.status() == WL_CONNECTED && !downloadInProgress) {
+        Serial.printf("Attempting emergency download of subsystem image...\n");
         
         // Force download of subsystem image
         if (downloadCoreImageFromScreenScraper("arcade", true)) {
@@ -2920,15 +2746,9 @@ bool findCoreImage(String coreName, String &imagePath) {
         } else {
           Serial.printf("Emergency download failed\n");
         }
-      }
-      
-      // If subsystem is confirmed but image doesn't exist, and download failed,
-      // still prefer to show a placeholder rather than generic Arcade
-      if (subsystemConfirmed) {
-        Serial.printf("Subsystem confirmed but image missing - will use generic as fallback\n");
-      }
-    }
-  }
+      }   // if (ENABLE_AUTO_DOWNLOAD)
+    }     // else (SD.exists)
+  }       // if (coreNameLower == "arcade")
   
   // Search for generic image (original logic)
   if (ENABLE_ALPHABETICAL_FOLDERS) {
@@ -5638,7 +5458,7 @@ String getScreenScraperSystemId(String coreName) {
   if (core == "Amiga CD32") return "130";
   if (core == "Commodore 64") return "66";
   if (core == "PC Dos") return "135";
-  if (core == "MGT SAM CoupÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â©" || core == "SAM CoupÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â©") return "213";
+  if (core == "MGT SAM Coup\xc3\xa9" || core == "SAM Coup\xc3\xa9") return "213";
   if (core == "ZX Spectrum") return "76";
   if (core == "ZX81") return "77";
   if (core == "CPC") return "65";
@@ -6045,7 +5865,7 @@ GameInfo extractGameInfoFromJeuInfos(String& response, String originalFilename) 
     }
   }
   
-  // EXTRACT SYSTEME ID - CRÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂTICO PARA DETECCIÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œN DE ARCADE
+  // EXTRACT SYSTEME ID - CRITICAL FOR ARCADE DETECTION
   int systemeStart = response.indexOf("\"systeme\":{\"id\":\"");
   if (systemeStart == -1) {
     systemeStart = response.indexOf("\"systeme\": {\"id\": \"");

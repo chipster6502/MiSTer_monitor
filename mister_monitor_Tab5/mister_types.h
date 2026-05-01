@@ -25,20 +25,6 @@ struct RomDetails {
   unsigned long timestamp;
 };
 
-struct MediaUrls {
-  String box3d_wor;
-  String box3d_us;
-  String box3d_eu;
-  String box2d_wor;
-  String box2d_us;
-  String box2d_eu;
-  String wheel_wor;
-  String wheel_us;
-  String marquee;
-  String fanart;
-  String screenshot;
-  String video;
-};
 
 struct ScrollTextState {
   String fullText;
