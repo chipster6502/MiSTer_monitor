@@ -16,7 +16,7 @@ start_server() {
     
     echo "Starting MiSTer Monitor Server..."
     cd "$SCRIPT_DIR"
-    nohup python3 mister_status_server_v2.py > "$LOG_FILE" 2>&1 &
+    nohup python3 mister_status_server.py > "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
     echo "Server started (PID: $(cat $PID_FILE))"
 }
