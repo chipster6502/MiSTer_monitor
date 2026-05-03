@@ -4,7 +4,7 @@ MiSTer Status Server - COMPLETE OPTIMIZED VERSION
 Simplified arcade detection logic with all original functions
 """
 
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import json
 import os
 import subprocess
@@ -71,7 +71,7 @@ KNOWN_NON_ARCADE_SYSTEMS = [
     'psx', 'x68k',
     'APOGEE', 'ARCHIE', 'AY-3-8500', 'AcornElectron', 'Adam', 'Altair8800',
     'Amstrad PCW', 'BBCMicro', 'BK0011M', 'Casio_PV-2000', 'COCO3', 'CoCo2',
-    'EDSAC', 'EpochGalaxyII', 'Galaksija', 'Interact', 'Laser', 'Lynx48',
+    'EDSAC', 'EpochGalaxyII', 'Galaksija', 'Interact', 'Laser', 'Lynx48', 'Lynx48/96K',
     'MultiComp', 'ORAO', 'Ondra_SPO186', 'Oric', 'PMD85', 'RX78', 'Sord M5',
     'SuperVision', 'TI-99_4A', 'TRS-80', 'TSConf', 'TatungEinstein',
     'TomyScramble', 'UK101', 'VECTOR06', 'Homelab', 'BBCBridgeCompanion',
@@ -105,8 +105,8 @@ CORE_NAME_MAPPING = {
     'GG': 'Sega Game Gear',
     'Saturn': 'Sega Saturn',
     'S32X': 'Sega Genesis/Megadrive 32X',
-    'MegaCD': 'Sega CD/Mega-CD',
-    'SegaCD': 'Sega CD/Mega-CD',
+    'MegaCD': 'Sega Mega-CD',
+    'SegaCD': 'Sega CD/Mega CD',
     'SG1000': 'Sega SG-1000',
     'GameGear': 'Sega Game Gear',
     'PSX': 'Sony PlayStation',
@@ -122,21 +122,23 @@ CORE_NAME_MAPPING = {
     'AtariLynx': 'Atari Lynx',
     'ATARI800': 'Atari 8bit',
     'AtariST': 'Atari ST/STE',
-    'MAME': 'Multiple Arcade Machine Emulator',
-    'mame': 'Multiple Arcade Machine Emulator',
-    'Arcade': 'Multiple Arcade Machine Emulator',
-    'PET2001': 'Conmodore PET',
+    'MAME': 'Arcade',
+    'mame': 'Arcade',
+    'Arcade': 'Arcade',
+    'PET2001': 'Commodore PET',
     'C64': 'Commodore 64',
     'C128': 'Commodore 128',
-    'VIC20': 'Conmodore Vic-20',
+    'VIC20': 'Commodore Vic-20',
     'Minimig': 'Commodore Amiga',
     'AO486': 'PC Dos',
     'PCXT': 'PC Dos',
+    'PCjr': 'PC Dos',
     'Jupiter': 'Jupiter Ace',
     'PC8801': 'NEC PC-8801',
     'BK0011M': 'BK0011M',
     'eg2000': 'EG2000 Colour Genie',
     'lynx48': 'Camputers Lynx',
+    'Lynx48': 'Camputers Lynx',
     'AQUARIUS': 'Mattel Aquarius',
     'sharpmz': 'SHARP MZ Series',
     'QL': 'Sinclair QL',
@@ -158,7 +160,7 @@ CORE_NAME_MAPPING = {
     'APPLE-I': 'Apple I',
     'MACPLUS': 'Macintosh Plus',
     'X68000': 'Sharp X68000',
-    'Coleco': 'ColecoVision',
+    'Coleco': 'Colecovision',
     'Intellivision': 'Intellivision',
     'VECTREX': 'Vectrex',
     'ODYSSEY2': 'Videopac G7000/Odyssey 2',
@@ -167,22 +169,20 @@ CORE_NAME_MAPPING = {
     'SuperVision': 'Watara Supervision',
     'WonderSwan': 'WonderSwan',
     'WonderSwanColor': 'WonderSwan Color',
-    'NGP': 'SNK Neo Geo Pocket',
-    'NGPC': 'SNK Neo Geo Pocket Color',
+    'NGP': 'Neo Geo Pocket',
+    'NGPC': 'Neo Geo Pocket Color',
     'PokemonMini': 'Pokemon Mini',
     'Gamate': 'Bit Corporation Gamate',
     'AVision': 'Adventure Vision',
     'Arcadia': 'Arcadia 2001',
-    'CD-i': 'Philips CD-i',
-    'cdi': 'Philips CD-i',
+    'CD-i': 'Phillips CD-i',
     'MegaDuck': 'Mega Duck',
-    'NEOGEO': 'SNK Neo Geo AES/MVS',
-    'NeoGeo-CD': 'SNK Neo Geo CD',
-    'NeoGeoPocket': 'SNK Neo Geo Pocket',
+    'NEOGEO': 'Neo-Geo',
+    'NeoGeo-CD': 'Neo-Geo CD',
+    'NeoGeoPocket': 'Neo-Geo Pocket',
     'Casio_PV-1000': 'Casio PV-1000',
     'VC4000': 'Interton VC 4000',
     'PocketChallenge': 'Pocket Challenge V2',
-    'PocketChallengeV2': 'Pocket Challenge V2',
     'BBCMicro': 'BBC Micro',
     'AcornElectron': 'Acorn Electron',
     'ARCHIE': 'Acorn Archimedes',
@@ -209,11 +209,6 @@ CORE_NAME_MAPPING = {
     'turbografx16': 'TurboGrafx-16/PC Engine',
     'mastersystem': 'Sega Master System',
     'atari2600': 'Atari 2600',
-    'SCV' : 'Super Cassette Vision',
-    'SuperVision8000' : 'Bandai Super Vision 8000',
-    'amiga': 'Commodore Amiga',
-    'amigacd32' : 'Commodore Amiga CD32',
-    'neogeocd' : 'SNK Neo Geo CD'
 }
 
 # names.txt fills in cores not already in CORE_NAME_MAPPING
@@ -236,14 +231,19 @@ import threading
 _state_lock = threading.Lock()
 
 _state = {
-    'core':              'Menu',   # friendly core name
-    'system_name':       'Menu',   # friendly system name
+    'core':              'Menu',   # friendly name — used for display, image lookup, and ScreenScraper mapping
+    'system_name':       'Menu',   # alias of 'core' (same value); kept for backward compatibility
     'game':              '',       # game name (filename without extension)
     'game_path':         '',       # absolute path to ROM file
     'is_arcade':         False,    # True if current core is arcade
     'rom_details':       None,     # last ScreenScraper result (dict or None)
     'rom_details_stale': True,     # True = needs refresh on next request
 }
+
+# Error tracking — exposed via /status/error_state and /status/all
+server_error_state        = ''    # last error message, empty string if none
+last_valid_core           = ''    # last corename that produced a valid state
+last_valid_core_timestamp = 0.0   # epoch time of last valid state update
 
 # ---------------------------------------------------------------------------
 # Background watcher thread — monitors /tmp/ files via inotifywait
@@ -254,6 +254,7 @@ _WATCHED_FILES = [
     '/tmp/CURRENTPATH',
     '/tmp/FILESELECT',
     '/tmp/FULLPATH',
+    '/tmp/STARTPATH',   # arcade ROM path — needed to detect arcade game changes
 ]
 
 def _is_known_non_arcade(corename):
@@ -313,9 +314,9 @@ def _sam_get_current():
                              CORE_NAME_MAPPING_LOWER.get(sam_core_raw.lower()) or
                              sam_core_raw)
             print(f"✅ SAM detected — core='{sam_core}' game='{sam_game}'")
-            return True, sam_core, sam_game, sam_path
+            return True, sam_core_raw, sam_core, sam_game, sam_path
 
-    return False, '', '', ''
+    return False, '', '', '', ''
 
 
 def _sam_is_current():
@@ -352,9 +353,10 @@ _KNOWN_ROM_EXTS = {
     '.atr', '.xex', '.cas', '.car',                   # Atari 8bit
     '.dsk', '.st', '.msa', '.stx', '.dim',            # Atari ST
     '.tzx', '.tap', '.z80', '.sna', '.trd', '.scl',  # Spectrum
+    '.cdt', '.cpc', '.voc',                           # Amstrad CPC
     '.vhd', '.hdf', '.adf', '.adz',                   # Amiga
-    '.do', '.po', '.2mg', '.dsk',                     # Apple II
-    '.mx1', '.mx2', '.rom', '.cas',                   # MSX
+    '.do', '.po', '.2mg',                             # Apple II
+    '.mx1', '.mx2',                                   # MSX
     '.col', '.cv',                                     # ColecoVision
     '.m3u',                                            # playlists
 }
@@ -393,18 +395,15 @@ def _update_state():
 
     # --- SAM detection (takes priority if active and current) ---
     if _sam_is_current():
-        sam_active, sam_core, sam_game, sam_path = _sam_get_current()
-        if sam_active and sam_core:
-            print(f"🎮 SAM active — core='{sam_core}' game='{sam_game}'")
-            # Normalize arcade core name
-            sam_is_arcade = '/_Arcade/' in sam_path or sam_core.lower() in ('arcade', 'multiple arcade machine emulator')
-            display_core = 'Arcade' if sam_is_arcade else sam_core
+        sam_active, sam_core_raw, sam_core_friendly, sam_game, sam_path = _sam_get_current()
+        if sam_active and sam_core_raw:
+            print(f"🎮 SAM active — core='{sam_core_friendly}' game='{sam_game}'")
             with _state_lock:
-                _state['core']              = display_core
-                _state['system_name']       = display_core
+                _state['core']              = sam_core_friendly  # friendly — for display and image lookup
+                _state['system_name']       = sam_core_friendly
                 _state['game']              = sam_game
                 _state['game_path']         = sam_path
-                _state['is_arcade']         = sam_is_arcade
+                _state['is_arcade']         = False
                 _state['rom_details']       = None
                 _state['rom_details_stale'] = True
             return
@@ -499,7 +498,7 @@ def _update_state():
         print(f"🎮 Non-arcade: core={corename} game={game_name}")
 
     with _state_lock:
-        _state['core']        = 'Arcade' if is_arcade else friendly_name
+        _state['core']        = 'Arcade' if is_arcade else friendly_name  # friendly — for display and image lookup
         _state['system_name'] = 'Arcade' if is_arcade else friendly_name
         _state['game']              = game_name
         _state['game_path']         = game_path
@@ -559,11 +558,13 @@ def _start_watcher():
     t = threading.Thread(target=_watcher_thread, daemon=True)
     t.start()
 
+# Session tracking — module-level so they persist across handler instances
+_session_start   = time.time()
+_requests_count  = 0
+
 class MiSTerStatusHandler(BaseHTTPRequestHandler):
-    
+
     def __init__(self, *args, **kwargs):
-        self.session_start = time.time()
-        self.requests_count = 0
         super().__init__(*args, **kwargs)
 
     def _is_ini_file(self, file_path):
@@ -585,7 +586,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         """Handle GET requests"""
-        self.requests_count += 1
+        global _requests_count
+        _requests_count += 1
         parsed_path = urlparse(self.path)
         path = parsed_path.path
         
@@ -645,7 +647,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
     # ========== OPTIMIZED CORE FUNCTIONS ==========
     
     def get_current_core(self):
-        """Returns the currently active core name from centralized state."""
+        """Returns the currently active core friendly name from centralized state."""
         with _state_lock:
             return _state['core']
         
@@ -837,7 +839,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 return False
             
             # Step 3: For known non-arcade systems, ACTIVEGAME should NOT be in _Arcade
-            if self.is_known_non_arcade_system(corename):
+            if _is_known_non_arcade(corename):
                 if "/_Arcade/" in activegame:
                     print(f"❌ Non-arcade core '{corename}' but ACTIVEGAME is in _Arcade: {activegame}")
                     return False
@@ -1077,14 +1079,14 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         Session statistics
         """
         current_time = time.time()
-        session_duration = current_time - self.session_start
+        session_duration = current_time - _session_start
         
         stats = {
-            'session_start_time': int(self.session_start),
+            'session_start_time': int(_session_start),
             'session_duration_seconds': int(session_duration),
             'session_duration_formatted': self.format_duration(session_duration),
-            'requests_count': self.requests_count,
-            'requests_per_minute': round((self.requests_count / (session_duration / 60)) if session_duration > 0 else 0, 2),
+            'requests_count': _requests_count,
+            'requests_per_minute': round((_requests_count / (session_duration / 60)) if session_duration > 0 else 0, 2),
             'current_time': int(current_time)
         }
         
@@ -1173,6 +1175,26 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                         with zip_file.open(zip_file_path) as file_in_zip:
                             return file_in_zip.read()
                 
+                # Strategy 5: Stem match — must mirror get_zip_file_info_enhanced,
+                # otherwise the size lookup succeeds but the content read fails.
+                target_stem = os.path.splitext(internal_path)[0].lower()
+                stem_matches = []
+                for zip_file_path in zip_files:
+                    zip_stem = os.path.splitext(zip_file_path)[0].lower()
+                    if zip_stem == target_stem:
+                        stem_matches.append(zip_file_path)
+                
+                if stem_matches:
+                    rom_match = next(
+                        (m for m in stem_matches
+                         if os.path.splitext(m)[1].lower() in _KNOWN_ROM_EXTS),
+                        None
+                    )
+                    chosen = rom_match if rom_match else stem_matches[0]
+                    print(f"✅ Stem match: {chosen}")
+                    with zip_file.open(chosen) as file_in_zip:
+                        return file_in_zip.read()
+                
                 # Show debug info
                 print(f"❌ File not found. Searched for: {internal_path}")
                 print(f"📋 Available files (first 10):")
@@ -1226,6 +1248,30 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                         filename = os.path.basename(zip_file_path)
                         print(f"✅ File info (filename): {filename} ({info.file_size:,} bytes)")
                         return filename, info.file_size
+                
+                # Strategy 5: Stem match — handles cores that write the filename
+                # without extension to CURRENTPATH. Compare the path stem (without
+                # extension) case-insensitively;
+                target_stem = os.path.splitext(internal_path)[0].lower()
+                stem_matches = []
+                for zip_file_path in zip_files:
+                    zip_stem = os.path.splitext(zip_file_path)[0].lower()
+                    if zip_stem == target_stem:
+                        stem_matches.append(zip_file_path)
+                
+                if stem_matches:
+                    rom_match = next(
+                        (m for m in stem_matches
+                         if os.path.splitext(m)[1].lower() in _KNOWN_ROM_EXTS),
+                        None
+                    )
+                    chosen = rom_match if rom_match else stem_matches[0]
+                    info = zip_file.getinfo(chosen)
+                    filename = os.path.basename(chosen)
+                    print(f"✅ File info (stem match): {filename} ({info.file_size:,} bytes)")
+                    if len(stem_matches) > 1:
+                        print(f"   ℹ️ {len(stem_matches)} candidates with same stem; chose ROM-ext match")
+                    return filename, info.file_size
                 
                 print(f"❌ File info not found: {internal_path}")
                 return None, 0
@@ -2012,7 +2058,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 if __name__ == '__main__':
     try:
         _start_watcher()
-        server = HTTPServer(('', 8081), MiSTerStatusHandler)
+        server = ThreadingHTTPServer(('', 8081), MiSTerStatusHandler)
         print("MiSTer Monitor Status Server v2 - port 8081")
         print("Endpoints:")
         print("  /status/core         - Active core")
