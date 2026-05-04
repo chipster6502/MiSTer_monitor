@@ -10,6 +10,8 @@ information, storage status, and network details in real time.
 - Automatic game and system detection from OSD, MiSTer Remote web app and Super Attract Mode (SAM)
 - Reliable game load detection using nanosecond-precision filesystem timestamps when loading cores and games through the on-screen menu (OSD)
 - Automatic Arcade subsystem detection
+- Manual RESCAN GAME button on the image screen for cases where the CRC could not be detected automatically
+- Smart SCAN button on monitor pages with global state refresh and forced ROM details rescan
 - System monitor (CPU, memory, uptime, storage, network, and connected USB devices panels)
 - Touch-based navigation
 - Screenshot capture of the Tab5 display, downloadable over the local network via HTTP
@@ -22,8 +24,10 @@ information, storage status, and network details in real time.
 
 ## Software Requirements
 
-- Arduino IDE
-- ScreenScraper dev account (free) at screenscraper.fr
+- Arduino IDE (for compiling and uploading the Tab5 firmware)
+- ScreenScraper developer account (free) at screenscraper.fr
+- A standard MiSTer setup with Python 3 and `inotifywait`, both
+  preinstalled on official MiSTer images
 
 ## Installation
 
@@ -194,7 +198,7 @@ download succeeds. Available tokens:
 | `wheel` | Plain/transparent background logo wheel |
 | `box3d` | 3-D rendered box art |
 | `box2d` | 2-D flat box scan |
-| `fanart` | 
+| `fanart` | Fan-made promotional art (often landscape format) | 
 | `marquee` | Arcade cabinet marquee header |
 | `screenshot` | In-game title screenshot |
 | `photo` | Real photograph of hardware or cartridge |
@@ -269,12 +273,16 @@ with confirmation and instructions for its use. Enter your credentials in
 
 The system has two components that work together:
 
-- **`mister_status_server.py`** — HTTP server on port 8080. Reads MiSTer state
-  files from `/tmp/` and exposes them as JSON/text endpoints. Detects game loads
-  by comparing `FILESELECT` and `CURRENTPATH` filesystem timestamps at nanosecond
-  precision — no external helper scripts are needed.
-- **Tab5 sketch** — Polls the server every few seconds, downloads artwork from
-  ScreenScraper, and renders the HUD interface.
+- **`mister_status_server.py`** — HTTP server on port 8081 running on
+  the MiSTer. Watches `/tmp/` state files in real time using `inotify`,
+  maintains an in-memory state, and exposes core, game, system and
+  network data as JSON/text endpoints. Distinguishes actual game loads
+  from OSD navigation by comparing `FILESELECT` and `CURRENTPATH`
+  filesystem timestamps at nanosecond precision — no external helper
+  scripts are needed.
+- **Tab5 sketch** — Polls the server every few seconds, downloads
+  artwork from ScreenScraper, and renders the HUD interface. Also runs
+  its own HTTP server on port 8080 for screenshot capture.
 
 ## Screenshots
 
@@ -292,9 +300,9 @@ The system has two components that work together:
 
 ## To Do
 
-- **MiSTer Downloader integration** — Implement a custom database for the MiSTer
-  Downloader ecosystem, allowing users to install and update the server-side
-  scripts directly through the standard MiSTer update workflow.
+- **MiSTer Downloader integration (in progress)** — Custom database for
+  the MiSTer Downloader ecosystem, so the server-side scripts can be
+  installed and updated through the standard MiSTer Downloader workflow.
 - **M5Stack Core Basic support** — Port the interface to the original M5Stack
   Core Basic (ESP32, 320×240 display, physical buttons). The ScaledDisplay
   wrapper and layout system are designed to support multiple resolutions, so
