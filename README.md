@@ -29,23 +29,53 @@ information, storage status, and network details in real time.
 
 ### MiSTer Side
 
-1. Copy `mister/mister_status_server.py` to `/media/fat/Scripts/mister_monitor/`
-2. Copy `mister/start_monitor.sh` to `/media/fat/Scripts/mister_monitor/`
-3. Make the shell script executable:
+#### Recommended: automated install
+
+1. Copy the entire `MiSTer/` folder from this repository to a temporary
+   location on your MiSTer (e.g. `/tmp/`). You can use `wget`, SFTP, or
+   simply copy it from an SD card.
+2. SSH into your MiSTer (or open a terminal on it) and run:
 ```bash
-   chmod +x /media/fat/Scripts/mister_monitor/start_monitor.sh
+   bash /tmp/MiSTer/install.sh
+```
+3. Verify that `log_file_entry=1` is set in `/media/fat/MiSTer.ini`
+   under the `[MiSTer]` section. The installer warns you if this line
+   is missing — without it, core and game detection will not work.
+
+The installer copies all files to their canonical locations, configures
+auto-start in `user-startup.sh`, and launches the server immediately.
+It is idempotent: running it again on an existing installation simply
+updates the files and restarts the server.
+
+To uninstall:
+```bash
+bash /tmp/MiSTer/uninstall.sh
+```
+
+#### Manual install (alternative)
+
+If you prefer to install manually, follow these steps:
+
+1. Copy `MiSTer/Scripts/.config/mister_monitor/mister_status_server.py` to
+   `/media/fat/Scripts/.config/mister_monitor/` on your MiSTer (create the
+   directory if it doesn't exist).
+2. Copy `MiSTer/Scripts/start_monitor.sh` to `/media/fat/Scripts/`.
+3. Make the script executable:
+```bash
+   chmod +x /media/fat/Scripts/start_monitor.sh
 ```
 4. Add the following line to `/media/fat/linux/user-startup.sh` to launch
    the server automatically on boot:
 ```bash
-   python3 /media/fat/Scripts/mister_monitor/mister_status_server.py &
+   /media/fat/Scripts/start_monitor.sh start
 ```
-5. Enable log_file_entry in `/media/fat/MiSTer.ini` by setting:
+5. Enable log_file_entry in `/media/fat/MiSTer.ini` by setting (under
+   the `[MiSTer]` section):
 ```ini
 log_file_entry=1
 ```
 This is required for the Python server to detect which core and game are
-currently loaded. Without it, core and game artwork lookups will not work.
+currently loaded.
 
 #### Screenshot HTTP Server
 
