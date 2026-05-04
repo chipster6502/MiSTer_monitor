@@ -10,6 +10,8 @@ information, storage status, and network details in real time.
 - Automatic game and system detection from OSD, MiSTer Remote web app and Super Attract Mode (SAM)
 - Reliable game load detection using nanosecond-precision filesystem timestamps when loading cores and games through the on-screen menu (OSD)
 - Automatic Arcade subsystem detection
+- Manual RESCAN GAME button on the image screen for cases where the CRC could not be detected automatically
+- Smart SCAN button on monitor pages with global state refresh and forced ROM details rescan
 - System monitor (CPU, memory, uptime, storage, network, and connected USB devices panels)
 - Touch-based navigation
 - Screenshot capture of the Tab5 display, downloadable over the local network via HTTP
@@ -22,30 +24,62 @@ information, storage status, and network details in real time.
 
 ## Software Requirements
 
-- Arduino IDE
-- ScreenScraper dev account (free) at screenscraper.fr
+- Arduino IDE (for compiling and uploading the Tab5 firmware)
+- ScreenScraper developer account (free) at screenscraper.fr
+- A standard MiSTer setup with Python 3 and `inotifywait`, both
+  preinstalled on official MiSTer images
 
 ## Installation
 
 ### MiSTer Side
 
-1. Copy `mister/mister_status_server.py` to `/media/fat/Scripts/mister_monitor/`
-2. Copy `mister/start_monitor.sh` to `/media/fat/Scripts/mister_monitor/`
-3. Make the shell script executable:
+#### Recommended: automated install
+
+1. Copy the entire `MiSTer/` folder from this repository to a temporary
+   location on your MiSTer (e.g. `/tmp/`). You can use `wget`, SFTP, or
+   simply copy it from an SD card.
+2. SSH into your MiSTer (or open a terminal on it) and run:
 ```bash
-   chmod +x /media/fat/Scripts/mister_monitor/start_monitor.sh
+   bash /tmp/MiSTer/install.sh
+```
+3. Verify that `log_file_entry=1` is set in `/media/fat/MiSTer.ini`
+   under the `[MiSTer]` section. The installer warns you if this line
+   is missing — without it, core and game detection will not work.
+
+The installer copies all files to their canonical locations, configures
+auto-start in `user-startup.sh`, and launches the server immediately.
+It is idempotent: running it again on an existing installation simply
+updates the files and restarts the server.
+
+To uninstall:
+```bash
+bash /tmp/MiSTer/uninstall.sh
+```
+
+#### Manual install (alternative)
+
+If you prefer to install manually, follow these steps:
+
+1. Copy `MiSTer/Scripts/.config/mister_monitor/mister_status_server.py` to
+   `/media/fat/Scripts/.config/mister_monitor/` on your MiSTer (create the
+   directory if it doesn't exist).
+2. Copy `MiSTer/Scripts/start_monitor.sh` to `/media/fat/Scripts/`.
+3. Make the script executable:
+```bash
+   chmod +x /media/fat/Scripts/start_monitor.sh
 ```
 4. Add the following line to `/media/fat/linux/user-startup.sh` to launch
    the server automatically on boot:
 ```bash
-   python3 /media/fat/Scripts/mister_monitor/mister_status_server.py &
+   /media/fat/Scripts/start_monitor.sh start
 ```
-5. Enable log_file_entry in `/media/fat/MiSTer.ini` by setting:
+5. Enable log_file_entry in `/media/fat/MiSTer.ini` by setting (under
+   the `[MiSTer]` section):
 ```ini
 log_file_entry=1
 ```
 This is required for the Python server to detect which core and game are
-currently loaded. Without it, core and game artwork lookups will not work.
+currently loaded.
 
 #### Screenshot HTTP Server
 
@@ -164,7 +198,7 @@ download succeeds. Available tokens:
 | `wheel` | Plain/transparent background logo wheel |
 | `box3d` | 3-D rendered box art |
 | `box2d` | 2-D flat box scan |
-| `fanart` | 
+| `fanart` | Fan-made promotional art (often landscape format) | 
 | `marquee` | Arcade cabinet marquee header |
 | `screenshot` | In-game title screenshot |
 | `photo` | Real photograph of hardware or cartridge |
@@ -239,12 +273,16 @@ with confirmation and instructions for its use. Enter your credentials in
 
 The system has two components that work together:
 
-- **`mister_status_server.py`** — HTTP server on port 8080. Reads MiSTer state
-  files from `/tmp/` and exposes them as JSON/text endpoints. Detects game loads
-  by comparing `FILESELECT` and `CURRENTPATH` filesystem timestamps at nanosecond
-  precision — no external helper scripts are needed.
-- **Tab5 sketch** — Polls the server every few seconds, downloads artwork from
-  ScreenScraper, and renders the HUD interface.
+- **`mister_status_server.py`** — HTTP server on port 8081 running on
+  the MiSTer. Watches `/tmp/` state files in real time using `inotify`,
+  maintains an in-memory state, and exposes core, game, system and
+  network data as JSON/text endpoints. Distinguishes actual game loads
+  from OSD navigation by comparing `FILESELECT` and `CURRENTPATH`
+  filesystem timestamps at nanosecond precision — no external helper
+  scripts are needed.
+- **Tab5 sketch** — Polls the server every few seconds, downloads
+  artwork from ScreenScraper, and renders the HUD interface. Also runs
+  its own HTTP server on port 8080 for screenshot capture.
 
 ## Screenshots
 
@@ -262,9 +300,9 @@ The system has two components that work together:
 
 ## To Do
 
-- **MiSTer Downloader integration** — Implement a custom database for the MiSTer
-  Downloader ecosystem, allowing users to install and update the server-side
-  scripts directly through the standard MiSTer update workflow.
+- **MiSTer Downloader integration (in progress)** — Custom database for
+  the MiSTer Downloader ecosystem, so the server-side scripts can be
+  installed and updated through the standard MiSTer Downloader workflow.
 - **M5Stack Core Basic support** — Port the interface to the original M5Stack
   Core Basic (ESP32, 320×240 display, physical buttons). The ScaledDisplay
   wrapper and layout system are designed to support multiple resolutions, so
