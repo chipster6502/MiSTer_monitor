@@ -1,7 +1,7 @@
 #!/bin/bash
 # MiSTer Monitor startup script
 
-SCRIPT_DIR="/media/fat/Scripts/mister_monitor"
+SCRIPT_DIR="/media/fat/Scripts/.config/mister_monitor"
 PID_FILE="/tmp/mister_monitor.pid"
 LOG_FILE="/tmp/mister_monitor.log"
 
