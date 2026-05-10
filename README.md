@@ -35,12 +35,11 @@ information, storage status, and network details in real time.
 
 #### Recommended: automated install
 
-1. Copy the entire `MiSTer/` folder from this repository to a temporary
-   location on your MiSTer (e.g. `/tmp/`). You can use `wget`, SFTP, or
-   simply copy it from an SD card.
-2. SSH into your MiSTer (or open a terminal on it) and run:
+1. Copy the contents of the entire `MiSTer/` folder from this
+   repository to your MiSTer's SD card (e.g. `/media/fat/MiSTer_monitor_install/`).
+2. SSH into your MiSTer and run the installer:
 ```bash
-   bash /tmp/MiSTer/install.sh
+   bash /media/fat/MiSTer_monitor_install/install.sh
 ```
 3. Verify that `log_file_entry=1` is set in `/media/fat/MiSTer.ini`
    under the `[MiSTer]` section. The installer warns you if this line
@@ -53,7 +52,7 @@ updates the files and restarts the server.
 
 To uninstall:
 ```bash
-bash /tmp/MiSTer/uninstall.sh
+bash /media/fat/Scripts/.config/mister_monitor/uninstall.sh
 ```
 
 #### Manual install (alternative)

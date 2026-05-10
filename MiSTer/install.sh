@@ -2,13 +2,15 @@
 #
 # MiSTer Monitor — installer
 #
-# Usage: copy the entire MiSTer/ folder from this repository to a
-# temporary location on your MiSTer (e.g. /tmp/), then run:
+# Usage: Copy the contents of the entire `MiSTer/` folder from this
+# repository to your MiSTer's SD card (e.g. `/media/fat/MiSTer_monitor_install/`),
+# then run:
 #
-#   bash /tmp/MiSTer/install.sh
+#   bash /media/fat/MiSTer_monitor_install/install.sh
 #
 # The installer copies all files to their canonical locations,
 # configures auto-start, and launches the server immediately.
+# The installation folder is automatically removed when done.
 #
 
 set -e
@@ -17,6 +19,7 @@ set -e
 SCRIPTS_DIR="/media/fat/Scripts"
 CONFIG_DIR="${SCRIPTS_DIR}/.config/mister_monitor"
 STARTUP_FILE="/media/fat/linux/user-startup.sh"
+UNINSTALL_PERMANENT="${CONFIG_DIR}/uninstall.sh"
 
 # Resolve the directory where THIS script lives, so we can find the
 # files relative to it whether the user runs it from the repo, /tmp,
@@ -45,6 +48,12 @@ if [ ! -f "${SOURCE_SCRIPTS_DIR}/.config/mister_monitor/mister_status_server.py"
     exit 1
 fi
 
+if [ ! -f "${INSTALLER_DIR}/uninstall.sh" ]; then
+    echo "ERROR: cannot find uninstall.sh at ${INSTALLER_DIR}/"
+    echo "Make sure you copied the entire MiSTer/ folder, not just install.sh."
+    exit 1
+fi
+
 # ===== Stop any running instance =====
 if [ -f "${SCRIPTS_DIR}/start_monitor.sh" ]; then
     echo "Existing installation found, stopping current server..."
@@ -63,6 +72,10 @@ cp "${SOURCE_SCRIPTS_DIR}/.config/mister_monitor/mister_status_server.py" "${CON
 echo "Installing start_monitor.sh..."
 cp "${SOURCE_SCRIPTS_DIR}/start_monitor.sh" "${SCRIPTS_DIR}/"
 chmod +x "${SCRIPTS_DIR}/start_monitor.sh"
+
+echo "Installing uninstall.sh..."
+cp "${INSTALLER_DIR}/uninstall.sh" "${UNINSTALL_PERMANENT}"
+chmod +x "${UNINSTALL_PERMANENT}"
 
 # ===== Configure auto-start =====
 STARTUP_LINE="${SCRIPTS_DIR}/start_monitor.sh start"
@@ -122,5 +135,11 @@ echo "  3. Flash the firmware to your Tab5 (see README for details)."
 echo
 echo "To check the server status:    ${SCRIPTS_DIR}/start_monitor.sh status"
 echo "To stop the server:            ${SCRIPTS_DIR}/start_monitor.sh stop"
-echo "To uninstall:                  bash ${INSTALLER_DIR}/uninstall.sh"
+echo "To uninstall:                  bash ${UNINSTALL_PERMANENT}"
 echo
+
+# ===== Self-cleanup =====
+# Remove the installation folder — all necessary files have been copied
+# to their permanent locations. uninstall.sh is at ${UNINSTALL_PERMANENT}.
+echo "Cleaning up installation folder..."
+rm -rf "${INSTALLER_DIR}"
