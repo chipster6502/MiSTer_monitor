@@ -88,12 +88,11 @@ To view or download the latest screenshot, open a browser on any device on the s
 network and navigate to:
 
 ```
-http://<Tab5-IP>:8080/screenshot.jpg
+http://<Tab5-IP>:8080
 ```
 
-The root page at `http://<Tab5-IP>:8080/` also provides a live preview that auto-refreshes
-every 5 seconds and a download button. Replace `<Tab5-IP>` with the IP address shown in the
-Tab5 Network Terminal panel.
+This page provides a live preview that auto-refreshes every 5 seconds and a download button.
+Replace `<Tab5-IP>` with the IP address shown in the Tab5 Network Terminal panel.
 
 ### Tab5 Side
 

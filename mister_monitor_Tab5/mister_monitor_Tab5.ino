@@ -198,8 +198,8 @@ void handleScreenshotRoot() {
   html += "<br>";
   html += "<a class='btn' href='/screenshot.bmp'>📥 Download BMP</a>";
   html += "<a class='btn' href='/'>🔄 Refresh</a>";
-  html += "<p class='info'>Auto-refresh cada 5 segundos &nbsp;|&nbsp; ";
-  html += "Resolución: " + String(M5.Display.width()) + "x" + String(M5.Display.height()) + " &nbsp;|&nbsp; ";
+  html += "<p class='info'>Auto-refresh every 5 seconds &nbsp;|&nbsp; ";
+  html += "Resolution: " + String(M5.Display.width()) + "x" + String(M5.Display.height()) + " &nbsp;|&nbsp; ";
   html += "IP: " + ip + ":8080</p>";
   html += "</body></html>";
   screenshotServer.send(200, "text/html", html);
