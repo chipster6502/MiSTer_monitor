@@ -33,7 +33,41 @@ information, storage status, and network details in real time.
 
 ### MiSTer Side
 
-#### Recommended: automated install
+#### Recommended: MiSTer Downloader database
+
+The easiest way to install the server-side component is through the
+MiSTer Downloader. Add this database to your MiSTer:
+
+1. Download the drop-in `.ini` file:
+
+   [`downloader_chipster6502_MiSTer_monitor_DB.zip`](https://raw.githubusercontent.com/chipster6502/MiSTer_monitor_DB/db/downloader_chipster6502_MiSTer_monitor_DB.zip)
+
+2. Extract the `.ini` from that ZIP and place it in the **root of your
+   MiSTer SD card** (`/media/fat/`).
+3. Run *Update All* or *Downloader* from your MiSTer scripts menu.
+   The files are installed automatically into:
+   - `/media/fat/Scripts/start_monitor.sh`
+   - `/media/fat/Scripts/.config/mister_monitor/mister_status_server.py`
+4. After the first install, do these one-time setup steps:
+```bash
+   chmod +x /media/fat/Scripts/start_monitor.sh
+```
+   Add this line to `/media/fat/linux/user-startup.sh`:
+```bash
+   /media/fat/Scripts/start_monitor.sh start
+```
+   And enable `log_file_entry=1` in `/media/fat/MiSTer.ini` (under the
+   `[MiSTer]` section).
+5. Reboot or run `/media/fat/Scripts/start_monitor.sh start`.
+
+Future updates to the server are automatically picked up by *Update All*
+or *Downloader*. Database repository:
+[chipster6502/MiSTer_monitor_DB](https://github.com/chipster6502/MiSTer_monitor_DB).
+
+#### Alternative: install.sh
+
+If you prefer not to use the MiSTer Downloader, the repository includes
+an automated installer that does the same job in one step.
 
 1. Copy the contents of the entire `MiSTer/` folder from this
    repository to your MiSTer's SD card (e.g. `/media/fat/MiSTer_monitor_install/`).
@@ -55,7 +89,7 @@ To uninstall:
 bash /media/fat/Scripts/.config/mister_monitor/uninstall.sh
 ```
 
-#### Manual install (alternative)
+#### Manual install
 
 If you prefer to install manually, follow these steps:
 
@@ -298,9 +332,6 @@ The system has two components that work together:
 
 ## To Do
 
-- **MiSTer Downloader integration (in progress)** — Custom database for
-  the MiSTer Downloader ecosystem, so the server-side scripts can be
-  installed and updated through the standard MiSTer Downloader workflow.
 - **M5Stack Core Basic support** — Port the interface to the original M5Stack
   Core Basic (ESP32, 320×240 display, physical buttons). The ScaledDisplay
   wrapper and layout system are designed to support multiple resolutions, so
