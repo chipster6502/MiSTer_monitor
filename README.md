@@ -332,8 +332,6 @@ The system has two components that work together:
 
 ## To Do
 
-## To Do
-
 ### Hardware support
 
 - **Cheap Yellow Display (CYD)** — Port to the widely available ESP32-2432S028R family.
