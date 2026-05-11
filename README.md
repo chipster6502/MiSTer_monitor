@@ -332,18 +332,46 @@ The system has two components that work together:
 
 ## To Do
 
-- **M5Stack Core Basic support** — Port the interface to the original M5Stack
-  Core Basic (ESP32, 320×240 display, physical buttons). The ScaledDisplay
-  wrapper and layout system are designed to support multiple resolutions, so
-  this should be achievable with board-specific coordinate profiles and button
-  mappings.
-- **M5Stack Core S3 support** — Add a target for the Core S3 (ESP32-S3,
-  320×240 display, touchscreen). This device shares the touch interface with
-  the Tab5 but runs at the lower resolution, making it a natural intermediate
-  target between the two existing hardware profiles.
-- **Other ESP32-based displays support**
-- Ensure it works with other detection sources like NFC readers and other web-based launchers.
-- Apply scaling for small images (really necessary in few cases)
+## To Do
+
+### Hardware support
+
+- **Cheap Yellow Display (CYD)** — Port to the widely available ESP32-2432S028R family.
+- **M5Stack Core Basic support** — Port to the original Core Basic (ESP32, 320×240, physical buttons).
+- **M5Stack Core S3 support** — Port to the Core S3 (ESP32-S3, 320×240 touchscreen).
+
+### Data and content enrichment
+
+- **RetroAchievements integration** — Show unlocked achievements and progress, building on [odelot/Main_MiSTer](https://github.com/odelot/Main_MiSTer).
+- **Enriched game metadata screen** — "Now Playing" view with synopsis, year, developer, genre.
+- **Regional cover comparison** — Show EU/US/JP versions of the same game's artwork.
+- **Multilanguage descriptions** — Synopses in the user's preferred language via ScreenScraper.
+
+### AI-powered context layer
+
+- **Historical curiosities** — AI-generated trivia about the loaded game, cached locally.
+- **Retro conversation mode** — Activatable AI chat about the loaded game.
+
+### Personal stats and history
+
+- **Playtime tracking** — Hours per game and core, sessions, streaks, most played.
+- **Internal achievements** — Device-specific achievements independent of RetroAchievements.
+
+### Touch interaction and control
+
+- **Favorite marking and MGL generation** — Mark the current game as favorite or create an MGL shortcut.
+- **Visual core selector** — Touch grid of core artwork; tap to launch.
+
+### Ambient and connected presence
+
+- **Idle screensaver mode** — Cycle random covers with Ken Burns effect when MiSTer is at menu.
+- **MiSTer screenshot reception** — Display native MiSTer screenshots as per-game galleries.
+- **External launcher integration** — Show artwork on launches triggered by Zapparoo NFC tags or web-based launchers.
+- **QR codes for expanded information** — On-screen QR linking to MobyGames database.
+
+### Other
+
+- Apply scaling for small images (rarely needed).
 
 ## License
 
