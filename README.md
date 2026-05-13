@@ -26,6 +26,15 @@ console and computer games via the MiSTer Remote web application.*
 - Touch-based navigation
 - Screenshot capture of the Tab5 display, downloadable over the local network via HTTP
 
+## Supported Hardware
+
+| Target | Status |
+|---|---|
+| M5Stack Tab5 (ESP32-P4) | Stable — reference implementation |
+| Cheap Yellow Display (ESP32-2432S028R) | Work in progress |
+
+See `docs/PORTING.md` for porting guidelines.
+
 ## Requirements
 
 **Hardware**
