@@ -1,4 +1,16 @@
-#include <M5Unified.h>
+#include <XPT2046_Touchscreen.h>
+
+#include <LovyanGFX.hpp>
+
+// ============================================================================
+//  Build settings (Arduino IDE -> Tools menu):
+//    Board:           ESP32 Dev Module
+//    Partition:       Huge APP (3MB No OTA/1MB SPIFFS)
+//    Flash Size:      4MB (32Mb)
+//    PSRAM:           Disabled
+//    Upload Speed:    921600
+// ============================================================================
+#include "cyd_shim.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <SD.h>
@@ -87,8 +99,8 @@ String CORE_MEDIA_ORDER_STR             = "wheel-steel,wheel-carbon,wheel,photo,
 #define SAFE_JSON_BUFFER_SIZE    8192
 #define MAX_RESPONSE_SIZE        50000
 
-// Hardware constants — fixed for M5Tab
-#define TFCARD_CS_PIN     42
+// Hardware constants
+#define TFCARD_CS_PIN     5      // CYD: SD card on HSPI, CS=GPIO5
 #define TARGET_WIDTH      1280
 #define TARGET_HEIGHT     720
 #define IMAGE_AREA_HEIGHT 620
@@ -480,10 +492,11 @@ unsigned long gameChangeTime = 0;        // When the game changed
 
 class ScaledDisplay {
 private:
-  // Scaling and offset constants for 2x scaling
-  static constexpr float SCALE_FACTOR = 2.0;
-  static constexpr int OFFSET_X = 90;
-  static constexpr int OFFSET_Y = 200;  // Offset normal para pantallas del monitor
+  // CYD: native 320x240 panel — no scaling, no offset needed.
+  // The wrapper is kept for API compatibility with the Tab5 codebase.
+  static constexpr float SCALE_FACTOR = 1.0f;
+  static constexpr int   OFFSET_X     = 0;
+  static constexpr int   OFFSET_Y     = 0;
   
   // Internal scaling helper functions
   // These convert logical coordinates to physical coordinates

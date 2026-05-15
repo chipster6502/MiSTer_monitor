@@ -37,3 +37,15 @@ its own sketch folder at the repo root (e.g. `mister_monitor_Tab5/`,
 |---|---|---|---|---|---|
 | M5Stack Tab5 | ESP32-P4 | 1280x720 IPS | I2C cap. | yes | Stable |
 | CYD ESP32-2432S028R | ESP32 | 320x240 ILI9341 | XPT2046 res. | no | WIP |
+
+## Build settings per target
+
+### CYD ESP32-2432S028R
+
+Arduino IDE → Tools menu:
+
+- Board: `ESP32 Dev Module`
+- Partition Scheme: `Huge APP (3MB No OTA/1MB SPIFFS)`
+- Flash Size: `4MB (32Mb)`
+- PSRAM: `Disabled`
+- Upload Speed: `921600`
