@@ -423,11 +423,11 @@ bool bootFrameLoaded = false;   // For frame01.jpg (boot/connection screens)
 GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails);
 bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName);
 
-String currentGameForCrc = "";         // Juego actual que necesita CRC
-String currentCoreForCrc = "";         // Core del juego actual  
-unsigned long lastCrcRecurrentTime = 0; // Ultimo intento CRC recurrente
-bool crcRecurrentActive = false;       // Si busqueda recurrente esta activa
-int crcRecurrentAttempts = 0;          // Contador de intentos recurrentes
+String currentGameForCrc = "";         // Current game that needs a CRC
+String currentCoreForCrc = "";         // Core of the current game  
+unsigned long lastCrcRecurrentTime = 0; // Last recurrent CRC attempt
+bool crcRecurrentActive = false;       // Whether the recurrent search is active
+int crcRecurrentAttempts = 0;          // Recurring attempt counter
 bool lastRomHasCrc           = false;  // true when current game's ROM has a valid CRC
 bool lastGameImageOK         = false;  // true when a game-specific image is displayed
                                         // (either cached or freshly downloaded)
@@ -483,7 +483,7 @@ private:
   // Scaling and offset constants for 2x scaling
   static constexpr float SCALE_FACTOR = 2.0;
   static constexpr int OFFSET_X = 90;
-  static constexpr int OFFSET_Y = 200;  // Offset normal para pantallas del monitor
+  static constexpr int OFFSET_Y = 200;  // Normal offset for the monitor screens
   
   // Internal scaling helper functions
   // These convert logical coordinates to physical coordinates
@@ -687,34 +687,34 @@ void showDownloadingScreen(String coreName, String gameName) {
     Serial.println("Logo not loaded - using text fallback");
   }
   
-  // ========== LEFT PANEL CONTENT (COORDENADAS FÍSICAS con OFFSET_Y=130) ==========
-  // Constantes para este diseño específico
+  // ========== LEFT PANEL CONTENT (PHYSICAL COORDINATES with OFFSET_Y=130) ==========
+  // Constants for this specific layout
   const int PANEL_OFFSET_X = 90;
-  const int PANEL_OFFSET_Y = 130;  // Offset específico para pantalla de descarga
+  const int PANEL_OFFSET_Y = 130;  // Offset specific to the download screen
   const int SCALE = 2;  // Escala 2x
   
-  // Macro para convertir coordenadas lógicas a físicas
+  // Macro to convert logical coordinates to physical
   #define PHYS_X(x) (PANEL_OFFSET_X + ((x) * SCALE))
   #define PHYS_Y(y) (PANEL_OFFSET_Y + ((y) * SCALE))
   
-  // Clear the left panel content area (físicas: 90,130 tamaño 640x480)
+  // Clear the left panel content area (physical: 90,130 size 640x480)
   M5.Display.fillRect(PANEL_OFFSET_X, PANEL_OFFSET_Y, 640, 480, THEME_BLACK);
   
   // Header with ScreenScraper logo area
   M5.Display.setTextColor(THEME_CYAN);
-  M5.Display.setTextSize(4);  // Tamaño 2 lógico = 4 físico
+  M5.Display.setTextSize(4);  // Logical size 2 = physical size 4
   M5.Display.setCursor(PHYS_X(40), PHYS_Y(5));
   M5.Display.print("SCREENSCRAPER");
   
   M5.Display.setTextColor(THEME_GREEN);
-  M5.Display.setTextSize(2);  // Tamaño 1 lógico = 2 físico
+  M5.Display.setTextSize(2);  // Logical size 1 = physical size 2
   M5.Display.setCursor(PHYS_X(65), PHYS_Y(25));
   M5.Display.print("AUTO-DOWNLOAD");
   
   // Decorative line
   M5.Display.drawFastHLine(PHYS_X(20), PHYS_Y(40), 560, THEME_CYAN);  // 280*2=560
   
-  // Main download panel (usando drawPanel requeriría modificarlo, hacemos rect directo)
+  // Main download panel (using drawPanel would require modifying it; draw rect directly)
   M5.Display.drawRect(PHYS_X(10), PHYS_Y(48), 600, 180, THEME_BLUE);  // 300*2=600, 90*2=180
   M5.Display.fillRect(PHYS_X(10)+2, PHYS_Y(48)+2, 596, 176, THEME_BLACK);
   
@@ -762,7 +762,7 @@ void showDownloadingScreen(String coreName, String gameName) {
 }
 
 void showDownloadProgress(int progress, String text) {
-  // ========== UPDATE PROGRESS BAR (COORDENADAS FÍSICAS con OFFSET_Y=130) ==========
+  // ========== UPDATE PROGRESS BAR (PHYSICAL COORDINATES with OFFSET_Y=130) ==========
   const int PANEL_OFFSET_X = 90;
   const int PANEL_OFFSET_Y = 130;
   const int SCALE = 2;
@@ -770,7 +770,7 @@ void showDownloadProgress(int progress, String text) {
   #define PHYS_X(x) (PANEL_OFFSET_X + ((x) * SCALE))
   #define PHYS_Y(y) (PANEL_OFFSET_Y + ((y) * SCALE))
   
-  // Clear progress area (debajo del STATUS que está en Y=113 lógico)
+  // Clear progress area (below the STATUS which is at logical Y=113)
   M5.Display.fillRect(PHYS_X(10), PHYS_Y(130), 600, 180, THEME_BLACK);
   
   // Progress bar
@@ -1007,7 +1007,7 @@ void drawFooter() {
   //
   // Coordinate math at setTextSize(2):
   //   - Cursor at logical x=120, y=220 → physical x=480, y=660 (SCALE_X=4, SCALE_Y=3).
-  //   - Each char at size 2 is 12 px wide physically (6 lógical × 2 font scale).
+  //   - Each char at size 2 is 12 px wide physically (6 logical × 2 font scale).
   //   - The "GAME: "/"CORE: " prefix (6 chars) occupies 72 px → text starts at x=552 physical.
   //   - The IMG:OK indicator starts at logical x=250 → physical x=1000.
   //   - Use a stable visible window of 20 chars: 20 × 12 = 240 px wide, fits
@@ -1581,7 +1581,7 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
       return true; // Consider it a success if it already exists
     } else {
       Serial.println("FORCE DOWNLOAD enabled - will redownload with new priority");
-      // Opcionalmente, renombrar archivo existente como backup
+      // Optionally, rename the existing file as a backup
       String backupPath = savePath + ".backup";
       if (SD.exists(backupPath)) {
         SD.remove(backupPath);
@@ -1663,7 +1663,7 @@ void showCoreDownloadingScreen(String coreName) {
     Serial.println("Logo not loaded - using text fallback");
   }
 
-  // ========== LEFT PANEL CONTENT (COORDENADAS FÍSICAS con OFFSET_Y=130) ==========
+  // ========== LEFT PANEL CONTENT (PHYSICAL COORDINATES with OFFSET_Y=130) ==========
   const int PANEL_OFFSET_X = 90;
   const int PANEL_OFFSET_Y = 130;
   const int SCALE = 2;
@@ -1676,12 +1676,12 @@ void showCoreDownloadingScreen(String coreName) {
   
   // Header with ScreenScraper logo area
   M5.Display.setTextColor(THEME_CYAN);
-  M5.Display.setTextSize(4);  // Tamaño 2 lógico = 4 físico
+  M5.Display.setTextSize(4);  // Logical size 2 = physical size 4
   M5.Display.setCursor(PHYS_X(40), PHYS_Y(5));
   M5.Display.print("SCREENSCRAPER");
   
   M5.Display.setTextColor(THEME_ORANGE);
-  M5.Display.setTextSize(2);  // Tamaño 1 lógico = 2 físico
+  M5.Display.setTextSize(2);  // Logical size 1 = physical size 2
   M5.Display.setCursor(PHYS_X(60), PHYS_Y(25));
   M5.Display.print("SYSTEM DOWNLOAD");
   
@@ -1755,7 +1755,7 @@ void showCoreImageScreenWithAutoDownload(String coreName) {
   return;
 }
   
-  // CRITICAL FIX: For Arcade cores, ALWAYS ensure we have subsystem info
+  // For Arcade cores, ALWAYS ensure we have subsystem info
   String coreNameLower = coreName;
   coreNameLower.toLowerCase();
   bool isMameCore = (coreNameLower == "arcade");
@@ -2059,9 +2059,9 @@ void setup() {
 
   M5.begin(cfg);
 
-  // ========== INICIAR SERIAL PRIMERO ==========
+  // ========== START SERIAL FIRST ==========
   Serial.begin(115200);
-  delay(500);  // Dar tiempo al Serial
+  delay(500);  // Give the Serial port time to flush
 
   // =====================================================================
   // 2) Log the reset reason — tells us exactly WHY the device restarted.
@@ -2117,7 +2117,7 @@ void setup() {
   Serial.println("Playing Pac-Man boot sound...");
   M5.Speaker.tone(494, 100);  // B
   delay(110);
-  M5.Speaker.tone(988, 100);  // B (octava alta)
+  M5.Speaker.tone(988, 100);  // B (high octave)
   delay(110);
   M5.Speaker.tone(740, 100);  // F#
   delay(110);
@@ -2127,7 +2127,7 @@ void setup() {
   delay(110);
   M5.Speaker.tone(740, 100);  // F#
   delay(110);
-  M5.Speaker.tone(622, 150);  // D# (más largo)
+  M5.Speaker.tone(622, 150);  // D# (longer)
   delay(200);
 
   Serial.println("Speaker test complete");
@@ -2143,7 +2143,7 @@ void setup() {
   
   M5.Speaker.config(spk_cfg);
   M5.Speaker.begin();
-  M5.Speaker.setVolume(100);  // Volumen alto (0-255)*/
+  M5.Speaker.setVolume(100);  // High volume (0-255)*/
   
   Serial.println("Speaker initialized");
   
@@ -2649,7 +2649,7 @@ if (oldGame != currentGame && sdCardAvailable) {
   if (currentGame.length() > 0) {
     Serial.printf("Game loaded: '%s' on core '%s'\n", currentGame.c_str(), currentCore.c_str());
     
-    // ENHANCED: Update subsystem with special handling for Arcade
+    // Update subsystem with special handling for Arcade
     if (isMameCore) {
       Serial.printf("Calling ENHANCED subsystem update for Arcade with force=%s...\n", 
                    forceSubsystemUpdate ? "YES" : "NO");
@@ -2755,7 +2755,7 @@ if (oldGame != currentGame && sdCardAvailable) {
       // Same physical position as Lcd.setCursor(20, 80) at size 3 inside
       // the panel of color = (connected ? THEME_GREEN : THEME_YELLOW).
       // Lcd maps (20,80) → physical (130, 360). Width: 14 chars × 12 px logical
-      // × 2 scale × 1 (size 3 doubles per glyph at 6px lógical → 12 logical
+      // × 2 scale × 1 (size 3 doubles per glyph at 6px logical → 12 logical
       // × 2 scale = 24 px per char, 14 × 24 = 336 px wide).
       uint16_t panelColor = connected ? THEME_GREEN : THEME_YELLOW;
       Lcd.setTextColor(THEME_BLACK, panelColor);
@@ -3247,7 +3247,6 @@ void showCoreImageScreen(String coreName) {
     Serial.println("No image found for core, showing menu image with overlay");
   }
   
-  // IMPROVED: Show menu image with core overlay instead of "image not found"
   showMenuImageWithCoreOverlay(coreName);
 }
 
@@ -3526,7 +3525,7 @@ void showCoreNotFoundScreen(String coreName) {
 
 /**
  * Load and display full screen frame image (frame01.jpg)
- * This serves as the base cyberpunk frame for the entire interface
+ * This serves as the base frame for the entire interface
  * Returns true if successful
  */
 bool loadFullScreenFrame(const char* framePath) {
@@ -3748,7 +3747,7 @@ void buttonPressFeedback(TouchButton* btn, void (*soundFunction)()) {
 }
 
 /**
- * Draw cyberpunk frame - now just loads frame01.jpg
+ * Draw frame - now just loads frame01.jpg
  * If frame image fails, falls back to drawing frame programmatically
  * Uses bootFrameLoaded flag to avoid reloading
  */
@@ -6702,7 +6701,7 @@ void showGameImageScreenCorrected(String coreName, String gameName) {
     return;
   }
   
-  // ENHANCED LOGIC: Check existing image and force download setting
+  // Check existing image and force download setting
   bool imageExists = findGameImageExact(coreName, gameName, imagePath);
   bool shouldDownload = false;
   
@@ -6876,7 +6875,7 @@ bool downloadCoreImageStreamingSafe(String baseUrl, String savePath) {
       Serial.printf("Content-Type: '%s'\n", contentType.c_str());
       Serial.printf("Content-Length: %d\n", contentLength);
       
-      // Read the COMPLETE response first (STREAMING SEGURO)
+      // Read the COMPLETE response first (SAFE STREAMING)
       String completeResponse = http.getString();
       Serial.printf("Response size: %d bytes\n", completeResponse.length());
       
@@ -7568,7 +7567,7 @@ void updateArcadeSubsystemForCurrentGame(String coreName, String gameName) {
     } else {
       Serial.printf("Could not find subsystem ID for game: %s\n", gameName.c_str());
       
-      // ENHANCED: Don't clear immediately - preserve existing subsystem if available
+      // Don't clear immediately - preserve existing subsystem if available
       if (lastArcadeSystemeId.length() == 0) {
         Serial.printf("No existing subsystem to preserve\n");
       } else {
@@ -7580,7 +7579,7 @@ void updateArcadeSubsystemForCurrentGame(String coreName, String gameName) {
   } else {
     Serial.printf("ROM CRC not available\n");
     
-    // ENHANCED: Don't clear subsystem on missing ROM data
+    // Don't clear subsystem on missing ROM data
     if (lastArcadeSystemeId.length() > 0) {
       Serial.printf("Preserving existing subsystem ID despite missing ROM data: %s\n", 
                    lastArcadeSystemeId.c_str());
@@ -7608,7 +7607,7 @@ void updateArcadeSubsystemForCurrentGameEnhanced(String coreName, String gameNam
     return;
   }
   
-  // ENHANCED: Check if this is a different game or forced update
+  // Check if this is a different game or forced update
   bool isDifferentGame = (gameName != lastProcessedGame);
   bool shouldUpdate = forceUpdate || isDifferentGame;
   
@@ -7648,7 +7647,7 @@ void updateArcadeSubsystemForCurrentGameEnhanced(String coreName, String gameNam
       Serial.printf("   Game: '%s'\n", gameInfo.gameName.c_str());
       Serial.printf("   Game processed: '%s'\n", lastProcessedGame.c_str());
       
-      // ENHANCED: If this is a different subsystem, log the change
+      // If this is a different subsystem, log the change
       if (oldSubsystemId.length() > 0 && oldSubsystemId != lastArcadeSystemeId) {
         Serial.printf("SUBSYSTEM CHANGED: %s -> %s\n", oldSubsystemId.c_str(), lastArcadeSystemeId.c_str());
       }
@@ -7670,7 +7669,7 @@ void updateArcadeSubsystemForCurrentGameEnhanced(String coreName, String gameNam
     // Mark as processed even without CRC data
     lastProcessedGame = gameName;
     
-    // ENHANCED: For game changes without CRC, clear subsystem to force re-detection
+    // For game changes without CRC, clear subsystem to force re-detection
     if (isDifferentGame || forceUpdate) {
       Serial.printf("Game change without CRC - clearing subsystem for re-detection\n");
       lastArcadeSystemeId = "";
