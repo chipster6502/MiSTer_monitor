@@ -1,7 +1,3 @@
-#include <XPT2046_Touchscreen.h>
-
-#include <LovyanGFX.hpp>
-
 // ============================================================================
 //  Build settings (Arduino IDE -> Tools menu):
 //    Board:           ESP32 Dev Module
@@ -10,6 +6,9 @@
 //    PSRAM:           Disabled
 //    Upload Speed:    921600
 // ============================================================================
+
+#include <XPT2046_Touchscreen.h>
+#include <LovyanGFX.hpp>
 #include "board_hal.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -36,16 +35,6 @@
 // CYD: dedicated HSPI bus for the SD card (TFT owns VSPI).
 //   SD pinout:  SCK=18  MISO=19  MOSI=23  CS=5
 SPIClass sdSPI(HSPI);
-
-// psramMalloc(): safe allocator for large buffers.
-inline uint8_t* psramMalloc(size_t size) {
-  uint8_t* ptr = (uint8_t*)malloc(size);
-  if (!ptr) {
-    Serial.printf("[MEM] malloc FAILED for %u bytes! Free heap: %u\n",
-                  size, ESP.getFreeHeap());
-  }
-  return ptr;
-}
 
 // ========== CONFIGURATION ==========
 // All user settings are loaded at boot from /config.ini on the ESP32 SD card.
@@ -251,9 +240,8 @@ void handleScreenshot() {
   screenshotServer.sendContent((const char*)header, HEADER_SIZE);
 
   // Allocate one row of RGB565 source + one row of RGB888 destination
-  // Using PSRAM if available to preserve internal heap
-  uint16_t* rowSrc = (uint16_t*)psramMalloc(w * 2);
-  uint8_t*  rowDst = (uint8_t*) psramMalloc(ROW_STRIDE);
+  uint16_t* rowSrc = (uint16_t*)malloc(w * 2);
+  uint8_t*  rowDst = (uint8_t*) malloc(ROW_STRIDE);
 
   if (!rowSrc || !rowDst) {
     Serial.println("[SCREENSHOT] ERROR: Not enough memory for row buffers");
@@ -327,7 +315,6 @@ void showGameImageScreenCorrected(String coreName, String gameName);
 int jpegDrawCallback(JPEGDRAW *pDraw);
 void showSDCardError();
 void showImageNotFound(String coreName);
-
 bool loadFullScreenFrame(const char* framePath);
 bool loadMisterLogo(int x, int y);
 void drawCyberpunkFrame();
@@ -379,7 +366,6 @@ void showDownloadProgress(int progress, String text);
 void addGameImageFooter(String gameName);
 void drawCoreImageFooter();
 
-// GameInfo searchWithJeuInfosPrecise(String coreName, RomDetails romDetails);
 GameInfo extractGameInfoFromJeuInfos(String& response, String originalFilename);
 
 // Utility functions
@@ -450,7 +436,6 @@ static bool showingGameImage = true;  // true = game image, false = system image
 static unsigned long lastRotationTime = 0;
 String lastArcadeSystemeId = "";  // Store last arcade subsystem ID
 
-// Function declaration (add this with other function declarations)
 void checkMisterDebugState();
 void checkServerErrorState();
 
@@ -464,7 +449,6 @@ void playPrevButtonSound();
 void playScanButtonSound();
 void playNextButtonSound();
 
-// Global variables to add (add these at the top of your .ino file)
 String lastProcessedGame = "";           // Last game we processed for subsystem
 bool forceSubsystemUpdate = false;       // Flag to force subsystem update
 unsigned long gameChangeTime = 0;        // When the game changed
@@ -2781,125 +2765,6 @@ bool displayCoreImage(String imagePath) {
   return displayCoreImageCentered(imagePath);
 }
 
-/* ORIGINAL CODE - temporarily disabled for testing
-bool displayCoreImage_ORIGINAL(String imagePath) {
-  if (!sdCardAvailable || !SD.exists(imagePath)) {
-    Serial.printf("Image doesn't exist: %s\n", imagePath.c_str());
-    return false;
-  }
-  
-  Serial.printf("Displaying image: %s\n", imagePath.c_str());
-  
-  File imageFile = SD.open(imagePath);
-  if (!imageFile) {
-    Serial.println("Error opening file");
-    return false;
-  }
-  
-  size_t fileSize = imageFile.size();
-  Serial.printf("Size: %d bytes\n", fileSize);
-  
-  if (fileSize == 0 || fileSize > 500000) {
-    Serial.println("Invalid file size");
-    imageFile.close();
-    return false;
-  }
-  
-  // Read into smaller buffer if possible
-  uint8_t *buffer = (uint8_t*)malloc(fileSize);
-  if (!buffer) {
-    Serial.println("No memory for image");
-    imageFile.close();
-    return false;
-  }
-  
-  size_t bytesRead = imageFile.read(buffer, fileSize);
-  imageFile.close();
-  
-  if (bytesRead != fileSize) {
-    Serial.println("Error reading file");
-    free(buffer);
-    return false;
-  }
-  
-  // Verify basic JPEG header
-  if (buffer[0] != 0xFF || buffer[1] != 0xD8) {
-    Serial.println("Not a valid JPEG");
-    free(buffer);
-    return false;
-  }
-  
-  // Clear screen with black (same as displayCoreImageCentered which works)
-  Lcd.fillScreen(THEME_BLACK);
-  
-  // Ensure JPEG decoder is in clean state
-  jpeg.close();
-  
-  // Decode with jpegDrawCallback (same as displayCoreImageCentered which works)
-  Serial.printf("About to call jpeg.openRAM() with buffer size %d\n", fileSize);
-  if (jpeg.openRAM(buffer, fileSize, jpegDrawCallback)) {
-    Serial.println("jpeg.openRAM() succeeded");
-    int imgW = jpeg.getWidth();
-    int imgH = jpeg.getHeight();
-    
-    // Use physical coordinates for both X and Y (images are not scaled)
-    int offsetX = (TARGET_WIDTH - imgW) / 2;      // Physical: 1280
-    int offsetY = (IMAGE_AREA_HEIGHT - imgH) / 2; // Physical: 645
-    
-    // Debug logging to verify centering
-    Serial.printf("=== IMAGE CENTERING DEBUG ===\n");
-    Serial.printf("Image dimensions: %dx%d\n", imgW, imgH);
-    Serial.printf("Available area: %dx%d\n", TARGET_WIDTH, IMAGE_AREA_HEIGHT);
-    Serial.printf("Calculated offsets: X=%d, Y=%d\n", offsetX, offsetY);
-    Serial.printf("Image position: X[%d-%d] Y[%d-%d]\n", 
-                  offsetX, offsetX+imgW, offsetY, offsetY+imgH);
-    
-    if (offsetX < 0) {
-      Serial.printf("WARNING: Image too wide, clipping\n");
-      offsetX = 0;
-    }
-    if (offsetY < 0) {
-      Serial.printf("WARNING: Image too tall, clipping\n");
-      offsetY = 0;
-    }
-    
-    if (offsetY + imgH > IMAGE_AREA_HEIGHT) {
-      Serial.printf("ERROR: Image extends into footer (Y=%d, footer at Y=%d)\n", 
-                    offsetY + imgH, IMAGE_AREA_HEIGHT);
-    } else {
-      Serial.printf("OK: Image centered correctly\n");
-    }
-    Serial.printf("=============================\n");
-    
-    Serial.println("Setting pixel type to RGB565_BIG_ENDIAN...");
-    jpeg.setPixelType(RGB565_BIG_ENDIAN);
-    
-    Serial.printf("About to decode with offsets: X=%d, Y=%d\n", offsetX, offsetY);
-    Serial.printf("Free heap before decode: %d bytes\n", ESP.getFreeHeap());
-    
-    bool success = jpeg.decode(offsetX, offsetY, 0);
-    
-    Serial.printf("jpeg.decode() returned: %s\n", success ? "SUCCESS" : "FAILED");
-    Serial.printf("Free heap after decode: %d bytes\n", ESP.getFreeHeap());
-    
-    jpeg.close();
-    free(buffer);
-    
-    if (success) {
-      Serial.printf("Image displayed: %dx%d\n", imgW, imgH);
-      return true;
-    } else {
-      Serial.println("Error decoding");
-      return false;
-    }
-  } else {
-    Serial.println("Error opening JPEG");
-    free(buffer);
-    return false;
-  }
-}
-*/ // End of ORIGINAL CODE - temporarily disabled for testing
-
 void showCoreImageScreen(String coreName) {
   // backgroundLoaded = false;
   String imagePath;
@@ -3178,8 +3043,8 @@ bool loadFullScreenFrame(const char* framePath) {
     return false;
   }
   
-  // Allocate buffer for frame image (PSRAM-aware to preserve internal heap)
-  uint8_t* buffer = (uint8_t*)psramMalloc(fileSize);
+  // Allocate buffer for frame image
+  uint8_t* buffer = (uint8_t*)malloc(fileSize);
   if (!buffer) {
     Serial.println("No memory for frame image");
     frameFile.close();
@@ -3254,7 +3119,7 @@ bool loadMisterLogo(int x, int y) {
     return false;
   }
   
-  uint8_t* buffer = (uint8_t*)psramMalloc(fileSize);
+  uint8_t* buffer = (uint8_t*)malloc(fileSize);
   if (!buffer) {
     Serial.println("No memory for logo");
     logoFile.close();
@@ -3303,7 +3168,7 @@ void drawMisterLogoRightPanel() {
     File logoFile = SD.open(logoPath);
     if (logoFile) {
       size_t fileSize = logoFile.size();
-      uint8_t *buffer = (uint8_t*)psramMalloc(fileSize);
+      uint8_t *buffer = (uint8_t*)malloc(fileSize);
       
       if (buffer) {
         size_t bytesRead = logoFile.read(buffer, fileSize);
@@ -5271,8 +5136,8 @@ bool downloadImageFromScreenScraper(String imageUrl, String savePath) {
   
   showDownloadProgress(50, "Downloading...");
   
-  // Download to buffer (PSRAM-aware: images can be up to 500KB)
-  uint8_t* buffer = (uint8_t*)psramMalloc(contentLength);
+  // Download to buffer 
+  uint8_t* buffer = (uint8_t*)malloc(contentLength);
   if (!buffer) {
     Serial.println("No memory for download");
     http.end();
@@ -5365,8 +5230,8 @@ bool displayCoreImageCentered(String imagePath) {
     return false;
   }
   
-  // Read image to buffer (PSRAM-aware to preserve internal heap for ESP32 stack/variables)
-  uint8_t *buffer = (uint8_t*)psramMalloc(fileSize);
+  // Read image to buffer
+  uint8_t *buffer = (uint8_t*)malloc(fileSize);
   if (!buffer) {
     Serial.println("No memory for image buffer");
     imageFile.close();

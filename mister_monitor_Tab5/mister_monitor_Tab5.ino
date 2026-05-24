@@ -376,7 +376,6 @@ void showDownloadProgress(int progress, String text);
 void addGameImageFooter(String gameName);
 void drawCoreImageFooter();
 
-// GameInfo searchWithJeuInfosPrecise(String coreName, RomDetails romDetails);
 GameInfo extractGameInfoFromJeuInfos(String& response, String originalFilename);
 
 // Utility functions
@@ -448,7 +447,6 @@ static bool showingGameImage = true;  // true = game image, false = system image
 static unsigned long lastRotationTime = 0;
 String lastArcadeSystemeId = "";  // Store last arcade subsystem ID
 
-// Function declaration (add this with other function declarations)
 void checkMisterDebugState();
 void checkServerErrorState();
 
@@ -462,7 +460,6 @@ void playPrevButtonSound();
 void playScanButtonSound();
 void playNextButtonSound();
 
-// Global variables to add (add these at the top of your .ino file)
 String lastProcessedGame = "";           // Last game we processed for subsystem
 bool forceSubsystemUpdate = false;       // Flag to force subsystem update
 unsigned long gameChangeTime = 0;        // When the game changed
@@ -2962,125 +2959,6 @@ bool displayCoreImage(String imagePath) {
   // (JPEGDEC doesn't accept large offsets in decode(), so we apply them in the callback)
   return displayCoreImageCentered(imagePath);
 }
-
-/* ORIGINAL CODE - temporarily disabled for testing
-bool displayCoreImage_ORIGINAL(String imagePath) {
-  if (!sdCardAvailable || !SD.exists(imagePath)) {
-    Serial.printf("Image doesn't exist: %s\n", imagePath.c_str());
-    return false;
-  }
-  
-  Serial.printf("Displaying image: %s\n", imagePath.c_str());
-  
-  File imageFile = SD.open(imagePath);
-  if (!imageFile) {
-    Serial.println("Error opening file");
-    return false;
-  }
-  
-  size_t fileSize = imageFile.size();
-  Serial.printf("Size: %d bytes\n", fileSize);
-  
-  if (fileSize == 0 || fileSize > 500000) {
-    Serial.println("Invalid file size");
-    imageFile.close();
-    return false;
-  }
-  
-  // Read into smaller buffer if possible
-  uint8_t *buffer = (uint8_t*)malloc(fileSize);
-  if (!buffer) {
-    Serial.println("No memory for image");
-    imageFile.close();
-    return false;
-  }
-  
-  size_t bytesRead = imageFile.read(buffer, fileSize);
-  imageFile.close();
-  
-  if (bytesRead != fileSize) {
-    Serial.println("Error reading file");
-    free(buffer);
-    return false;
-  }
-  
-  // Verify basic JPEG header
-  if (buffer[0] != 0xFF || buffer[1] != 0xD8) {
-    Serial.println("Not a valid JPEG");
-    free(buffer);
-    return false;
-  }
-  
-  // Clear screen with black (same as displayCoreImageCentered which works)
-  Lcd.fillScreen(THEME_BLACK);
-  
-  // Ensure JPEG decoder is in clean state
-  jpeg.close();
-  
-  // Decode with jpegDrawCallback (same as displayCoreImageCentered which works)
-  Serial.printf("About to call jpeg.openRAM() with buffer size %d\n", fileSize);
-  if (jpeg.openRAM(buffer, fileSize, jpegDrawCallback)) {
-    Serial.println("jpeg.openRAM() succeeded");
-    int imgW = jpeg.getWidth();
-    int imgH = jpeg.getHeight();
-    
-    // FIXED: Use physical coordinates for both X and Y (images are not scaled)
-    int offsetX = (TARGET_WIDTH - imgW) / 2;      // Physical: 1280
-    int offsetY = (IMAGE_AREA_HEIGHT - imgH) / 2; // Physical: 645
-    
-    // Debug logging to verify centering
-    Serial.printf("=== IMAGE CENTERING DEBUG ===\n");
-    Serial.printf("Image dimensions: %dx%d\n", imgW, imgH);
-    Serial.printf("Available area: %dx%d\n", TARGET_WIDTH, IMAGE_AREA_HEIGHT);
-    Serial.printf("Calculated offsets: X=%d, Y=%d\n", offsetX, offsetY);
-    Serial.printf("Image position: X[%d-%d] Y[%d-%d]\n", 
-                  offsetX, offsetX+imgW, offsetY, offsetY+imgH);
-    
-    if (offsetX < 0) {
-      Serial.printf("WARNING: Image too wide, clipping\n");
-      offsetX = 0;
-    }
-    if (offsetY < 0) {
-      Serial.printf("WARNING: Image too tall, clipping\n");
-      offsetY = 0;
-    }
-    
-    if (offsetY + imgH > IMAGE_AREA_HEIGHT) {
-      Serial.printf("ERROR: Image extends into footer (Y=%d, footer at Y=%d)\n", 
-                    offsetY + imgH, IMAGE_AREA_HEIGHT);
-    } else {
-      Serial.printf("OK: Image centered correctly\n");
-    }
-    Serial.printf("=============================\n");
-    
-    Serial.println("Setting pixel type to RGB565_BIG_ENDIAN...");
-    jpeg.setPixelType(RGB565_BIG_ENDIAN);
-    
-    Serial.printf("About to decode with offsets: X=%d, Y=%d\n", offsetX, offsetY);
-    Serial.printf("Free heap before decode: %d bytes\n", ESP.getFreeHeap());
-    
-    bool success = jpeg.decode(offsetX, offsetY, 0);
-    
-    Serial.printf("jpeg.decode() returned: %s\n", success ? "SUCCESS" : "FAILED");
-    Serial.printf("Free heap after decode: %d bytes\n", ESP.getFreeHeap());
-    
-    jpeg.close();
-    free(buffer);
-    
-    if (success) {
-      Serial.printf("Image displayed: %dx%d\n", imgW, imgH);
-      return true;
-    } else {
-      Serial.println("Error decoding");
-      return false;
-    }
-  } else {
-    Serial.println("Error opening JPEG");
-    free(buffer);
-    return false;
-  }
-}
-*/ // End of ORIGINAL CODE - temporarily disabled for testing
 
 void showCoreImageScreen(String coreName) {
   // backgroundLoaded = false;
