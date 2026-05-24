@@ -375,10 +375,6 @@ void showDownloadProgress(int progress, String text);
 
 void addGameImageFooter(String gameName);
 void drawCoreImageFooter();
-enum RescanButtonState { RESCAN_IDLE, RESCAN_SCANNING };
-bool isRescanVisible();
-void drawRescanButton(RescanButtonState state);
-void redrawCurrentFooter();
 
 // GameInfo searchWithJeuInfosPrecise(String coreName, RomDetails romDetails);
 GameInfo extractGameInfoFromJeuInfos(String& response, String originalFilename);
@@ -433,9 +429,7 @@ bool lastGameImageOK         = false;  // true when a game-specific image is dis
                                         // (either cached or freshly downloaded)
 bool lastGameSearchExhausted = false;  // true when ScreenScraper search with valid
                                         // CRC completed without finding an image
-                                        // (system in DB, but game not). RESCAN won't help.
-unsigned long rescanForceVisibleUntil = 0;  // millis() until which the RESCAN button
-                                             // is force-visible on user request
+                                        // (system in DB, but game not).
 bool scanInProgress          = false;  // true while SCAN button operation is running
                                         // (used to lock further SCAN presses and to
                                         //  show "SCANNING" label on the button)
@@ -810,69 +804,8 @@ void showDownloadProgress(int progress, String text) {
   #undef PHYS_Y
 }
 
-// ========== RESCAN GAME BUTTON HELPERS ==========
-// The RESCAN GAME button appears in the footer of fullscreen image screens
-// (both core and game) when the ROM hasn't been positively identified.
-//
-// Visibility logic: a game is loaded AND either (a) the server hasn't given
-// us a CRC for it yet, OR (b) we aren't displaying a game-specific image.
-// Once both conditions are clear (CRC known and game image showing), the
-// button hides.
-bool isRescanVisible() {
-  // Prerequisite: a game must be loaded
-  if (currentGame.length() == 0) return false;
-  
-  // User-triggered pulse (touch outside button on image screen): show for 5s
-  if (millis() < rescanForceVisibleUntil) return true;
-  
-  // Hide if ScreenScraper search was completed cleanly with no game match.
-  // Re-rescanning won't help, the title simply isn't in the database for this system.
-  if (lastGameSearchExhausted) return false;
-  
-  // Show if CRC is missing — rescan can recover it
-  if (!lastRomHasCrc) return true;
-  
-  // Show if CRC is present but image hasn't been displayed (network failure,
-  // timeout, etc.). Manual rescan can retry the download.
-  if (!lastGameImageOK) return true;
-  
-  // Everything looks fine: hide the button to keep the footer clean.
-  return false;
-}
-
-// Draws the RESCAN GAME button at fixed coordinates inside the footer.
-// 'state' = RESCAN_IDLE during normal display, RESCAN_SCANNING during the
-// blocking HTTP call to /status/rom/details?force=1 so the user sees that
-// the press registered.
-void drawRescanButton(RescanButtonState state) {
-  uint16_t borderColor = (state == RESCAN_SCANNING) ? THEME_YELLOW : THEME_CYAN;
-  uint16_t textColor   = borderColor;
-  const char* label    = (state == RESCAN_SCANNING) ? "[  SCANNING... ]" : "[ RESCAN GAME ]";
-
-  M5.Display.fillRect(840, 632, 420, 55, THEME_BLACK);
-  M5.Display.drawRect(840, 632, 420, 55, borderColor);
-  M5.Display.setTextColor(textColor);
-  M5.Display.setTextSize(3);
-  M5.Display.setCursor(918, 645);
-  M5.Display.print(label);
-}
-
-// Repaints the active footer (core image vs game image) without redrawing
-// the whole image. Used after a failed rescan so we don't lose the picture.
-void redrawCurrentFooter() {
-  if (lastGameImageOK && currentGame.length() > 0) {
-    addGameImageFooter(currentGame);
-  } else {
-    drawCoreImageFooter();
-  }
-}
-
 // Visible window (in characters) for the game name in the image footer.
-// At text size 3 each char is ~18 px wide.
-//   - Without rescan button: x=200 to x=1280  →  1080 / 18 ≈ 60 chars; use 58 for margin.
-//   - With    rescan button: x=200 to x=820   →   620 / 18 ≈ 34 chars; use 30 for margin.
 #define GAME_FOOTER_VISIBLE_CHARS_FULL    58
-#define GAME_FOOTER_VISIBLE_CHARS_RESCAN  30
 
 void addGameImageFooter(String gameName) {
   // Footer in PHYSICAL coordinates (full screen width, below image area at Y=620)
@@ -881,10 +814,7 @@ void addGameImageFooter(String gameName) {
   M5.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
   M5.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
   
-  // Decide whether the rescan button takes the right side of the footer
-  bool showRescan   = isRescanVisible();
-  int  visibleChars = showRescan ? GAME_FOOTER_VISIBLE_CHARS_RESCAN
-                                  : GAME_FOOTER_VISIBLE_CHARS_FULL;
+  int  visibleChars = GAME_FOOTER_VISIBLE_CHARS_FULL;
   
   M5.Display.setTextWrap(false);
   
@@ -894,9 +824,7 @@ void addGameImageFooter(String gameName) {
   M5.Display.setCursor(40, 638);
   M5.Display.print("GAME:");
   
-  // Initialize the scroll state for this game name. Re-init if either the
-  // text OR the visible window changes (the latter happens when the rescan
-  // button toggles on/off mid-display).
+  // Initialize the scroll state for this game name.
   if (imageFooterScroll.fullText != gameName ||
       imageFooterScroll.maxChars != visibleChars) {
     initScrollText(&imageFooterScroll, gameName, visibleChars);
@@ -918,36 +846,28 @@ void addGameImageFooter(String gameName) {
   // Instructions (lower line of footer) — shifted left when button is visible
   M5.Display.setTextColor(THEME_GREEN);
   M5.Display.setTextSize(3);
-  M5.Display.setCursor(showRescan ? 40 : 250, 685);
+  M5.Display.setCursor(250, 685);
   M5.Display.print("Touch the screen to show MiSTer monitor");
   
-  // Draw rescan button on top if conditions warrant it
-  if (showRescan) {
-    drawRescanButton(RESCAN_IDLE);
-  }
 }
 
 // Footer for fullscreen core image screens.
 // Layout (footer band: y=621..720, height 99):
 //   - If game is active: line 1 (y=638) "GAME: <name>" with scroll, line 2 (y=685) "Touch..."
 //   - If no game:        single centered "Touch..." (y=660), as before
-// When a game is active but its CRC could not be detected, also shows RESCAN GAME button.
 void drawCoreImageFooter() {
   M5.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
   M5.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
   
-  bool showRescan = isRescanVisible();
   bool hasGame    = (currentGame.length() > 0);
   
   M5.Display.setTextWrap(false);
   
   if (hasGame) {
     // === Line 1: GAME: <name> ===
-    int visibleChars = showRescan ? GAME_FOOTER_VISIBLE_CHARS_RESCAN
-                                   : GAME_FOOTER_VISIBLE_CHARS_FULL;
+    int visibleChars = GAME_FOOTER_VISIBLE_CHARS_FULL;
     
-    // Initialize the scroll state. Re-init if either the text OR the visible
-    // window changed (the rescan button toggles on/off may change visibleChars).
+    // Initialize the scroll state.
     if (imageFooterScroll.fullText != currentGame ||
         imageFooterScroll.maxChars != visibleChars) {
       initScrollText(&imageFooterScroll, currentGame, visibleChars);
@@ -972,21 +892,17 @@ void drawCoreImageFooter() {
     // === Line 2: hint ===
     M5.Display.setTextColor(THEME_GREEN);
     M5.Display.setTextSize(3);
-    M5.Display.setCursor(showRescan ? 40 : 250, 685);
+    M5.Display.setCursor(250, 685);
     M5.Display.print("Touch the screen to show MiSTer monitor");
     
   } else {
     // No game: just the centered hint, like before
     M5.Display.setTextColor(THEME_GREEN);
     M5.Display.setTextSize(3);
-    M5.Display.setCursor(showRescan ? 40 : 250, 660);
+    M5.Display.setCursor(250, 660);
     M5.Display.print("Touch the screen to show MiSTer monitor");
   }
   
-  // Rescan button on top
-  if (showRescan) {
-    drawRescanButton(RESCAN_IDLE);
-  }
 }
 
 void drawFooter() {
@@ -1980,21 +1896,26 @@ void handleTouch() {
         // Step 1: refresh all MiSTer state (core, game, system, network, etc.)
         updateMiSTerData();
         
-        // Step 2: if a game is active, force a fresh ROM details fetch.
+        // Step 2: if a game is active, force a complete fresh search.
         if (currentGame.length() > 0) {
-          Serial.println("Game active — forcing ROM details rescan");
+          Serial.println("Game active — forcing ROM details + image rescan");
           RomDetails fresh = getCurrentRomDetailsForced();
-          bool hadCrc = lastRomHasCrc;
           lastRomHasCrc = fresh.available && fresh.hashCalculated && fresh.crc32.length() > 0;
           Serial.printf("After SCAN rescan: CRC available = %s\n",
                         lastRomHasCrc ? "YES" : "NO");
-          
-          // If CRC newly arrived, clear caches so the next image lookup uses it
-          if (lastRomHasCrc && !hadCrc) {
-            lastSearchedGame        = "";
-            lastGameImageOK         = false;
-            lastGameSearchExhausted = false;
-          }
+
+          // SCAN ALWAYS forces a complete fresh image search, even when the
+          // CRC was already known.
+          lastSearchedGame        = "";
+          lastGameImageOK         = false;
+          lastGameSearchExhausted = false;
+
+          btnScan.label   = originalLabel;
+          scanInProgress  = false;
+          lastButtonPress = millis();
+          showGameImageScreen(currentCore, currentGame);
+          coreImageStartTime = millis();
+          return;   // switched to image screen; skip the HUD-redraw tail
         }
         
         // === Exit SCANNING state ===
@@ -2323,52 +2244,6 @@ void loop() {
   // We don't need to check specific buttons, any touch will do
   auto touch = M5.Touch.getDetail();
   if (touch.wasPressed()) {
-    int tx = touch.x;
-    int ty = touch.y;
-
-    // === Touch on RESCAN button ===
-    if (isRescanVisible() && tx >= 840 && tx < 1260 && ty >= 632 && ty < 687) {
-      Serial.println("RESCAN GAME button pressed - fetching fresh ROM details");
-      
-      // Visual feedback: flip button to SCANNING state before the blocking
-      // HTTP call (which can take up to 15s on timeout).
-      drawRescanButton(RESCAN_SCANNING);
-      rescanForceVisibleUntil = 0;   // pulse no longer needed; consume it
-      
-      RomDetails fresh = getCurrentRomDetailsForced();
-      lastRomHasCrc = fresh.available && fresh.hashCalculated && fresh.crc32.length() > 0;
-      Serial.printf("After rescan: CRC available = %s\n", lastRomHasCrc ? "YES" : "NO");
-      
-      if (lastRomHasCrc) {
-        Serial.printf("CRC obtained — clearing search cache and retrying download\n");
-        lastSearchedGame        = "";
-        lastGameImageOK         = false;
-        lastGameSearchExhausted = false;  // give the new CRC a fresh chance
-        showGameImageScreen(currentCore, currentGame);
-        coreImageStartTime = millis();
-      } else {
-        redrawCurrentFooter();
-      }
-      lastButtonPress = millis();
-      return;
-    }
-    
-    // === Touch outside RESCAN button, but a game is active and something
-    //     looks off (no CRC OR no image OR pulse already running) ===
-    // Instead of exiting to monitor, surface the RESCAN button for 5 seconds
-    // so the user can recover from a desynced display. A second touch outside
-    // the button (after the pulse expires) exits to monitor as usual.
-    bool somethingMightBeWrong = (currentGame.length() > 0 &&
-                                  !lastGameSearchExhausted &&
-                                  (!lastRomHasCrc || !lastGameImageOK));
-    if (somethingMightBeWrong && millis() >= rescanForceVisibleUntil) {
-      Serial.println("Touch outside button — surfacing RESCAN for 5s");
-      rescanForceVisibleUntil = millis() + 5000;
-      redrawCurrentFooter();
-      lastButtonPress = millis();
-      return;
-    }
-    
     // === Default: exit to monitor ===
     Serial.println("Touch detected - exiting core image to interface");
     M5.Display.fillRect(0, 0, 1280, 80, THEME_CYAN);
@@ -2379,7 +2254,6 @@ void loop() {
     showingCoreImage         = false;
     backgroundLoaded         = false;
     needsRedraw              = true;
-    rescanForceVisibleUntil  = 0;   // pulse cancelled by exiting
     lastButtonPress          = millis();
     return;
   }
@@ -3400,7 +3274,6 @@ void showMenuImageWithCoreOverlay(String coreName) {
   M5.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
   
   M5.Display.setTextWrap(false);
-  bool showRescan = isRescanVisible();
   bool hasGame    = (currentGame.length() > 0);
   
   // === Line 1: ACTIVE CORE ===
@@ -3418,8 +3291,7 @@ void showMenuImageWithCoreOverlay(String coreName) {
   
   // === Line 2: GAME (only when a game is loaded) ===
   if (hasGame) {
-    int visibleChars = showRescan ? GAME_FOOTER_VISIBLE_CHARS_RESCAN
-                                   : GAME_FOOTER_VISIBLE_CHARS_FULL;
+    int visibleChars = GAME_FOOTER_VISIBLE_CHARS_FULL;
     if (imageFooterScroll.fullText != currentGame ||
         imageFooterScroll.maxChars != visibleChars) {
       initScrollText(&imageFooterScroll, currentGame, visibleChars);
@@ -3440,18 +3312,12 @@ void showMenuImageWithCoreOverlay(String coreName) {
     M5.Display.print(displayGame);
   }
   
-  // === Hint (bottom-right, size 2, only when no rescan button) ===
-  if (!showRescan) {
+  // === Hint (bottom-right, size 2) ===
     M5.Display.setTextColor(THEME_CYAN);
     M5.Display.setTextSize(2);
     M5.Display.setCursor(870, 695);
     M5.Display.print("Touch to show monitor");
-  }
   
-  // Rescan button if applicable
-  if (showRescan) {
-    drawRescanButton(RESCAN_IDLE);
-  }
 }
 
 void showCoreNotFoundScreen(String coreName) {
@@ -4385,12 +4251,11 @@ void startCrcRecurrentForGame(String gameName, String coreName) {
   currentCoreForCrc = coreName;
   lastRomHasCrc            = false;
   lastGameImageOK          = false;
-  rescanForceVisibleUntil  = 0;
   
   // Short-circuit: if the core is not in ScreenScraper's DB, do not activate
   // the recurrent. ScreenScraper requires a system ID, and asking MiSTer for
   // ROM details (which calculates CRC32 over the file) is wasted work.
-  // Mark the search as exhausted from the start so the RESCAN button stays hidden.
+  // Mark the search as exhausted from the start.
   if (getScreenScraperSystemId(coreName).length() == 0) {
     Serial.printf("Core '%s' not mapped to ScreenScraper — recurrent NOT started\n",
                   coreName.c_str());
@@ -4404,7 +4269,7 @@ void startCrcRecurrentForGame(String gameName, String coreName) {
   crcRecurrentActive       = true;
   lastCrcRecurrentTime     = 0;     // Force immediate check
   crcRecurrentAttempts     = 0;
-  lastGameSearchExhausted  = false; // Re-enable RESCAN for the new game
+  lastGameSearchExhausted  = false;
   
   Serial.printf("CRC recurrent started: '%s' core '%s'\n", gameName.c_str(), coreName.c_str());
   Serial.printf("DEBUG: crcRecurrentActive=%s\n", crcRecurrentActive ? "true" : "false");
@@ -4460,7 +4325,7 @@ void processCrcRecurrent() {
   }
   
   // If the core isn't mapped to any ScreenScraper system, no number of retries
-  // will produce a hit. Mark search exhausted (hides RESCAN button) and stop.
+  // will produce a hit. Mark search exhausted and stop.
   if (getScreenScraperSystemId(currentCoreForCrc).length() == 0) {
     Serial.printf("Core '%s' not in ScreenScraper DB — stopping CRC recurrent\n",
                   currentCoreForCrc.c_str());
@@ -4480,8 +4345,7 @@ void processCrcRecurrent() {
   
   // If a previous attempt confirmed that ScreenScraper has the system but not
   // the game (search exhausted), there is no point in retrying every 10 seconds.
-  // Stop the recurrent — only a manual RESCAN GAME (which clears this flag)
-  // can re-enable searches.
+  // Stop the recurrent.
   if (lastGameSearchExhausted) {
     Serial.printf("Search already exhausted for '%s' — stopping CRC recurrent\n",
                   currentGameForCrc.c_str());
@@ -7338,8 +7202,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
   
   // Early exit: if the core isn't mapped to a ScreenScraper system, there's
   // no point asking MiSTer for ROM details 
-  // the search would fail anyway. Mark search exhausted so the
-  // RESCAN button hides itself and the recurrent stops.
+  // the search would fail anyway. Mark search exhausted.
   String systemId = getScreenScraperSystemId(coreName);
   if (systemId.length() == 0) {
     Serial.printf("Core '%s' not mapped to any ScreenScraper system — skipping search\n",
@@ -7469,9 +7332,8 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
         } else {
           Serial.println("Second CRC search also found no results");
           // ScreenScraper returned a clean response twice with no game match.
-          // Re-rescanning won't change this — mark search as exhausted.
           lastGameSearchExhausted = true;
-          Serial.println("Marked search as exhausted (no rescan suggested)");
+          Serial.println("Marked search as exhausted");
         }
       }
     }
