@@ -7117,27 +7117,26 @@ String getScrolledText(ScrollTextState* state) {
 GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
   GameInfo result;
   result.found = false;
-  
+
   Serial.printf("=== JSON PRECISE SEARCH ===\n");
-  Serial.printf("Core: %s | ROM: %s | CRC: %s\n", 
+  Serial.printf("Core: %s | ROM: %s | CRC: %s\n",
                 coreName.c_str(), romDetails.filename.c_str(), romDetails.crc32.c_str());
-  
+
   int startHeap = ESP.getFreeHeap();
   Serial.printf("Starting heap: %d bytes\n", startHeap);
-  
+
   // OPTIMIZATION: Critical memory verification
   if (startHeap < 100000) {
     Serial.printf("CRITICAL: Insufficient memory for JSON search (%d bytes)\n", startHeap);
     return result;
   }
-  
-  // Use the correct function
+
   String systemId = getScreenScraperSystemId(coreName);
   if (systemId.length() == 0) {
     Serial.printf("System '%s' not supported by ScreenScraper\n", coreName.c_str());
     return result;
   }
-  
+
   // Build URL
   String url = "https://api.screenscraper.fr/api2/jeuInfos.php";
   url += "?devid=" + String(SCREENSCRAPER_DEV_USER);
@@ -7149,186 +7148,151 @@ GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
   url += "&systemeid=" + systemId;
   url += "&romtype=rom";
   url += "&romnom=" + urlEncode(romDetails.filename);
-  
-  // Use correct RomDetails fields
-  url += "&crc=" + romDetails.crc32;  // It's already a String, it doesn't need toUpperCase()
-  url += "&romtaille=" + String(romDetails.filesize);  // filesize, no size
-  url += "&md5=" + romDetails.md5;   // It's already a String, it doesn't need toUpperCase()
-  url += "&sha1="; // Empty but required
-  
+  url += "&crc=" + romDetails.crc32;
+  url += "&romtaille=" + String(romDetails.filesize);
+  url += "&md5=" + romDetails.md5;
+  url += "&sha1=";
+
   Serial.printf("JSON Search URL: %s\n", url.c_str());
-  
+
   HTTPClient http;
   http.begin(url);
   http.setTimeout(30000);
   http.addHeader("User-Agent", "M5Stack-MiSTer-Monitor");
   http.addHeader("Accept", "application/json");
-  
+
   int httpCode = http.GET();
   Serial.printf("HTTP Response: %d\n", httpCode);
-  
+
   if (httpCode == 200) {
     int contentLength = http.getSize();
     Serial.printf("Content length: %d bytes\n", contentLength);
-    
+
     int currentHeap = ESP.getFreeHeap();
-    
-    // OPTIMIZATION: Use streaming more conservatively
-    // For ScreenScraper, which typically returns large responses, use streaming if:
-    // 1. Unknown Content-Length (-1) and memory < 150000, or
-    // 2. Known Content-Length > 20000, or  
-    // 3. Actual memory < 130000
-    bool shouldUseStreaming = (contentLength == -1 && currentHeap < 150000) || 
-                             (contentLength > 20000) || 
-                             (currentHeap < 130000);
-    
+
+    // Streaming when: unknown length + tight memory, OR known large body,
+    // OR low memory right now.
+    bool shouldUseStreaming = (contentLength == -1 && currentHeap < 150000) ||
+                              (contentLength > 20000) ||
+                              (currentHeap < 130000);
+
     if (shouldUseStreaming) {
-      Serial.printf("Using streaming: contentLength=%d, heap=%d\n", contentLength, currentHeap);
-      
-      // Streaming processing inline (without new function)
+      // -------- EARLY-EXIT BOUNDED SCAN --------
+      // The fields we need (jeu.id, jeu.noms, jeu.systeme.id) sit in the
+      // first few KB of response.jeu. Everything that makes the body huge
+      // (synopsis, genres, medias[], roms[]) comes AFTER them. So we read
+      // only a bounded prefix of the raw stream and stop. This avoids
+      // pulling ~100 KB over slow TLS and never needs a complete/valid
+      // JSON document.
+      //
+      // Raw substring scanning is immune to Transfer-Encoding: chunked
+      // because chunk-size markers only appear BETWEEN large chunks and
+      // never split the short field patterns we look for.
+      const size_t CAP_BYTES = 12000;   // generous: fields are well within this
+      Serial.printf("Bounded streaming scan (cap=%u): contentLength=%d, heap=%d\n",
+                    (unsigned)CAP_BYTES, contentLength, currentHeap);
+
       WiFiClient* stream = http.getStreamPtr();
-      String searchBuffer = "";
-      String gameId = "";
-      String gameName = "";
-      String systemeId = "";
-      bool foundGame = false;
-      
-      while (http.connected() && stream->available()) {
+      String body;
+      body.reserve(CAP_BYTES + 256);
+
+      char tmp[513];
+      unsigned long lastDataMs = millis();
+
+      while (body.length() < CAP_BYTES) {
+        // End conditions: connection closed and nothing left to read,
+        // low memory, or a read stall (no bytes for >8 s).
+        if (!http.connected() && stream->available() == 0) break;
         if (ESP.getFreeHeap() < 60000) {
-          Serial.printf("Low memory during streaming, stopping\n");
+          Serial.printf("Low memory during scan, stopping early\n");
           break;
         }
-        
-        String chunk = stream->readString();
-        if (chunk.length() == 0) break;
-        
-        searchBuffer += chunk;
-        if (searchBuffer.length() > 1000) {
-          searchBuffer = searchBuffer.substring(searchBuffer.length() - 500);
-        }
-        
-        // Extract game ID - FIXED: Look specifically in jeu section
-        if (gameId.length() == 0) {
-          // First try to find jeu section
-          int jeuPos = searchBuffer.indexOf("\"jeu\":");
-          if (jeuPos == -1) jeuPos = searchBuffer.indexOf("\"jeu\" :");
-          
-          if (jeuPos != -1) {
-            // Look for "id" after jeu section
-            int idStart = searchBuffer.indexOf("\"id\":\"", jeuPos);
-            if (idStart != -1) {
-              idStart += 6;
-              int idEnd = searchBuffer.indexOf("\"", idStart);
-              if (idEnd != -1) {
-                gameId = searchBuffer.substring(idStart, idEnd);
-                Serial.printf("Streamed Game ID from jeu section: %s\n", gameId.c_str());
-              }
-            }
+
+        int avail = stream->available();
+        if (avail > 0) {
+          int toRead = avail;
+          if (toRead > (int)sizeof(tmp) - 1) toRead = sizeof(tmp) - 1;
+          int n = stream->readBytes((uint8_t*)tmp, toRead);
+          if (n > 0) {
+            tmp[n] = '\0';
+            body += tmp;
+            lastDataMs = millis();
           }
-        }
-        
-        // Extract systeme ID
-        if (systemeId.length() == 0) {
-          int systemeStart = searchBuffer.indexOf("\"systeme\":{\"id\":\"");
-          if (systemeStart != -1) {
-            int idStart = searchBuffer.indexOf("\"id\":\"", systemeStart);
-            if (idStart != -1) {
-              idStart += 6;
-              int idEnd = searchBuffer.indexOf("\"", idStart);
-              if (idEnd != -1) {
-                systemeId = searchBuffer.substring(idStart, idEnd);
-                Serial.printf("Streamed Systeme ID: %s\n", systemeId.c_str());
-              }
-            }
+        } else {
+          if (millis() - lastDataMs > 8000) {
+            Serial.printf("Stream stalled (no data 8s), stopping with %d bytes\n",
+                          body.length());
+            break;
           }
+          delay(10);
         }
-        
-        // Extract game name
-        if (gameName.length() == 0) {
-          int nomPos = searchBuffer.indexOf("\"nom\":");
-          if (nomPos != -1) {
-            int nomStart = nomPos + 6;
-            while (nomStart < searchBuffer.length() && searchBuffer.charAt(nomStart) != '"') nomStart++;
-            nomStart++;
-            
-            String extractedName = "";
-            int pos = nomStart;
-            while (pos < searchBuffer.length() && searchBuffer.charAt(pos) != '"' && extractedName.length() < 100) {
-              extractedName += searchBuffer.charAt(pos);
-              pos++;
-            }
-            
-            if (extractedName.length() > 0) {
-              gameName = extractedName;
-              Serial.printf("Streamed Game Name: %s\n", gameName.c_str());
-            }
-          }
-        }
-        
-        // Stop if we have everything
-        if (gameId.length() > 0 && systemeId.length() > 0 && gameName.length() > 0) {
-          foundGame = true;
-          break;
-        }
-        
-        delay(10);
       }
-      
-      // Set streaming results
-      if (foundGame && gameId.length() > 0) {
-        result.gameId = gameId;
-        result.gameName = gameName.length() > 0 ? gameName : romDetails.filename;
-        result.systemeId = systemeId;
-        result.found = true;
-        
-        Serial.printf("STREAMING SUCCESS!\n");
-        String detectedMediaType = "box-3D(wor)";
-        result.boxartUrl = buildCorrectMediaJeuUrl(result.gameId, systemId, detectedMediaType, result.systemeId);
+
+      Serial.printf("Scan collected %d bytes, heap after: %d\n",
+                    body.length(), ESP.getFreeHeap());
+
+      if (body.length() == 0) {
+        Serial.println("Empty body during streaming scan");
       } else {
-        Serial.printf("Streaming extraction failed - gameId: '%s', systemeId: '%s'\n", 
-                      gameId.c_str(), systemeId.c_str());
+        // Reuse the proven indexOf parser already used by the traditional
+        // branch. It handles "jeu".id, "systeme":{"id"...} and the noms
+        // region preference / nom fallback.
+        result = extractGameInfoFromJeuInfos(body, romDetails.filename);
+        body = "";  // free immediately
+
+        if (result.found && result.gameId.length() > 0) {
+          String detectedMediaType = "box-3D(wor)";
+          result.boxartUrl = buildCorrectMediaJeuUrl(
+              result.gameId, systemId, detectedMediaType, result.systemeId);
+          if (result.boxartUrl.length() == 0) {
+            Serial.println("Failed to build mediaJeu URL");
+            result.found = false;
+          }
+        } else {
+          Serial.printf("Bounded scan did not yield a game id "
+                        "(game not in DB, or fields beyond %u bytes)\n",
+                        (unsigned)CAP_BYTES);
+        }
       }
-      
+      // -------- END EARLY-EXIT BOUNDED SCAN --------
+
     } else {
-      // OPTIMIZATION: Traditional response but with improved verifications
-      Serial.printf("Using traditional processing: contentLength=%d, heap=%d\n", contentLength, currentHeap);
-      
-      // Check if we have minimum memory for response processing
+      Serial.printf("Using traditional processing: contentLength=%d, heap=%d\n",
+                    contentLength, currentHeap);
+
       if (currentHeap < 90000) {
-        Serial.printf("Insufficient memory for traditional processing (need 90000+, have %d)\n", currentHeap);
+        Serial.printf("Insufficient memory for traditional processing (need 90000+, have %d)\n",
+                      currentHeap);
         http.end();
         return result;
       }
-      
+
       String response = http.getString();
       Serial.printf("Response received: %d bytes\n", response.length());
       Serial.printf("Memory after getString: %d bytes\n", ESP.getFreeHeap());
-      
-      // CRITICAL: Check if response was actually received
+
       if (response.length() == 0) {
         Serial.printf("Empty response received despite successful HTTP 200\n");
         http.end();
         return result;
       }
-      
-      // MEMORY SAFETY: If response is too large for current memory, truncate carefully
+
       int memoryAfterResponse = ESP.getFreeHeap();
       if (response.length() > 10000 && memoryAfterResponse < 80000) {
-        Serial.printf("Large response (%d bytes) + low memory (%d bytes), truncating to 8000\n", 
+        Serial.printf("Large response (%d bytes) + low memory (%d bytes), truncating to 8000\n",
                       response.length(), memoryAfterResponse);
         response = response.substring(0, 8000);
         Serial.printf("Response truncated to: %d bytes\n", response.length());
       }
-      
-      // Process the response
+
       if (response.length() > 0) {
         Serial.printf("Processing JSON response of %d bytes...\n", response.length());
         result = extractGameInfoFromJeuInfos(response, romDetails.filename);
-        
+
         if (result.found && result.gameId.length() > 0) {
           String detectedMediaType = "box-3D(wor)";
-          result.boxartUrl = buildCorrectMediaJeuUrl(result.gameId, systemId, detectedMediaType, result.systemeId);
-          
+          result.boxartUrl = buildCorrectMediaJeuUrl(result.gameId, systemId,
+                                                     detectedMediaType, result.systemeId);
           if (result.boxartUrl.length() > 0) {
             Serial.printf("BUILT MEDIAJEU URL:\n   %s\n", result.boxartUrl.c_str());
           } else {
@@ -7338,8 +7302,6 @@ GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
         } else {
           Serial.printf("Failed to extract game info from response\n");
         }
-        
-        // Clear response explicitly to free memory
         response = "";
         Serial.printf("Memory after processing: %d bytes\n", ESP.getFreeHeap());
       } else {
@@ -7349,12 +7311,12 @@ GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
   } else {
     Serial.printf("HTTP error: %d\n", httpCode);
   }
-  
+
   http.end();
-  
+
   int finalHeap = ESP.getFreeHeap();
   Serial.printf("Final heap: %d bytes (change: %+d)\n", finalHeap, finalHeap - startHeap);
-  
+
   return result;
 }
 
