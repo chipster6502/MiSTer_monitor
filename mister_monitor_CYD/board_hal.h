@@ -1,15 +1,12 @@
 // ============================================================================
-//  cyd_shim.h — M5Unified compatibility layer for the Cheap Yellow Display
+//  Compatibility layer for the Cheap Yellow Display
 //
-//  This header lets the MiSTer Monitor sketch — originally written against
-//  the M5Unified API for the M5Stack Tab5 — compile and run on the
+//  This header lets the MiSTer Monitor sketch compile and run on the
 //  ESP32-2432S028R "CYD" board with no changes to the drawing logic.
 //
-//  It provides a global `M5` object whose interface matches the subset of
-//  M5Unified used by the sketch (Display, Touch, Speaker, config, begin,
-//  update). Display calls are routed to a LovyanGFX instance configured
+//  Display calls are routed to a LovyanGFX instance configured
 //  for the CYD's ILI9341 panel; Touch is currently a stub (XPT2046 wiring
-//  will be added in a later step); Speaker is a no-op (CYD has no DAC speaker).
+//  will be added in a later step); Speaker is a no-op by default (CYD has no DAC speaker).
 //
 //  Pinout reference (CYD ESP32-2432S028R, classic XPT2046 variant):
 //    TFT (VSPI):  SCK=14  MOSI=13  MISO=12  DC=2  CS=15  RST=hw  BL=21
@@ -78,7 +75,6 @@ public:
   }
 };
 
-// Single global display instance used by the M5 shim below.
 extern LGFX_CYD display;
 
 // ---------- XPT2046 resistive touch (software SPI / bit-bang) --------------
@@ -166,25 +162,20 @@ inline bool xpt2046_read(int* outX, int* outY) {
   return true;
 }
 
-struct M5_TouchDetail {
+struct TouchDetail {
   bool _pressed = false;
   int  x = 0;
   int  y = 0;
   bool wasPressed() const { return _pressed; }
 };
 
-struct M5_Touch {
-  // Latest polled state, refreshed by M5.update().
-  M5_TouchDetail _current;
-  M5_TouchDetail getDetail() { return _current; }
+struct BoardTouch {
+  // Latest polled state, refreshed by Board.update().
+  TouchDetail _current;
+  TouchDetail getDetail() { return _current; }
 };
 
-// ---------- M5Unified-compatible facade ------------------------------------
-//
-//  Only the API surface actually used by the sketch is implemented. If a
-//  future change touches a new M5 method, add it here rather than in the
-//  sketch — that keeps the port surgical.
-struct M5_Speaker {
+struct BoardSpeaker {
   // No-op: CYD has no DAC-driven speaker. A passive buzzer port may be
   // added later but is intentionally silent for now.
   void begin() {}
@@ -192,21 +183,21 @@ struct M5_Speaker {
   void tone(int /*freq*/, int /*duration_ms*/) {}
 };
 
-struct M5_Config {
+struct BoardConfig {
   bool clear_display = true;
   bool output_power  = true;
   bool internal_imu  = false;
   bool external_imu  = false;
 };
 
-struct M5_Stub {
+struct BoardClass {
   LGFX_CYD&   Display = display;
-  M5_Touch    Touch;
-  M5_Speaker  Speaker;
+  BoardTouch    Touch;
+  BoardSpeaker  Speaker;
 
-  M5_Config config() { return M5_Config(); }
+  BoardConfig config() { return BoardConfig(); }
 
-  void begin(const M5_Config& cfg) {
+  void begin(const BoardConfig& cfg) {
     display.init();
     display.setRotation(1);
     display.setBrightness(255);
@@ -229,8 +220,7 @@ struct M5_Stub {
     int tx, ty;
     bool nowPressed = xpt2046_read(&tx, &ty);
 
-    // wasPressed() == true for exactly one update cycle on press edge,
-    // matching M5Unified semantics the sketch relies on.
+    // wasPressed() == true for exactly one update cycle on press edge.
     Touch._current._pressed = (nowPressed && !_lastTouchState);
     if (nowPressed) {
       Touch._current.x = tx;
@@ -244,4 +234,4 @@ private:
 public: 
 };
 
-extern M5_Stub M5;
+extern BoardClass Board;

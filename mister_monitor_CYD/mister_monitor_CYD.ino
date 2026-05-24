@@ -10,8 +10,7 @@
 //    PSRAM:           Disabled
 //    Upload Speed:    921600
 // ============================================================================
-#include "cyd_shim.h"
-#define Board M5      // light alias: 'Board' is just another name for the M5 object
+#include "board_hal.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <SD.h>
@@ -38,20 +37,7 @@
 //   SD pinout:  SCK=18  MISO=19  MOSI=23  CS=5
 SPIClass sdSPI(HSPI);
 
-// -------------------------------------------------------
 // psramMalloc(): safe allocator for large buffers.
-//
-// On ESP32-P4 (M5Tab), heap_caps_malloc(MALLOC_CAP_SPIRAM)
-// returns addresses in the 0x500xxxxx region which causes
-// Store Access Faults (MCAUSE=7). The PSRAM cache is not
-// mapped for normal CPU load/store without specific sdkconfig
-// settings that the M5Tab Arduino board package does not set.
-//
-// The M5Tab internal heap has ~510 KB free at boot, which
-// is more than enough for all JPEG buffers (50-300 KB each).
-// We therefore use plain malloc() and leave the PSRAM
-// available implicitly for Arduino/WiFi/IDF internals.
-// -------------------------------------------------------
 inline uint8_t* psramMalloc(size_t size) {
   uint8_t* ptr = (uint8_t*)malloc(size);
   if (!ptr) {
@@ -100,7 +86,7 @@ String CORE_MEDIA_ORDER_STR             = "wheel-steel,wheel-carbon,wheel,photo,
 
 // Internal ScreenScraper constants — not exposed in config.ini
 #define SCREENSCRAPER_DEBUG_PASS "uoAfIjh2AMd"
-#define SCREENSCRAPER_SOFTWARE   "M5Stack-MiSTer-Monitor"
+#define SCREENSCRAPER_SOFTWARE   "MiSTer-Monitor"
 #define SAFE_JSON_BUFFER_SIZE    8192
 #define MAX_RESPONSE_SIZE        50000
 
@@ -111,10 +97,10 @@ String CORE_MEDIA_ORDER_STR             = "wheel-steel,wheel-carbon,wheel,photo,
 #define IMAGE_AREA_HEIGHT 200    // image area above the 40px footer band (Y=200..239)
 #define ORIGINAL_WIDTH    320    // source design width (logical)
 #define ORIGINAL_HEIGHT   240    // source design height (logical)
-#define M5TAB_WIDTH       320    // legacy name kept; equals physical width on CYD
-#define M5TAB_HEIGHT      240    // legacy name kept; equals physical height on CYD
-#define SCALE_X           ((float)M5TAB_WIDTH  / ORIGINAL_WIDTH)   // = 1.0
-#define SCALE_Y           ((float)M5TAB_HEIGHT / ORIGINAL_HEIGHT)  // = 1.0
+#define DISPLAY_WIDTH     320
+#define DISPLAY_HEIGHT    240
+#define SCALE_X           ((float)DISPLAY_WIDTH  / ORIGINAL_WIDTH)   // = 1.0
+#define SCALE_Y           ((float)DISPLAY_HEIGHT / ORIGINAL_HEIGHT)  // = 1.0
 
 // Theme Colors — compile-time constants
 #define THEME_BLACK     0x0000
@@ -288,7 +274,6 @@ void handleScreenshot() {
     // Convert RGB565 → RGB888 in-place into rowDst
     // BMP stores pixels as B, G, R (reversed byte order)
     for (int x = 0; x < w; x++) {
-      // readRect on M5Tab returns big-endian RGB565 — swap bytes before extracting
       uint16_t px_raw = rowSrc[x];
       uint16_t px = (px_raw << 8) | (px_raw >> 8);  // fix endianness
 
@@ -483,11 +468,6 @@ void playNextButtonSound();
 String lastProcessedGame = "";           // Last game we processed for subsystem
 bool forceSubsystemUpdate = false;       // Flag to force subsystem update
 unsigned long gameChangeTime = 0;        // When the game changed
-
-// ========== SCALED DISPLAY WRAPPER CLASS ==========
-// This class wraps Board.Display to automatically scale all drawing operations
-// from logical coordinates (320x240) to a 2x scaled area (640x480)
-// positioned at offset (90, 120) on the M5Tab display (1280x720)
 
 class ScaledDisplay {
 private:
@@ -989,7 +969,7 @@ RomDetails getCurrentRomDetails() {
   
   http.begin(url);
   http.setTimeout(8000);
-  http.addHeader("User-Agent", "M5Stack-MiSTer-Monitor");
+  http.addHeader("User-Agent", "MiSTer-Monitor");
   
   unsigned long requestStart = millis();
   int code = http.GET();
@@ -1057,7 +1037,7 @@ RomDetails getCurrentRomDetails() {
     HTTPClient httpRetry;
     httpRetry.begin(url);
     httpRetry.setTimeout(12000); // Increased from 8000 to 12000
-    httpRetry.addHeader("User-Agent", "M5Stack-MiSTer-Monitor");
+    httpRetry.addHeader("User-Agent", "MiSTer-Monitor");
     
     unsigned long retryStart = millis();
     int retryCode = httpRetry.GET();
@@ -1124,7 +1104,7 @@ RomDetails getCurrentRomDetailsForced() {
 
   http.begin(url);
   http.setTimeout(15000);
-  http.addHeader("User-Agent", "M5Stack-MiSTer-Monitor");
+  http.addHeader("User-Agent", "MiSTer-Monitor");
 
   int code = http.GET();
   Serial.printf("Forced HTTP Response: %d\n", code);
@@ -1682,7 +1662,7 @@ void showCoreImageScreenWithAutoDownload(String coreName) {
 // ========== TOUCH HANDLING FUNCTION ==========
 
 void handleTouch() {
-  // Step 1: Get current touch state from M5Unified
+  // Step 1: Get current touch state from Board.Touch.getDetail
   // This returns a structure with all touch information
   auto touch = Board.Touch.getDetail();
   
@@ -1695,18 +1675,12 @@ void handleTouch() {
     int physicalX = touch.x;
     int physicalY = touch.y;
     
-    // Step 4: Convert to logical coordinates (320x240 space)
-    // This is where the magic happens - we transform M5Tab coordinates
-    // back to the original M5Stack coordinate system
-    // int logicalX = (int)(physicalX / SCALE_X);
-    // int logicalY = (int)(physicalY / SCALE_Y);
-    
-    // Step 5: Debug logging (helpful during development and testing)
+    // Step 4: Debug logging (helpful during development and testing)
     Serial.println("Touch detected!");
     Serial.printf("  Physical coordinates: (%d, %d)\n", physicalX, physicalY);
     // Serial.printf("  Logical coordinates: (%d, %d)\n", logicalX, logicalY);
     
-    // Step 6: Check each button in sequence
+    // Step 5: Check each button in sequence
     // Using if-else ensures only one button can be activated per touch
     
     // Check PREV button
@@ -1893,7 +1867,7 @@ void setup() {
   Serial.println("=== SPEAKER ===  (skipped: not present on CYD)");
   
 
-  // Initialize speaker for M5Tab (M5Unified)
+  // Initialize speaker
   /*auto spk_cfg = Board.Speaker.config();
   spk_cfg.sample_rate = 48000;  // Sample rate
   spk_cfg.task_priority = 2;    // Task priority
@@ -1903,9 +1877,9 @@ void setup() {
   
   Board.Speaker.config(spk_cfg);
   Board.Speaker.begin();
-  Board.Speaker.setVolume(100);  // High volume (0-255)*/
+  Board.Speaker.setVolume(100);  // High volume (0-255)
   
-  Serial.println("Speaker initialized");
+  Serial.println("Speaker initialized");*/
   
   display.setRotation(1);
   display.setBrightness(128);
@@ -1916,7 +1890,7 @@ void setup() {
                 display.width(), display.height());
   Serial.printf("[DISPLAY] Color depth: %d bpp\n", display.getColorDepth());
   
-  Serial.println("=== MiSTer Monitor with Core and Games Images on M5Tab Starting ===");
+  Serial.println("=== MiSTer Monitor with Core and Games Images Starting ===");
   Serial.printf("Display: %dx%d\n", display.width(), display.height());
   Serial.printf("Target MiSTer IP: %s\n", misterIP);
   
@@ -2505,7 +2479,7 @@ void initSDCard() {
   // Give WiFi time to stabilize
   delay(500);
   
-  // Try to initialize SD with specific configuration for M5Stack
+  // Try to initialize SD
   if (SD.begin(TFCARD_CS_PIN, sdSPI, 25000000)) {
     sdCardAvailable = true;
     Serial.println("SD card initialized successfully");
@@ -2577,7 +2551,7 @@ void checkMisterDebugState() {
   
   http.begin(url);
   http.setTimeout(3000); // Quick timeout
-  http.addHeader("User-Agent", "M5Stack-Monitor");
+  http.addHeader("User-Agent", "MiSTer-Monitor");
   
   int code = http.GET();
   
@@ -2620,7 +2594,7 @@ void checkServerErrorState() {
   
   http.begin(url);
   http.setTimeout(3000); // Short timeout
-  http.addHeader("User-Agent", "M5Stack-Monitor");
+  http.addHeader("User-Agent", "MiSTer-Monitor");
   
   int code = http.GET();
   
@@ -3730,7 +3704,7 @@ void getCurrentCore() {
   
   http.begin(url);
   http.setTimeout(8000);
-  http.addHeader("User-Agent", "M5Stack-Monitor");
+  http.addHeader("User-Agent", "MiSTer-Monitor");
   
   int code = http.GET();
   Serial.printf("HTTP code: %d\n", code);
@@ -4445,13 +4419,12 @@ void displayNetworkTerminal() {
   Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
   
   // ========== ORIGINAL 320x240 CONTENT (auto-scaled 2x by Lcd) ==========
-  // Main panel - based on M5Stack ↔ MiSTer connection
   drawPanel(10, 50, 300, 60, connected ? THEME_GREEN : THEME_RED);
   
   Lcd.setTextColor(THEME_BLACK);
   Lcd.setTextSize(1);
   Lcd.setCursor(20, 60);
-  Lcd.print("M5STACK <-> MISTER");
+  Lcd.print("DISPLAY <-> MISTER");
   
   Lcd.setTextSize(2);
   Lcd.setCursor(20, 75);
@@ -5765,7 +5738,7 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
   HTTPClient http;
   http.begin(currentUrl);
   http.setTimeout(25000);
-  http.addHeader("User-Agent", "M5Stack-MiSTer-Monitor");
+  http.addHeader("User-Agent", "MiSTer-Monitor");
   http.addHeader("Accept", "image/jpeg,image/png,image/*");
   
   int httpCode = http.GET();
@@ -6246,7 +6219,7 @@ bool downloadCoreImageStreamingSafe(String baseUrl, String savePath) {
     HTTPClient http;
     http.begin(currentUrl);
     http.setTimeout(25000);
-    http.addHeader("User-Agent", "M5Stack-MiSTer-Monitor");
+    http.addHeader("User-Agent", "MiSTer-Monitor");
     http.addHeader("Accept", "image/jpeg,image/png,image/*");
     
     int httpCode = http.GET();
@@ -6382,7 +6355,7 @@ String buildCorrectMediaJeuUrl(String gameId, String systemId, String mediaType,
   String mediaUrl = "https://api.screenscraper.fr/api2/mediaJeu.php";
   mediaUrl += "?devid=" + String(SCREENSCRAPER_DEV_USER);
   mediaUrl += "&devpassword=" + String(SCREENSCRAPER_DEV_PASS);
-  mediaUrl += "&softname=M5Stack-MiSTer-Monitor";
+  mediaUrl += "&softname=MiSTer-Monitor";
   mediaUrl += "&ssid=" + String(SCREENSCRAPER_USER);
   mediaUrl += "&sspassword=" + String(SCREENSCRAPER_PASS);
   
@@ -6525,7 +6498,7 @@ GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
   String url = "https://api.screenscraper.fr/api2/jeuInfos.php";
   url += "?devid=" + String(SCREENSCRAPER_DEV_USER);
   url += "&devpassword=" + String(SCREENSCRAPER_DEV_PASS);
-  url += "&softname=M5Stack-MiSTer-Monitor";
+  url += "&softname=MiSTer-Monitor";
   url += "&output=json";
   url += "&ssid=" + String(SCREENSCRAPER_USER);
   url += "&sspassword=" + String(SCREENSCRAPER_PASS);
@@ -6542,7 +6515,7 @@ GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
   HTTPClient http;
   http.begin(url);
   http.setTimeout(30000);
-  http.addHeader("User-Agent", "M5Stack-MiSTer-Monitor");
+  http.addHeader("User-Agent", "MiSTer-Monitor");
   http.addHeader("Accept", "application/json");
 
   int httpCode = http.GET();
