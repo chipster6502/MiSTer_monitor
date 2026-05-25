@@ -41,7 +41,7 @@ pages, so most rendering code is identical between targets.
   the 320x240 logical design onto your panel. Use `1.0 / 0 / 0`
   for native 320x240; Tab5 uses `2.0` with
   `OFFSET_X=90, OFFSET_Y=200` for the 1280x720 panel.
-1. Add a row to the Supported Hardware table below.
+4. Add a row to the Supported Hardware table below.
 
 That’s the essence. Everything else — the `Board` facade, the
 `ScaledDisplay` wrapper, monitor page rendering, server protocol,
