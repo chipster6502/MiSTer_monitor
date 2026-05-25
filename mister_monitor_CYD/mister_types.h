@@ -60,12 +60,12 @@ struct TouchButton {
     int approximateTextWidth = textLength * 18;
     int textX = x + (w / 2) - (approximateTextWidth / 2);
     int textY = y + (h / 2) - 12;
-    M5.Display.setTextColor(0x0000 /*THEME_BLACK*/);
-    M5.Display.setTextSize(3);
-    M5.Display.setCursor(textX + 2, textY + 2);
-    M5.Display.print(label);
-    M5.Display.setTextColor(textColor);
-    M5.Display.setCursor(textX, textY);
-    M5.Display.print(label);
+    display.setTextColor(0x0000 /*THEME_BLACK*/);
+    display.setTextSize(3);
+    display.setCursor(textX + 2, textY + 2);
+    display.print(label);
+    display.setTextColor(textColor);
+    display.setCursor(textX, textY);
+    display.print(label);
   }
 };

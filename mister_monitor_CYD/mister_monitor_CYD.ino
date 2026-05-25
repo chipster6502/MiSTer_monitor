@@ -198,12 +198,11 @@ void handleScreenshotRoot() {
 }
 
 void handleScreenshot() {
-  int w = display.width();   // 1280
-  int h = display.height();  // 720
+  int w = display.width();   // 320
+  int h = display.height();  // 240
 
   // Standard 24-bit RGB888 BMP — universally supported by all browsers and viewers
   // Row stride must be padded to 4-byte boundary
-  // For 1280px: 1280*3 = 3840 bytes → already multiple of 4, no padding needed
   const uint32_t HEADER_SIZE = 54;           // 14 file header + 40 DIB header
   const uint32_t ROW_STRIDE  = ((uint32_t)w * 3 + 3) & ~3;  // padded to 4 bytes
   const uint32_t IMAGE_SIZE  = ROW_STRIDE * h;
