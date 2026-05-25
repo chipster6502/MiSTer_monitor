@@ -30,7 +30,7 @@ console and computer games via the MiSTer Remote web application.*
 | Target | Status |
 |---|---|
 | M5Stack Tab5 (ESP32-P4) | Stable — reference implementation |
-| Cheap Yellow Display (ESP32-2432S028R) | Work in progress |
+| Cheap Yellow Display (ESP32-2432S028R) | Stable |
 
 See `docs/PORTING.md` for porting guidelines.
 
@@ -92,26 +92,26 @@ The system has two components that work together:
 ## M5STack Tab5 Screenshots (1280x720)
 
 ![Screensaver](images/Tab5/screenshot01_menu.png)
-![System Monitor - CPU and Memory](images/Tab5/sscreenshot02_cpu_memory_status.png)
-![System Monitor - Storage](images/Tab5/sscreenshot02_storage.png)
-![System Monitor - USB devices](images/Tab5/sscreenshot03_usb_devices.png)
-![System Monitor - Arcade system artwork](images/Tab5/sscreenshot04_arcade.png)
-![System Monitor - Arcade subsystem artwork](images/Tab5/sscreenshot05_arcade_subsystem.png)
-![System Monitor - Arcade game artwork](images/Tab5/sscreenshot06_arcade_game.png)
-![System Monitor - Console core artwork](images/Tab5/sscreenshot07_console.png)
-![System Monitor - Console game artwork](images/Tab5/sscreenshot08_console_game.png)
-![System Monitor - Computer core artwork](images/Tab5/sscreenshot09_computer.png)
-![System Monitor - Computer game artwork](images/Tab5/sscreenshot10_computer_game.png)
+![System Monitor - CPU and Memory](images/Tab5/screenshot02_cpu_memory_status.png)
+![System Monitor - Storage](images/Tab5/screenshot02_storage.png)
+![System Monitor - USB devices](images/Tab5/screenshot03_usb_devices.png)
+![System Monitor - Arcade system artwork](images/Tab5/screenshot04_arcade.png)
+![System Monitor - Arcade subsystem artwork](images/Tab5/screenshot05_arcade_subsystem.png)
+![System Monitor - Arcade game artwork](images/Tab5/screenshot06_arcade_game.png)
+![System Monitor - Console core artwork](images/Tab5/screenshot07_console.png)
+![System Monitor - Console game artwork](images/Tab5/screenshot08_console_game.png)
+![System Monitor - Computer core artwork](images/Tab5/screenshot09_computer.png)
+![System Monitor - Computer game artwork](images/Tab5/screenshot10_computer_game.png)
 
 ## 2,8" Cheap Yellow Display (CYD) Screenshots (320x240)
 
-![Screensaver](images/CYD/01_menu.png)
-![System Monitor - CPU and Memory](images/CYD/08_main_HUD.png)
-![System Monitor - Storage](images/CYD/10_storage.png)
-![System Monitor - Arcade subsystem artwork](images/CYD/03.2_arcade_game_subsystem.png)
-![System Monitor - Arcade game artwork](images/CYD/02_arcade_game_fanart.png)
-![System Monitor - Console game artwork](images/CYD/04_console_game_3dboxart.png)
-![System Monitor - Computer game artwork](images/CYD/06_computer_game_3dboxart.png)
+![Screensaver](images/CYD-2432S028R/01_menu.png)
+![System Monitor - CPU and Memory](images/CYD-2432S028R/08_main_HUD.png)
+![System Monitor - Storage](images/CYD-2432S028R/10_storage.png)
+![System Monitor - Arcade subsystem artwork](images/CYD-2432S028R/03.2_arcade_game_subsystem.png)
+![System Monitor - Arcade game artwork](images/CYD-2432S028R/02_arcade_game_fanart.png)
+![System Monitor - Console game artwork](images/CYD-2432S028R/04_console_game_3dboxart.png)
+![System Monitor - Computer game artwork](images/CYD-2432S028R/06_computer_game_3dboxart.png)
 
 ## To Do
 
