@@ -1,8 +1,10 @@
 # Configuration
 
 All user configuration lives in a single file placed in the **root** of the
-Tab5 microSD card: `/config.ini`. The sketch reads it at boot before
+microSD card: `/config.ini`. The sketch reads it at boot before
 connecting to WiFi, so no credentials need to be hardcoded in the source.
+The same `config.ini` format is used by all hardware targets (Tab5, CYD,
+and future ports).
 
 Copy `config.ini` from the repository root to the SD card and fill in your
 values.
@@ -30,7 +32,7 @@ option.
 
 ## Static MiSTer IP address
 
-The Tab5 connects to the MiSTer by IP, so a static address is required.
+The display connects to the MiSTer by IP, so a static address is required.
 Edit `/etc/dhcpcd.conf` on the MiSTer and add:
 
 ```
@@ -93,12 +95,30 @@ game_media_order=box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,scree
 
 ## Asset images
 
-The repository includes a set of needed images in the `assets/` folder.
-Copy them to the microSD card as follows:
+The repository includes a set of needed images inside the `assets/` folder,
+organised by target. Copy the files for your target to the microSD card as
+follows.
+
+### M5Stack Tab5
+
+Copy the contents of `assets/Tab5/` from the repository:
 
 - `frame01.jpg`, `frame02.jpg`, `logomister.jpg` and `menu.jpg` must be
-  placed inside the `/cores/` folder.
+  placed inside the `/cores/` folder on the SD card.
 - `Arcade.jpg` and `Arcade_75.jpg` must be placed inside `/cores/A/`.
+
+`frame01.jpg` and `frame02.jpg` are the full-screen decorative cyberpunk
+frame bitmaps used as background on the Tab5's 1280x720 panel. They are
+**not used** by the CYD port.
+
+### CYD ESP32-2432S028R
+
+Copy the contents of `assets/CYD/` from the repository:
+
+- `menu.jpg` must be placed inside the `/cores/` folder on the SD card.
+- `Arcade.jpg` and `Arcade_75.jpg` must be placed inside `/cores/A/`.
+
+### All targets
 
 Core and game images that are missing will be downloaded automatically from
 ScreenScraper the first time that core/game is detected.

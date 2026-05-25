@@ -1,4 +1,15 @@
-#include <M5Unified.h>
+// ============================================================================
+//  Build settings (Arduino IDE -> Tools menu):
+//    Board:           ESP32 Dev Module
+//    Partition:       Huge APP (3MB No OTA/1MB SPIFFS)
+//    Flash Size:      4MB (32Mb)
+//    PSRAM:           Disabled
+//    Upload Speed:    921600
+// ============================================================================
+
+#include <XPT2046_Touchscreen.h>
+#include <LovyanGFX.hpp>
+#include "board_hal.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <SD.h>
@@ -21,28 +32,9 @@
   #define HAS_BROWNOUT_REG 0
 #endif
 
-// -------------------------------------------------------
-// psramMalloc(): safe allocator for large buffers.
-//
-// On ESP32-P4 (M5Tab), heap_caps_malloc(MALLOC_CAP_SPIRAM)
-// returns addresses in the 0x500xxxxx region which causes
-// Store Access Faults (MCAUSE=7). The PSRAM cache is not
-// mapped for normal CPU load/store without specific sdkconfig
-// settings that the M5Tab Arduino board package does not set.
-//
-// The M5Tab internal heap has ~510 KB free at boot, which
-// is more than enough for all JPEG buffers (50-300 KB each).
-// We therefore use plain malloc() and leave the PSRAM
-// available implicitly for Arduino/WiFi/IDF internals.
-// -------------------------------------------------------
-inline uint8_t* psramMalloc(size_t size) {
-  uint8_t* ptr = (uint8_t*)malloc(size);
-  if (!ptr) {
-    Serial.printf("[MEM] malloc FAILED for %u bytes! Free heap: %u\n",
-                  size, ESP.getFreeHeap());
-  }
-  return ptr;
-}
+// CYD: dedicated HSPI bus for the SD card (TFT owns VSPI).
+//   SD pinout:  SCK=18  MISO=19  MOSI=23  CS=5
+SPIClass sdSPI(HSPI);
 
 // ========== CONFIGURATION ==========
 // All user settings are loaded at boot from /config.ini on the ESP32 SD card.
@@ -83,21 +75,21 @@ String CORE_MEDIA_ORDER_STR             = "wheel-steel,wheel-carbon,wheel,photo,
 
 // Internal ScreenScraper constants — not exposed in config.ini
 #define SCREENSCRAPER_DEBUG_PASS "uoAfIjh2AMd"
-#define SCREENSCRAPER_SOFTWARE   "M5Stack-MiSTer-Monitor"
+#define SCREENSCRAPER_SOFTWARE   "MiSTer-Monitor"
 #define SAFE_JSON_BUFFER_SIZE    8192
 #define MAX_RESPONSE_SIZE        50000
 
-// Hardware constants — fixed for M5Tab
-#define TFCARD_CS_PIN     42
-#define TARGET_WIDTH      1280
-#define TARGET_HEIGHT     720
-#define IMAGE_AREA_HEIGHT 620
-#define ORIGINAL_WIDTH    320
-#define ORIGINAL_HEIGHT   240
-#define M5TAB_WIDTH       1280
-#define M5TAB_HEIGHT      720
-#define SCALE_X           ((float)M5TAB_WIDTH  / ORIGINAL_WIDTH)
-#define SCALE_Y           ((float)M5TAB_HEIGHT / ORIGINAL_HEIGHT)
+// Hardware constants — CYD ESP32-2432S028R (native 320x240)
+#define TFCARD_CS_PIN     5      // CYD: SD card on HSPI, CS=GPIO5
+#define TARGET_WIDTH      320    // physical panel width
+#define TARGET_HEIGHT     240    // physical panel height
+#define IMAGE_AREA_HEIGHT 200    // image area above the 40px footer band (Y=200..239)
+#define ORIGINAL_WIDTH    320    // source design width (logical)
+#define ORIGINAL_HEIGHT   240    // source design height (logical)
+#define DISPLAY_WIDTH     320
+#define DISPLAY_HEIGHT    240
+#define SCALE_X           ((float)DISPLAY_WIDTH  / ORIGINAL_WIDTH)   // = 1.0
+#define SCALE_Y           ((float)DISPLAY_HEIGHT / ORIGINAL_HEIGHT)  // = 1.0
 
 // Theme Colors — compile-time constants
 #define THEME_BLACK     0x0000
@@ -199,19 +191,18 @@ void handleScreenshotRoot() {
   html += "<a class='btn' href='/screenshot.bmp'>📥 Download BMP</a>";
   html += "<a class='btn' href='/'>🔄 Refresh</a>";
   html += "<p class='info'>Auto-refresh every 5 seconds &nbsp;|&nbsp; ";
-  html += "Resolution: " + String(M5.Display.width()) + "x" + String(M5.Display.height()) + " &nbsp;|&nbsp; ";
+  html += "Resolution: " + String(display.width()) + "x" + String(display.height()) + " &nbsp;|&nbsp; ";
   html += "IP: " + ip + ":8080</p>";
   html += "</body></html>";
   screenshotServer.send(200, "text/html", html);
 }
 
 void handleScreenshot() {
-  int w = M5.Display.width();   // 1280
-  int h = M5.Display.height();  // 720
+  int w = display.width();   // 320
+  int h = display.height();  // 240
 
   // Standard 24-bit RGB888 BMP — universally supported by all browsers and viewers
   // Row stride must be padded to 4-byte boundary
-  // For 1280px: 1280*3 = 3840 bytes → already multiple of 4, no padding needed
   const uint32_t HEADER_SIZE = 54;           // 14 file header + 40 DIB header
   const uint32_t ROW_STRIDE  = ((uint32_t)w * 3 + 3) & ~3;  // padded to 4 bytes
   const uint32_t IMAGE_SIZE  = ROW_STRIDE * h;
@@ -248,9 +239,8 @@ void handleScreenshot() {
   screenshotServer.sendContent((const char*)header, HEADER_SIZE);
 
   // Allocate one row of RGB565 source + one row of RGB888 destination
-  // Using PSRAM if available to preserve internal heap
-  uint16_t* rowSrc = (uint16_t*)psramMalloc(w * 2);
-  uint8_t*  rowDst = (uint8_t*) psramMalloc(ROW_STRIDE);
+  uint16_t* rowSrc = (uint16_t*)malloc(w * 2);
+  uint8_t*  rowDst = (uint8_t*) malloc(ROW_STRIDE);
 
   if (!rowSrc || !rowDst) {
     Serial.println("[SCREENSHOT] ERROR: Not enough memory for row buffers");
@@ -266,12 +256,11 @@ void handleScreenshot() {
 
   for (int y = 0; y < h; y++) {
     // Read one row of RGB565 pixels from display
-    M5.Display.readRect(0, y, w, 1, rowSrc);
+    display.readRect(0, y, w, 1, rowSrc);
 
     // Convert RGB565 → RGB888 in-place into rowDst
     // BMP stores pixels as B, G, R (reversed byte order)
     for (int x = 0; x < w; x++) {
-      // readRect on M5Tab returns big-endian RGB565 — swap bytes before extracting
       uint16_t px_raw = rowSrc[x];
       uint16_t px = (px_raw << 8) | (px_raw >> 8);  // fix endianness
 
@@ -325,7 +314,6 @@ void showGameImageScreenCorrected(String coreName, String gameName);
 int jpegDrawCallback(JPEGDRAW *pDraw);
 void showSDCardError();
 void showImageNotFound(String coreName);
-
 bool loadFullScreenFrame(const char* framePath);
 bool loadMisterLogo(int x, int y);
 void drawCyberpunkFrame();
@@ -333,6 +321,7 @@ void drawProgressSquares(int completedCount);
 void showBootSequence();
 void drawWiFiProgressCircles(int currentAttempt, bool connected, int maxAttempts);
 void connectWithAnimation();
+void buttonPressFeedback(TouchButton* btn, void (*soundFn)());
 void testMiSTerConnectivity();
 void updateMiSTerData();
 void getCurrentCore();
@@ -387,7 +376,6 @@ void handleScreenScraperError(int httpCode, String response);
 RomDetails getCurrentRomDetails();
 RomDetails getCurrentRomDetailsForced();
 
-// Enhanced extraction functions  
 bool extractBoolValue(String json, String key);
 
 // ScreenScraper helper functions
@@ -464,17 +452,13 @@ String lastProcessedGame = "";           // Last game we processed for subsystem
 bool forceSubsystemUpdate = false;       // Flag to force subsystem update
 unsigned long gameChangeTime = 0;        // When the game changed
 
-// ========== SCALED DISPLAY WRAPPER CLASS ==========
-// This class wraps M5.Display to automatically scale all drawing operations
-// from logical coordinates (320x240) to a 2x scaled area (640x480)
-// positioned at offset (90, 120) on the M5Tab display (1280x720)
-
 class ScaledDisplay {
 private:
-  // Scaling and offset constants for 2x scaling
-  static constexpr float SCALE_FACTOR = 2.0;
-  static constexpr int OFFSET_X = 90;
-  static constexpr int OFFSET_Y = 200;  // Normal offset for the monitor screens
+  // CYD: native 320x240 panel — no scaling, no offset needed.
+  // The wrapper is kept for API compatibility with the Tab5 codebase.
+  static constexpr float SCALE_FACTOR = 1.0f;
+  static constexpr int   OFFSET_X     = 0;
+  static constexpr int   OFFSET_Y     = 0;
   
   // Internal scaling helper functions
   // These convert logical coordinates to physical coordinates
@@ -487,94 +471,98 @@ public:
   // ========== DRAWING PRIMITIVES WITH AUTO-SCALING ==========
   
   void fillRect(int x, int y, int w, int h, uint16_t color) {
-    M5.Display.fillRect(scaleX(x), scaleY(y), scaleW(w), scaleH(h), color);
+    display.fillRect(scaleX(x), scaleY(y), scaleW(w), scaleH(h), color);
   }
   
   void drawRect(int x, int y, int w, int h, uint16_t color) {
-    M5.Display.drawRect(scaleX(x), scaleY(y), scaleW(w), scaleH(h), color);
+    display.drawRect(scaleX(x), scaleY(y), scaleW(w), scaleH(h), color);
   }
   
   void fillScreen(uint16_t color) {
-    M5.Display.fillScreen(color);
+    display.fillScreen(color);
   }
   
   void drawFastHLine(int x, int y, int w, uint16_t color) {
-    M5.Display.drawFastHLine(scaleX(x), scaleY(y), scaleW(w), color);
+    display.drawFastHLine(scaleX(x), scaleY(y), scaleW(w), color);
   }
   
   void drawFastVLine(int x, int y, int h, uint16_t color) {
-    M5.Display.drawFastVLine(scaleX(x), scaleY(y), scaleH(h), color);
+    display.drawFastVLine(scaleX(x), scaleY(y), scaleH(h), color);
   }
   
   void drawLine(int x0, int y0, int x1, int y1, uint16_t color) {
-    M5.Display.drawLine(scaleX(x0), scaleY(y0), scaleX(x1), scaleY(y1), color);
+    display.drawLine(scaleX(x0), scaleY(y0), scaleX(x1), scaleY(y1), color);
   }
   
   void fillCircle(int x, int y, int r, uint16_t color) {
-    M5.Display.fillCircle(scaleX(x), scaleY(y), (int)(r * SCALE_FACTOR), color);
+    display.fillCircle(scaleX(x), scaleY(y), (int)(r * SCALE_FACTOR), color);
   }
   
   void drawCircle(int x, int y, int r, uint16_t color) {
-    M5.Display.drawCircle(scaleX(x), scaleY(y), (int)(r * SCALE_FACTOR), color);
+    display.drawCircle(scaleX(x), scaleY(y), (int)(r * SCALE_FACTOR), color);
   }
   
   // ========== TEXT OPERATIONS WITH AUTO-SCALING ==========
   
   void setCursor(int x, int y) {
-    M5.Display.setCursor(scaleX(x), scaleY(y));
+    display.setCursor(scaleX(x), scaleY(y));
   }
   
   void setTextColor(uint16_t color) {
-    M5.Display.setTextColor(color);
+    display.setTextColor(color);
   }
   
   void setTextColor(uint16_t fg, uint16_t bg) {
-    M5.Display.setTextColor(fg, bg);
+    display.setTextColor(fg, bg);
   }
   
   void setTextSize(uint8_t size) {
     // Text size also needs to be scaled to look proportional
-    M5.Display.setTextSize((uint8_t)(size * SCALE_FACTOR));
+    display.setTextSize((uint8_t)(size * SCALE_FACTOR));
+  }
+
+  void setTextWrap(bool wrap) {
+    display.setTextWrap(wrap);
   }
   
   void print(const char* text) {
-    M5.Display.print(text);
+    display.print(text);
   }
   
   void print(String text) {
-    M5.Display.print(text);
+    display.print(text);
   }
   
   void print(char c) {
-    M5.Display.print(c);
+    display.print(c);
   }
   
   void print(int num) {
-    M5.Display.print(num);
+    display.print(num);
   }
   
   void print(float num, int decimalPlaces = 2) {
-    M5.Display.print(num, decimalPlaces);
+    display.print(num, decimalPlaces);
   }
   
   void println(const char* text) {
-    M5.Display.println(text);
+    display.println(text);
   }
   
   void println(String text) {
-    M5.Display.println(text);
+    display.println(text);
   }
   
   void println(char c) {
-    M5.Display.println(c);
+    display.println(c);
   }
   
   void println(int num) {
-    M5.Display.println(num);
+    display.println(num);
   }
   
   void println(float num, int decimalPlaces = 2) {
-    M5.Display.println(num, decimalPlaces);
+    display.println(num, decimalPlaces);
   }
   
   void printf(const char* format, ...) {
@@ -583,54 +571,54 @@ public:
     va_start(args, format);
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
-    M5.Display.print(buffer);
+    display.print(buffer);
   }
   
   // ========== IMAGE OPERATIONS (PASS THROUGH WITHOUT SCALING) ==========
-  // JPEG images are already at correct resolution, so we use M5.Display directly
+  // JPEG images are already at correct resolution, so we use Board.Display directly
   
   void pushImage(int x, int y, int w, int h, uint16_t* data) {
     // Images are NOT scaled - they're already at target resolution
-    M5.Display.pushImage(x, y, w, h, data);
+    display.pushImage(x, y, w, h, data);
   }
 };
 
 // Create global instance of scaled display
-// This replaces all M5.Lcd calls in the original code
+// This replaces all Board.Lcd calls in the original code
 ScaledDisplay Lcd;
 
 // ========== TOUCH BUTTON INSTANCES ==========
-// Buttons positioned in PHYSICAL coordinates to match frame02.jpg graphics
-// Located in the right panel of the screen
-
+// CYD: three horizontal tap zones in the footer band (Y=205..239).
+// No visible button drawing — the footer text acts as the visual hint.
+// Zones match the left/center/right thirds of the 320px-wide panel.
 TouchButton btnPrev = {
-  950,             // x: right panel physical position
-  135,             // y: top button
-  200,             // w: button width
-  80,              // h: button height
-  "PREV",          
-  THEME_GREEN,     
-  false            
+  0,    // x: left zone
+  205,  // y: footer band start
+  106,  // w: ~1/3 screen width
+  35,   // h: footer height
+  "PRV",
+  THEME_GREEN,
+  false
 };
 
 TouchButton btnScan = {
-  950,             // x: same column
-  300,             // y: middle button
-  200,             // w: same width
-  80,              // h: same height
-  "SCAN",          
-  THEME_GREEN,     
-  false            
+  107,  // x: center zone
+  205,
+  106,
+  35,
+  "SCN",
+  THEME_GREEN,
+  false
 };
 
 TouchButton btnNext = {
-  950,             // x: same column
-  470,             // y: bottom button
-  200,             // w: same width
-  80,              // h: same height
-  "NEXT",          
-  THEME_GREEN,     
-  false            
+  213,  // x: right zone
+  205,
+  107,
+  35,
+  "NXT",
+  THEME_GREEN,
+  false
 };
 
 // Wrapper to use default settings (FORCE_CORE_REDOWNLOAD)
@@ -649,327 +637,224 @@ bool downloadCoreImageIfNotExists(String coreName) {
 }
 
 void showDownloadingScreen(String coreName, String gameName) {
-  // ========== LOAD FRAME01.JPG AS BASE ==========
-  M5.Display.fillScreen(THEME_BLACK);
-  
-  if (!loadFullScreenFrame("/cores/frame01.jpg")) {
-    Serial.println("Failed to load frame01.jpg for download screen");
-  }
+  Lcd.fillScreen(THEME_BLACK);
 
-  // Small delay to ensure frame is rendered
-  delay(100);
-  
-  // ========== LOAD AND OVERLAY MISTER LOGO ==========
-  // Logo dimensions: 350x140 pixels
-  // Position: centered in right panel (785, 150)
-  bool logoLoaded = loadMisterLogo(785, 150);
-  
-  if (!logoLoaded) {
-    // Fallback: draw text-based logo
-    M5.Display.setTextColor(THEME_WHITE);
-    M5.Display.setTextSize(4);
-    M5.Display.setCursor(850, 180);
-    M5.Display.print("MiSTer");
-    M5.Display.setTextColor(THEME_YELLOW);
-    M5.Display.setTextSize(2);
-    M5.Display.setCursor(870, 230);
-    M5.Display.print("FPGA");
-    
-    Serial.println("Logo not loaded - using text fallback");
-  }
-  
-  // ========== LEFT PANEL CONTENT (PHYSICAL COORDINATES with OFFSET_Y=130) ==========
-  // Constants for this specific layout
-  const int PANEL_OFFSET_X = 90;
-  const int PANEL_OFFSET_Y = 130;  // Offset specific to the download screen
-  const int SCALE = 2;  // Escala 2x
-  
-  // Macro to convert logical coordinates to physical
-  #define PHYS_X(x) (PANEL_OFFSET_X + ((x) * SCALE))
-  #define PHYS_Y(y) (PANEL_OFFSET_Y + ((y) * SCALE))
-  
-  // Clear the left panel content area (physical: 90,130 size 640x480)
-  M5.Display.fillRect(PANEL_OFFSET_X, PANEL_OFFSET_Y, 640, 480, THEME_BLACK);
-  
-  // Header with ScreenScraper logo area
-  M5.Display.setTextColor(THEME_CYAN);
-  M5.Display.setTextSize(4);  // Logical size 2 = physical size 4
-  M5.Display.setCursor(PHYS_X(40), PHYS_Y(5));
-  M5.Display.print("SCREENSCRAPER");
-  
-  M5.Display.setTextColor(THEME_GREEN);
-  M5.Display.setTextSize(2);  // Logical size 1 = physical size 2
-  M5.Display.setCursor(PHYS_X(65), PHYS_Y(25));
-  M5.Display.print("AUTO-DOWNLOAD");
-  
-  // Decorative line
-  M5.Display.drawFastHLine(PHYS_X(20), PHYS_Y(40), 560, THEME_CYAN);  // 280*2=560
-  
-  // Main download panel (using drawPanel would require modifying it; draw rect directly)
-  M5.Display.drawRect(PHYS_X(10), PHYS_Y(48), 600, 180, THEME_BLUE);  // 300*2=600, 90*2=180
-  M5.Display.fillRect(PHYS_X(10)+2, PHYS_Y(48)+2, 596, 176, THEME_BLACK);
-  
-  // Download status title
-  M5.Display.setTextColor(THEME_WHITE);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(PHYS_X(20), PHYS_Y(58));
-  M5.Display.print("DOWNLOADING GAME ARTWORK");
-  
-  // Separator
-  M5.Display.drawFastHLine(PHYS_X(20), PHYS_Y(70), 560, THEME_GRAY);
-  
-  // Core info
-  M5.Display.setTextColor(THEME_CYAN);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(PHYS_X(20), PHYS_Y(78));
-  M5.Display.print("CORE:");
-  
-  M5.Display.setTextColor(THEME_YELLOW);
-  M5.Display.setCursor(PHYS_X(65), PHYS_Y(78));
-  String displayCore = coreName.length() > 20 ? coreName.substring(0, 20) + "..." : coreName;
-  M5.Display.print(displayCore);
-  
-  // Game info
-  M5.Display.setTextColor(THEME_CYAN);
-  M5.Display.setCursor(PHYS_X(20), PHYS_Y(93));
-  M5.Display.print("GAME:");
-  
-  M5.Display.setTextColor(THEME_YELLOW);
-  M5.Display.setCursor(PHYS_X(65), PHYS_Y(93));
-  String displayGame = gameName.length() > 20 ? gameName.substring(0, 20) + "..." : gameName;
-  M5.Display.print(displayGame);
-  
-  // Status
-  M5.Display.setTextColor(THEME_GREEN);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(PHYS_X(20), PHYS_Y(113));
-  M5.Display.print("STATUS: Searching database...");
-  
-  // Status indicator in top-right (physical coordinates)
+  // Header: text logo + label
+  drawMiSTerLogo(10, 5);
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(120, 8);
+  Lcd.print("SCREENSCRAPER");
+  Lcd.setCursor(120, 20);
+  Lcd.print("AUTO-DOWNLOAD");
+
+  // Main panel (blue = game artwork download)
+  drawPanel(10, 50, 300, 80, THEME_BLUE);
+
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(20, 60);
+  Lcd.print("DOWNLOADING GAME IMAGE");
+
+  Lcd.setTextColor(THEME_YELLOW);
+  Lcd.setCursor(20, 80);
+  Lcd.printf("CORE: %s", coreName.c_str());
+
+  Lcd.setCursor(20, 95);
+  String displayGame = gameName.length() > 25 ? gameName.substring(0, 25) + "..." : gameName;
+  Lcd.printf("GAME: %s", displayGame.c_str());
+
+  Lcd.setCursor(20, 110);
+  Lcd.setTextColor(THEME_GREEN);
+  Lcd.print("Searching ScreenScraper database...");
+
+  // Status indicator (upper-right)
   drawStatusIndicator(290, 15, THEME_GREEN, true);
-  
-  #undef PHYS_X
-  #undef PHYS_Y
+
+  // Footer
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setCursor(10, 220);
+  Lcd.print("Please wait - downloading from ScreenScraper.fr");
 }
 
 void showDownloadProgress(int progress, String text) {
-  // ========== UPDATE PROGRESS BAR (PHYSICAL COORDINATES with OFFSET_Y=130) ==========
-  const int PANEL_OFFSET_X = 90;
-  const int PANEL_OFFSET_Y = 130;
-  const int SCALE = 2;
-  
-  #define PHYS_X(x) (PANEL_OFFSET_X + ((x) * SCALE))
-  #define PHYS_Y(y) (PANEL_OFFSET_Y + ((y) * SCALE))
-  
-  // Clear progress area (below the STATUS which is at logical Y=113)
-  M5.Display.fillRect(PHYS_X(10), PHYS_Y(130), 600, 180, THEME_BLACK);
-  
-  // Progress bar
-  M5.Display.drawRect(PHYS_X(20), PHYS_Y(140), 560, 40, THEME_WHITE);
-  M5.Display.fillRect(PHYS_X(20)+2, PHYS_Y(140)+2, 556, 36, THEME_BLACK);
-  
-  // Fill progress bar
+  // Clear progress strip
+  Lcd.fillRect(10, 140, 300, 60, THEME_BLACK);
+
+  // Bar frame
+  Lcd.drawRect(20, 150, 280, 20, THEME_WHITE);
+  Lcd.fillRect(21, 151, 278, 18, THEME_BLACK);
+
+  // Bar fill with stoplight gradient
   if (progress > 0) {
-    int fillWidth = (progress * 552) / 100;  // 276*2 = 552
-    uint16_t barColor = (progress < 30) ? THEME_YELLOW : 
-                       (progress < 70) ? THEME_CYAN : THEME_GREEN;
-    M5.Display.fillRect(PHYS_X(20)+4, PHYS_Y(140)+4, fillWidth, 32, barColor);
+    int fillWidth = (progress * 276) / 100;
+    uint16_t barColor = (progress < 30) ? THEME_YELLOW :
+                        (progress < 70) ? THEME_CYAN   : THEME_GREEN;
+    Lcd.fillRect(22, 152, fillWidth, 16, barColor);
   }
-  
-  // Progress percentage in center
-  M5.Display.setTextColor(THEME_WHITE);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(PHYS_X(148), PHYS_Y(145));
-  M5.Display.printf("%d%%", progress);
-  
-  // Status text below progress bar
-  M5.Display.setTextColor(THEME_CYAN);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(PHYS_X(20), PHYS_Y(170));
-  
-  // Truncate text if too long
-  String displayText = text.length() > 38 ? text.substring(0, 38) + "..." : text;
-  M5.Display.print(displayText);
-  
-  // Footer
-  M5.Display.setTextColor(THEME_GRAY);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(PHYS_X(20), PHYS_Y(200));
-  M5.Display.print("Source: ScreenScraper.fr");
-  
-  #undef PHYS_X
-  #undef PHYS_Y
+
+  // Percentage centered above the bar
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(140, 155);
+  Lcd.printf("%d%%", progress);
+
+  // Status line under bar
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setCursor(20, 180);
+  Lcd.print(text);
+
+  // Wipe any leftover characters from a longer previous status
+  int textPx = text.length() * 6;
+  if (textPx < 280) {
+    Lcd.fillRect(20 + textPx, 180, 280 - textPx, 10, THEME_BLACK);
+  }
 }
 
 // Visible window (in characters) for the game name in the image footer.
 #define GAME_FOOTER_VISIBLE_CHARS_FULL    58
 
 void addGameImageFooter(String gameName) {
-  // Footer in PHYSICAL coordinates (full screen width, below image area at Y=620)
-  
-  // Draw separator line at top of footer
-  M5.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
-  M5.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
-  
-  int  visibleChars = GAME_FOOTER_VISIBLE_CHARS_FULL;
-  
-  M5.Display.setTextWrap(false);
-  
-  // Game name label (upper line of footer)
-  M5.Display.setTextColor(THEME_CYAN);
-  M5.Display.setTextSize(3);
-  M5.Display.setCursor(40, 638);
-  M5.Display.print("GAME:");
-  
-  // Initialize the scroll state for this game name.
+  Lcd.fillRect(0, 200, 320, 40, THEME_BLACK);
+  Lcd.drawFastHLine(0, 200, 320, THEME_CYAN);
+
+  Lcd.setTextWrap(false);
+
+  // === Line 1 (Y=210): "GAME: <scrolled name>" =============================
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(10, 210);
+  Lcd.print("GAME:");
+
+  // Re-init scroll state only when the underlying text changes (preserves
+  // the incremental scroll position across redraws).
+  const int visibleChars = 38;   // ~"GAME: " + 38 chars fits at size=1
   if (imageFooterScroll.fullText != gameName ||
       imageFooterScroll.maxChars != visibleChars) {
     initScrollText(&imageFooterScroll, gameName, visibleChars);
   }
-  
-  // Print whatever the scroll state currently exposes (full name on first
-  // draw, scrolled window thereafter). The refresh block in loop() will
-  // animate it.
   String displayGame = getScrolledText(&imageFooterScroll);
-  // Pad to maxChars for stable width across scroll frames
   while ((int)displayGame.length() < imageFooterScroll.maxChars) {
     displayGame += ' ';
   }
-  M5.Display.setTextColor(THEME_YELLOW, THEME_BLACK);  // bg color → flicker-free
-  M5.Display.setTextSize(3);
-  M5.Display.setCursor(200, 638);
-  M5.Display.print(displayGame);
-  
-  // Instructions (lower line of footer) — shifted left when button is visible
-  M5.Display.setTextColor(THEME_GREEN);
-  M5.Display.setTextSize(3);
-  M5.Display.setCursor(250, 685);
-  M5.Display.print("Touch the screen to show MiSTer monitor");
-  
+
+  Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);  // bg = flicker-free
+  Lcd.setCursor(46, 210);
+  Lcd.print(displayGame);
+
+  // === Line 2 (Y=225): touch hint ==========================================
+  Lcd.setTextColor(THEME_GREEN, THEME_BLACK);
+  Lcd.setCursor(40, 225);
+  Lcd.print("Touch screen for MiSTer monitor");
 }
 
-// Footer for fullscreen core image screens.
-// Layout (footer band: y=621..720, height 99):
-//   - If game is active: line 1 (y=638) "GAME: <name>" with scroll, line 2 (y=685) "Touch..."
-//   - If no game:        single centered "Touch..." (y=660), as before
 void drawCoreImageFooter() {
-  M5.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
-  M5.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
-  
-  bool hasGame    = (currentGame.length() > 0);
-  
-  M5.Display.setTextWrap(false);
-  
+  // Footer band: same layout as addGameImageFooter so both screens look
+  // consistent on CYD. Differs only in content (no game = single hint line).
+  Lcd.fillRect(0, 200, 320, 40, THEME_BLACK);
+  Lcd.drawFastHLine(0, 200, 320, THEME_GREEN);
+
+  bool hasGame = (currentGame.length() > 0);
+  Lcd.setTextWrap(false);
+
   if (hasGame) {
-    // === Line 1: GAME: <name> ===
-    int visibleChars = GAME_FOOTER_VISIBLE_CHARS_FULL;
-    
-    // Initialize the scroll state.
+    // === Line 1 (Y=210): GAME label + scrolling game name ==================
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(10, 210);
+    Lcd.print("GAME:");
+
+    const int visibleChars = 38;
     if (imageFooterScroll.fullText != currentGame ||
         imageFooterScroll.maxChars != visibleChars) {
       initScrollText(&imageFooterScroll, currentGame, visibleChars);
     }
     String displayGame = getScrolledText(&imageFooterScroll);
     while ((int)displayGame.length() < imageFooterScroll.maxChars) {
-    displayGame += ' ';
+      displayGame += ' ';
     }
-    
-    // GAME: label
-    M5.Display.setTextColor(THEME_CYAN);
-    M5.Display.setTextSize(3);
-    M5.Display.setCursor(40, 638);
-    M5.Display.print("GAME:");
-    
-    // Game name
-    M5.Display.setTextColor(THEME_YELLOW, THEME_BLACK);
-    M5.Display.setTextSize(3);
-    M5.Display.setCursor(200, 638);
-    M5.Display.print(displayGame);
-    
-    // === Line 2: hint ===
-    M5.Display.setTextColor(THEME_GREEN);
-    M5.Display.setTextSize(3);
-    M5.Display.setCursor(250, 685);
-    M5.Display.print("Touch the screen to show MiSTer monitor");
-    
+
+    Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+    Lcd.setCursor(46, 210);
+    Lcd.print(displayGame);
+
+    // === Line 2 (Y=225): touch hint ========================================
+    Lcd.setTextColor(THEME_GREEN, THEME_BLACK);
+    Lcd.setCursor(40, 225);
+    Lcd.print("Touch screen for MiSTer monitor");
+
   } else {
-    // No game: just the centered hint, like before
-    M5.Display.setTextColor(THEME_GREEN);
-    M5.Display.setTextSize(3);
-    M5.Display.setCursor(250, 660);
-    M5.Display.print("Touch the screen to show MiSTer monitor");
+    // No active game: single centered hint vertically in the band
+    Lcd.setTextColor(THEME_GREEN, THEME_BLACK);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(40, 217);
+    Lcd.print("Touch screen for MiSTer monitor");
   }
-  
 }
 
 void drawFooter() {
-  // Footer area at bottom of screen - now adapted for frame02.jpg design
-  // Draw separator line at top of footer
-  // M5.Display.drawFastHLine(0, 215 * SCALE_Y, M5TAB_WIDTH, THEME_GREEN);
-  
-  // Fill footer background
-  M5.Display.fillRect(0, 216 * SCALE_Y, M5TAB_WIDTH, 24 * SCALE_Y, THEME_BLACK);
-  
-  // System uptime on the left
-  M5.Display.setTextColor(THEME_CYAN);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(10 * SCALE_X, 220 * SCALE_Y);
-  M5.Display.printf("SYS: %02d:%02d", (millis() / 60000) % 60, (millis() / 1000) % 60);
-  
-  // Current game or core in center with scrolling support.
-  //
-  // Coordinate math at setTextSize(2):
-  //   - Cursor at logical x=120, y=220 → physical x=480, y=660 (SCALE_X=4, SCALE_Y=3).
-  //   - Each char at size 2 is 12 px wide physically (6 logical × 2 font scale).
-  //   - The "GAME: "/"CORE: " prefix (6 chars) occupies 72 px → text starts at x=552 physical.
-  //   - The IMG:OK indicator starts at logical x=250 → physical x=1000.
-  //   - Use a stable visible window of 20 chars: 20 × 12 = 240 px wide, fits
-  //     between x=552 and x=792 with margin to spare before x=1000.
-  //
-  // Use setTextColor(fg, bg) so the background is painted behind each glyph in
-  // a single pass — no flicker, no stale pixels.
-  
-  const int FOOTER_PHY_X         = 120 * SCALE_X;        // 480
-  const int FOOTER_PHY_Y         = 220 * SCALE_Y;        // 660
-  const int FOOTER_PREFIX_PX     = 6 * 12;               // 72  (6 chars × 12 px each, size 2)
-  const int FOOTER_TEXT_PHY_X    = FOOTER_PHY_X + FOOTER_PREFIX_PX;  // 552
-  const int FOOTER_VISIBLE_CHARS = 20;
-  const int FOOTER_TEXT_PHY_W    = FOOTER_VISIBLE_CHARS * 12;  // 240 px
-  
-  // Always pad displayed text to FOOTER_VISIBLE_CHARS for stable pixel width
-  auto padToWindow = [](String s, int n) {
-    while ((int)s.length() < n) s += ' ';
-    return s;
-  };
-  
-  M5.Display.setTextWrap(false);
-  M5.Display.setTextSize(2);
-  M5.Display.setTextColor(THEME_CYAN, THEME_BLACK);
-  
-  if (currentGame.length() > 0) {
-    if (gameFooterScroll.fullText != currentGame) {
-      initScrollText(&gameFooterScroll, currentGame, FOOTER_VISIBLE_CHARS);
-    }
-    String displayGame = padToWindow(getScrolledText(&gameFooterScroll), FOOTER_VISIBLE_CHARS);
-    
-    // Print the prefix and the value as a single string for atomic redraw
-    M5.Display.setCursor(FOOTER_PHY_X, FOOTER_PHY_Y);
-    M5.Display.printf("GAME: %s", displayGame.c_str());
-  } else {
-    if (gameFooterScroll.fullText != currentCore) {
-      initScrollText(&gameFooterScroll, currentCore, FOOTER_VISIBLE_CHARS);
-    }
-    String displayCore = padToWindow(getScrolledText(&gameFooterScroll), FOOTER_VISIBLE_CHARS);
-    
-    M5.Display.setCursor(FOOTER_PHY_X, FOOTER_PHY_Y);
-    M5.Display.printf("CORE: %s", displayCore.c_str());
+  // Footer band Y=205..239 (35px). Two text rows inside it:
+  //   row 1 (Y=214): live data — SYS uptime / GAME-CORE / IMG:OK
+  //   row 2 (Y=228): touch navigation zones — <PRV  SCAN  NXT>
+  Lcd.drawFastHLine(0, 205, 320, THEME_GREEN);
+  Lcd.drawFastHLine(0, 206, 320, THEME_GREEN);
+
+  // Clear both text rows (flicker-free repaint)
+  Lcd.fillRect(0, 209, 320, 30, THEME_BLACK);
+
+  Lcd.setTextWrap(false);
+  Lcd.setTextSize(1);
+
+  // ===== ROW 1 (Y=214): live data =====================================
+
+  // Left: uptime
+  Lcd.setTextColor(THEME_CYAN, THEME_BLACK);
+  Lcd.setCursor(5, 214);
+  Lcd.printf("SYS:%02d:%02d",
+             (int)((millis() / 60000) % 60),
+             (int)((millis() / 1000)  % 60));
+
+  // Middle: GAME or CORE with scroll
+  const int FOOTER_MID_X = 78;
+  const int FOOTER_VIS   = 16;   // visible chars: 16 × 6 = 96 px
+
+  bool   hasGame = (currentGame.length() > 0);
+  String label  = hasGame ? "G:" : "C:";
+  String source = hasGame ? currentGame : currentCore;
+
+  if (gameFooterScroll.fullText != source ||
+      gameFooterScroll.maxChars != FOOTER_VIS) {
+    initScrollText(&gameFooterScroll, source, FOOTER_VIS);
   }
-  
-  // SD card status indicator on the right
+  String displayName = getScrolledText(&gameFooterScroll);
+  while ((int)displayName.length() < FOOTER_VIS) displayName += ' ';
+
+  Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+  Lcd.setCursor(FOOTER_MID_X, 214);
+  Lcd.print(label);
+  Lcd.print(displayName);
+
+  // Right: SD/image cache indicator
   if (sdCardAvailable) {
-    M5.Display.setCursor(250 * SCALE_X, 220 * SCALE_Y);
-    M5.Display.print("IMG:OK");
+    Lcd.setTextColor(THEME_GREEN, THEME_BLACK);
+    Lcd.setCursor(283, 214);
+    Lcd.print("IMG:OK");
   }
+
+  // ===== ROW 2 (Y=228): touch navigation zones ========================
+  // Visual hint for the three TouchButton hitboxes (btnPrev/Scan/Next),
+  // which span the footer band split into left / center / right thirds.
+
+  // Faint vertical separators between the three zones
+  Lcd.drawFastVLine(106, 224, 15, 0x4208);  // dark grey ~RGB(32,32,32)
+  Lcd.drawFastVLine(213, 224, 15, 0x4208);
+
+  Lcd.setTextColor(THEME_GREEN, THEME_BLACK);
+  Lcd.setCursor(28,  228);  Lcd.print("<PRV");   // left zone  (x 0..106)
+  Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+  Lcd.setCursor(138, 228);  Lcd.print("SCAN");   // center zone (x 107..212)
+  Lcd.setTextColor(THEME_GREEN, THEME_BLACK);
+  Lcd.setCursor(245, 228);  Lcd.print("NXT>");   // right zone  (x 213..319)
 }
 
 // Parses a ROM details JSON response into `details`.
@@ -1067,7 +952,7 @@ RomDetails getCurrentRomDetails() {
   
   http.begin(url);
   http.setTimeout(8000);
-  http.addHeader("User-Agent", "M5Stack-MiSTer-Monitor");
+  http.addHeader("User-Agent", "MiSTer-Monitor");
   
   unsigned long requestStart = millis();
   int code = http.GET();
@@ -1116,7 +1001,7 @@ RomDetails getCurrentRomDetails() {
     {
       unsigned long _waitStart = millis();
       while (millis() - _waitStart < 20000) {
-        M5.update();                    // Keep touch state fresh
+        Board.update();                    // Keep touch state fresh
         screenshotServer.handleClient(); // Keep HTTP server alive
         delay(100);                     // Yield to FreeRTOS / feed WDT
       }
@@ -1135,7 +1020,7 @@ RomDetails getCurrentRomDetails() {
     HTTPClient httpRetry;
     httpRetry.begin(url);
     httpRetry.setTimeout(12000); // Increased from 8000 to 12000
-    httpRetry.addHeader("User-Agent", "M5Stack-MiSTer-Monitor");
+    httpRetry.addHeader("User-Agent", "MiSTer-Monitor");
     
     unsigned long retryStart = millis();
     int retryCode = httpRetry.GET();
@@ -1202,7 +1087,7 @@ RomDetails getCurrentRomDetailsForced() {
 
   http.begin(url);
   http.setTimeout(15000);
-  http.addHeader("User-Agent", "M5Stack-MiSTer-Monitor");
+  http.addHeader("User-Agent", "MiSTer-Monitor");
 
   int code = http.GET();
   Serial.printf("Forced HTTP Response: %d\n", code);
@@ -1547,105 +1432,44 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
 
 // Core image download screen
 void showCoreDownloadingScreen(String coreName) {
-  // ========== LOAD FRAME01.JPG AS BASE ==========
-  M5.Display.fillScreen(THEME_BLACK);
-  
-  if (!loadFullScreenFrame("/cores/frame01.jpg")) {
-    Serial.println("Failed to load frame01.jpg for core download screen");
-  }
-  
-  // Small delay to ensure frame is rendered
-  delay(100);
-  
-  // ========== LOAD AND OVERLAY MISTER LOGO ==========
-  // Logo dimensions: 350x140 pixels
-  // Position: centered in right panel (785, 150)
-  bool logoLoaded = loadMisterLogo(785, 150);
-  
-  if (!logoLoaded) {
-    // Fallback: draw text-based logo
-    M5.Display.setTextColor(THEME_WHITE);
-    M5.Display.setTextSize(4);
-    M5.Display.setCursor(850, 180);
-    M5.Display.print("MiSTer");
-    M5.Display.setTextColor(THEME_YELLOW);
-    M5.Display.setTextSize(2);
-    M5.Display.setCursor(870, 230);
-    M5.Display.print("FPGA");
-    
-    Serial.println("Logo not loaded - using text fallback");
-  }
+  Lcd.fillScreen(THEME_BLACK);
 
-  // ========== LEFT PANEL CONTENT (PHYSICAL COORDINATES with OFFSET_Y=130) ==========
-  const int PANEL_OFFSET_X = 90;
-  const int PANEL_OFFSET_Y = 130;
-  const int SCALE = 2;
-  
-  #define PHYS_X(x) (PANEL_OFFSET_X + ((x) * SCALE))
-  #define PHYS_Y(y) (PANEL_OFFSET_Y + ((y) * SCALE))
-  
-  // Clear the left panel content area
-  M5.Display.fillRect(PANEL_OFFSET_X, PANEL_OFFSET_Y, 640, 480, THEME_BLACK);
-  
-  // Header with ScreenScraper logo area
-  M5.Display.setTextColor(THEME_CYAN);
-  M5.Display.setTextSize(4);  // Logical size 2 = physical size 4
-  M5.Display.setCursor(PHYS_X(40), PHYS_Y(5));
-  M5.Display.print("SCREENSCRAPER");
-  
-  M5.Display.setTextColor(THEME_ORANGE);
-  M5.Display.setTextSize(2);  // Logical size 1 = physical size 2
-  M5.Display.setCursor(PHYS_X(60), PHYS_Y(25));
-  M5.Display.print("SYSTEM DOWNLOAD");
-  
-  // Decorative line
-  M5.Display.drawFastHLine(PHYS_X(20), PHYS_Y(40), 560, THEME_CYAN);
-  
-  // Main download panel (orange for system vs blue for game)
-  M5.Display.drawRect(PHYS_X(10), PHYS_Y(48), 600, 180, THEME_ORANGE);
-  M5.Display.fillRect(PHYS_X(10)+2, PHYS_Y(48)+2, 596, 176, THEME_BLACK);
-  
-  // Download status title
-  M5.Display.setTextColor(THEME_WHITE);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(PHYS_X(20), PHYS_Y(58));
-  M5.Display.print("DOWNLOADING SYSTEM ARTWORK");
-  
-  // Separator
-  M5.Display.drawFastHLine(PHYS_X(20), PHYS_Y(70), 560, THEME_GRAY);
-  
-  // System info
-  M5.Display.setTextColor(THEME_CYAN);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(PHYS_X(20), PHYS_Y(78));
-  M5.Display.print("SYSTEM:");
-  
-  M5.Display.setTextColor(THEME_YELLOW);
-  M5.Display.setCursor(PHYS_X(75), PHYS_Y(78));
-  String displayCore = coreName.length() > 18 ? coreName.substring(0, 18) + "..." : coreName;
-  M5.Display.print(displayCore);
-  
-  // Media types
-  M5.Display.setTextColor(THEME_CYAN);
-  M5.Display.setCursor(PHYS_X(20), PHYS_Y(93));
-  M5.Display.print("MEDIA TYPES:");
-  
-  M5.Display.setTextColor(THEME_WHITE);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(PHYS_X(20), PHYS_Y(106));
-  M5.Display.print("screen marquee > photo > wheel");
-    Serial.println("SD not available, showing SD error");
-  // Status
-  M5.Display.setTextColor(THEME_GREEN);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(PHYS_X(20), PHYS_Y(123));
-  M5.Display.print("STATUS: Searching database...");
-  
-  // Status indicator in top-right (physical coordinates, orange for system)
+  // Header: text logo + label
+  drawMiSTerLogo(10, 5);
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(120, 8);
+  Lcd.print("SCREENSCRAPER");
+  Lcd.setCursor(120, 20);
+  Lcd.print("SYSTEM DOWNLOAD");
+
+  // Main panel (orange = system/core artwork download)
+  drawPanel(10, 50, 300, 80, THEME_ORANGE);
+
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(20, 60);
+  Lcd.print("DOWNLOADING SYSTEM IMAGE");
+
+  Lcd.setTextColor(THEME_YELLOW);
+  Lcd.setCursor(20, 80);
+  Lcd.printf("SYSTEM: %s", coreName.c_str());
+
+  Lcd.setCursor(20, 95);
+  Lcd.setTextColor(THEME_GREEN);
+  Lcd.print("Searching ScreenScraper database...");
+
+  Lcd.setCursor(20, 110);
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.print("Media: wheel > photo > illustration");
+
+  // Status indicator (upper-right, orange to match panel)
   drawStatusIndicator(290, 15, THEME_ORANGE, true);
-  
-  #undef PHYS_X
-  #undef PHYS_Y
+
+  // Footer
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setCursor(10, 220);
+  Lcd.print("Downloading system artwork from ScreenScraper.fr");
 }
 
 void showCoreImageScreenWithAutoDownload(String coreName) {
@@ -1668,7 +1492,7 @@ void showCoreImageScreenWithAutoDownload(String coreName) {
   return;
 }
   
-  // For Arcade cores, ALWAYS ensure we have subsystem info
+  // CRITICAL FIX: For Arcade cores, ALWAYS ensure we have subsystem info
   String coreNameLower = coreName;
   coreNameLower.toLowerCase();
   bool isMameCore = (coreNameLower == "arcade");
@@ -1724,7 +1548,7 @@ void showCoreImageScreenWithAutoDownload(String coreName) {
   bool imageExists = findCoreImage(coreName, imagePath);
   bool shouldDownload = false;
   
-  // ENHANCED LOGIC: Decide if download is needed
+  // Decide if download is needed
   if (FORCE_CORE_REDOWNLOAD) {
     Serial.println("FORCE_CORE_REDOWNLOAD enabled - will download regardless of existing image");
     shouldDownload = true;
@@ -1734,7 +1558,7 @@ void showCoreImageScreenWithAutoDownload(String coreName) {
   } else {
     Serial.println("Image exists - checking if it's the correct one...");
     
-    // ENHANCED CHECK: For Arcade, verify we have the right image
+    // For Arcade, verify we have the right image
     if (isMameCore && lastArcadeSystemeId.length() > 0) {
       String expectedSubsystemName = "Arcade_" + lastArcadeSystemeId;
       
@@ -1785,7 +1609,7 @@ void showCoreImageScreenWithAutoDownload(String coreName) {
   if (imagePath.length() > 0) {
     Serial.printf("Displaying core image: %s\n", imagePath.c_str());
     
-    // Enhanced logging for subsystem images
+    // logic for subsystem images
     if (isMameCore && lastArcadeSystemeId.length() > 0) {
       if (imagePath.indexOf("Arcade_" + lastArcadeSystemeId) >= 0) {
         Serial.printf("SUCCESS: Displaying subsystem-specific image for subsystem %s\n", 
@@ -1819,13 +1643,11 @@ void showCoreImageScreenWithAutoDownload(String coreName) {
 }
 
 // ========== TOUCH HANDLING FUNCTION ==========
-// This function replaces the physical button checks (M5.BtnA, M5.BtnB, M5.BtnC)
-// It converts touch coordinates and checks which button (if any) was pressed
 
 void handleTouch() {
-  // Step 1: Get current touch state from M5Unified
+  // Step 1: Get current touch state from Board.Touch.getDetail
   // This returns a structure with all touch information
-  auto touch = M5.Touch.getDetail();
+  auto touch = Board.Touch.getDetail();
   
   // Step 2: Check if this is a NEW touch event
   // wasPressed() is true only at the moment of initial contact
@@ -1836,18 +1658,12 @@ void handleTouch() {
     int physicalX = touch.x;
     int physicalY = touch.y;
     
-    // Step 4: Convert to logical coordinates (320x240 space)
-    // This is where the magic happens - we transform M5Tab coordinates
-    // back to the original M5Stack coordinate system
-    // int logicalX = (int)(physicalX / SCALE_X);
-    // int logicalY = (int)(physicalY / SCALE_Y);
-    
-    // Step 5: Debug logging (helpful during development and testing)
+    // Step 4: Debug logging (helpful during development and testing)
     Serial.println("Touch detected!");
     Serial.printf("  Physical coordinates: (%d, %d)\n", physicalX, physicalY);
     // Serial.printf("  Logical coordinates: (%d, %d)\n", logicalX, logicalY);
     
-    // Step 6: Check each button in sequence
+    // Step 5: Check each button in sequence
     // Using if-else ensures only one button can be activated per touch
     
     // Check PREV button
@@ -1885,7 +1701,7 @@ void handleTouch() {
         // btnScan is at (950,300) with size 200x80; the label is centered.
         // Wipe a generous strip across the middle of the button so neither
         // "SCAN" nor "SCANNING" leave residual pixels at any phase.
-        M5.Display.fillRect(btnScan.x + 10, btnScan.y + 24,
+        Lcd.fillRect(btnScan.x + 10, btnScan.y + 24,
                             btnScan.w - 20, 32, THEME_BLACK);
         btnScan.draw(THEME_YELLOW);   // SCANNING in yellow to stand out
         
@@ -1907,12 +1723,14 @@ void handleTouch() {
           lastGameImageOK         = false;
           lastGameSearchExhausted = false;
 
+          // Re-run the game image pipeline now and show the result, instead
+          // of just flagging a HUD redraw.
           btnScan.label   = originalLabel;
           scanInProgress  = false;
           lastButtonPress = millis();
           showGameImageScreen(currentCore, currentGame);
           coreImageStartTime = millis();
-          return;   // switched to image screen; skip the HUD-redraw tail
+          return;   // switched to the image screen; skip the HUD-redraw tail
         }
         
         // === Exit SCANNING state ===
@@ -1922,7 +1740,7 @@ void handleTouch() {
         scanInProgress = false;
         
         // Wipe the (now larger) "SCANNING" footprint and draw "SCAN"
-        M5.Display.fillRect(btnScan.x + 10, btnScan.y + 24,
+        Lcd.fillRect(btnScan.x + 10, btnScan.y + 24,
                             btnScan.w - 20, 32, THEME_BLACK);
         btnScan.draw(THEME_CYAN);
         
@@ -1955,7 +1773,7 @@ void handleTouch() {
 
 void setup() {
   // =====================================================================
-  // ANTI-CRASH BLOCK — must run BEFORE M5.begin() and Serial
+  // ANTI-CRASH BLOCK — must run BEFORE Board.begin() and Serial
   // =====================================================================
 
   // 1) Disable brownout detector to prevent resets during WiFi/SD power peaks.
@@ -1968,18 +1786,18 @@ void setup() {
   // =====================================================================
   // Normal init
   // =====================================================================
-  auto cfg = M5.config();
+  auto cfg = Board.config();
 
   cfg.clear_display = true;
   cfg.output_power = true;
   cfg.internal_imu = false;
   cfg.external_imu = false;
 
-  M5.begin(cfg);
+  Board.begin(cfg);
 
   // ========== START SERIAL FIRST ==========
   Serial.begin(115200);
-  delay(500);  // Give the Serial port time to flush
+  delay(500);  // Give the serial time
 
   // =====================================================================
   // 2) Log the reset reason — tells us exactly WHY the device restarted.
@@ -2027,58 +1845,47 @@ void setup() {
 
   Serial.println("\n\n=== BOOT START ===");
   
-  Serial.println("=== TESTING SPEAKER ===");
-
-  M5.Speaker.begin();
-  M5.Speaker.setVolume(128);
-
-  Serial.println("Playing Pac-Man boot sound...");
-  M5.Speaker.tone(494, 100);  // B
-  delay(110);
-  M5.Speaker.tone(988, 100);  // B (high octave)
-  delay(110);
-  M5.Speaker.tone(740, 100);  // F#
-  delay(110);
-  M5.Speaker.tone(622, 100);  // D#
-  delay(110);
-  M5.Speaker.tone(494, 100);  // B
-  delay(110);
-  M5.Speaker.tone(740, 100);  // F#
-  delay(110);
-  M5.Speaker.tone(622, 150);  // D# (longer)
-  delay(200);
-
-  Serial.println("Speaker test complete");
+  // CYD has no DAC speaker. Boot melody skipped; passive buzzer support
+  // may be added in a later iteration.
+  Serial.println("=== SPEAKER ===  (skipped: not present on CYD)");
   
 
-  // Initialize speaker for M5Tab (M5Unified)
-  /*auto spk_cfg = M5.Speaker.config();
+  // Initialize speaker
+  /*auto spk_cfg = Board.Speaker.config();
   spk_cfg.sample_rate = 48000;  // Sample rate
   spk_cfg.task_priority = 2;    // Task priority
   spk_cfg.task_pinned_core = PRO_CPU_NUM;
   spk_cfg.dma_buf_count = 8;
   spk_cfg.dma_buf_len = 256;
   
-  M5.Speaker.config(spk_cfg);
-  M5.Speaker.begin();
-  M5.Speaker.setVolume(100);  // High volume (0-255)*/
+  Board.Speaker.config(spk_cfg);
+  Board.Speaker.begin();
+  Board.Speaker.setVolume(100);  // High volume (0-255)
   
-  Serial.println("Speaker initialized");
+  Serial.println("Speaker initialized");*/
   
-  M5.Display.setRotation(1);
-  M5.Display.setBrightness(128);
-  M5.Display.setColorDepth(16);
+  display.setRotation(1);
+  display.setBrightness(128);
+  display.setColorDepth(16);
 
-  Serial.println("=== MiSTer Monitor with Core and Games Images on M5Tab Starting ===");
-  Serial.printf("Display: %dx%d\n", M5.Display.width(), M5.Display.height());
+  // CYD: confirm panel resolution after init so we can spot rotation/driver issues.
+  Serial.printf("[DISPLAY] Resolution: %dx%d (expected 320x240 after rotation=1)\n",
+                display.width(), display.height());
+  Serial.printf("[DISPLAY] Color depth: %d bpp\n", display.getColorDepth());
+  
+  Serial.println("=== MiSTer Monitor with Core and Games Images Starting ===");
+  Serial.printf("Display: %dx%d\n", display.width(), display.height());
   Serial.printf("Target MiSTer IP: %s\n", misterIP);
   
   Serial.println("=== INITIALIZING SD CARD ===");
-  Serial.printf("Using CS pin: GPIO %d\n", TFCARD_CS_PIN);
+  Serial.printf("Using CS pin: GPIO %d (HSPI bus)\n", TFCARD_CS_PIN);
   Serial.println("Mode: SPI at 25 MHz");
-  
+
+  // Start the dedicated HSPI bus for SD before SD.begin() can use it.
+  sdSPI.begin(18 /*SCK*/, 19 /*MISO*/, 23 /*MOSI*/, TFCARD_CS_PIN);
+
   int sdRetries = 0;
-  while (!SD.begin(TFCARD_CS_PIN, SPI, 25000000) && sdRetries < 5) {
+  while (!SD.begin(TFCARD_CS_PIN, sdSPI, 25000000) && sdRetries < 5) {
     sdRetries++;
     Serial.printf("SD Card initialization attempt %d/5 failed!\n", sdRetries);
     delay(500);
@@ -2195,7 +2002,7 @@ void setup() {
 }
 
 void loop() {
-  M5.update();
+  Board.update();
   screenshotServer.handleClient();  // Non-blocking screenshot server poll
   // SAFETY: Check for critical memory levels every 30 seconds
   static unsigned long lastMemoryCheck = 0;
@@ -2239,15 +2046,18 @@ void loop() {
     
   // In image mode: ANY touch exits to interface
   // We don't need to check specific buttons, any touch will do
-  auto touch = M5.Touch.getDetail();
+  auto touch = Board.Touch.getDetail();
   if (touch.wasPressed()) {
-    // === Default: exit to monitor ===
+    int tx = touch.x;
+    int ty = touch.y;
+    
+  // === Default: exit to monitor ===
     Serial.println("Touch detected - exiting core image to interface");
-    M5.Display.fillRect(0, 0, 1280, 80, THEME_CYAN);
-    M5.Display.setTextSize(4);
-    M5.Display.setTextColor(THEME_BLACK);
-    M5.Display.setCursor(400, 25);
-    M5.Display.print("LOADING INTERFACE...");
+    Lcd.fillRect(0, 100, 320, 40, THEME_CYAN);
+    Lcd.setTextSize(2);
+    Lcd.setTextColor(THEME_BLACK);
+    Lcd.setCursor(100, 112);
+    Lcd.print("LOADING...");
     showingCoreImage         = false;
     backgroundLoaded         = false;
     needsRedraw              = true;
@@ -2378,17 +2188,13 @@ void loop() {
               scrolledText += ' ';
             }
             
-            // Y/X coordinates depend on which screen we're on.
-            int gameLineY = showingGameImage ? 638
-                          : (currentCore == coreDownloadFailedFor ? 668 : 638);
-            int textCursorX = showingGameImage ? 200
-                          : (currentCore == coreDownloadFailedFor ? 120 : 200);
-            
-            M5.Display.setTextWrap(false);
-            M5.Display.setTextColor(THEME_YELLOW, THEME_BLACK);
-            M5.Display.setTextSize(3);
-            M5.Display.setCursor(textCursorX, gameLineY);
-            M5.Display.print(scrolledText);
+            // CYD: match addGameImageFooter()/drawCoreImageFooter() layout
+            // exactly — the GAME: value is drawn at x=46, y=210, size 1.
+            Lcd.setTextWrap(false);
+            Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+            Lcd.setTextSize(1);
+            Lcd.setCursor(46, 210);
+            Lcd.print(scrolledText);
           }
           lastFooterUpdate = millis();
         }
@@ -2410,7 +2216,7 @@ void loop() {
     Serial.printf("Connected: %s\n", connected ? "YES" : "NO");
     Serial.printf("Time since last button: %lu ms\n", millis() - lastButtonPress);
     
-    // ENHANCED LOGIC: Force fresh data check before screensaver
+    // Force fresh data check before screensaver
     Serial.println("Forcing fresh data check before screensaver...");
     String oldCore = currentCore;
     String oldGame = currentGame;
@@ -2428,7 +2234,6 @@ void loop() {
     
     Serial.println("Activating screensaver - showing image due to inactivity");
     
-    // ENHANCED DECISION LOGIC: Better arcade detection
     bool isArcadeCore = (currentCore.equalsIgnoreCase("mame") || 
                          currentCore.equalsIgnoreCase("arcade"));
     bool hasActiveGame = (currentGame.length() > 0);
@@ -2591,24 +2396,24 @@ if (oldGame != currentGame && sdCardAvailable) {
   if (millis() - lastFooterScrollUpdate > 100) { // Update every 100ms
     if (!showingCoreImage && gameFooterScroll.needsScroll) {
       String textToShow = (currentGame.length() > 0) ? currentGame : currentCore;
-      
+
       if (gameFooterScroll.fullText == textToShow) {
-        // Same physical coordinates as drawFooter() (size 2 → 12 px/char physical):
-        //   prefix "GAME: " or "CORE: " ends at x = 120*SCALE_X + 6*12 = 552 phys.
-        // We only redraw the value zone (from x=552 onwards), padded to maxChars
-        // for stable width. flicker-free thanks to setTextColor(fg, bg).
-        const int textStartX_phys = 120 * SCALE_X + 6 * 12;  // 552
-        
+        // Match drawFooter() row 1 exactly: size 1, the value starts right
+        // after the 2-char "G:"/"C:" label at x = FOOTER_MID_X(78) + 2*6 = 90,
+        // y = 214. Only the value zone is repainted (label is static);
+        // flicker-free via setTextColor(fg, bg).
+        const int nameX = 78 + 2 * 6;   // 90
+
         String displayText = getScrolledText(&gameFooterScroll);
         while ((int)displayText.length() < gameFooterScroll.maxChars) {
           displayText += ' ';
         }
-        
-        M5.Display.setTextWrap(false);
-        M5.Display.setTextColor(THEME_CYAN, THEME_BLACK);
-        M5.Display.setTextSize(2);
-        M5.Display.setCursor(textStartX_phys, 220 * SCALE_Y);
-        M5.Display.print(displayText);
+
+        Lcd.setTextWrap(false);
+        Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+        Lcd.setTextSize(1);
+        Lcd.setCursor(nameX, 214);
+        Lcd.print(displayText);
       }
     }
     lastFooterScrollUpdate = millis();
@@ -2643,7 +2448,7 @@ if (oldGame != currentGame && sdCardAvailable) {
     
     // Only update status indicators without clearing screen
     if (currentPage == 0) {
-      drawStatusIndicator(290, 15, connected ? THEME_GREEN : THEME_RED, connected && blinkState < 2);
+      drawStatusIndicator(307, 15, connected ? THEME_GREEN : THEME_RED, connected && blinkState < 2);
     }
     animTimer = millis();
   }
@@ -2657,8 +2462,8 @@ void initSDCard() {
   // Give WiFi time to stabilize
   delay(500);
   
-  // Try to initialize SD with specific configuration for M5Stack
-  if (SD.begin(TFCARD_CS_PIN)) {
+  // Try to initialize SD
+  if (SD.begin(TFCARD_CS_PIN, sdSPI, 25000000)) {
     sdCardAvailable = true;
     Serial.println("SD card initialized successfully");
     
@@ -2729,7 +2534,7 @@ void checkMisterDebugState() {
   
   http.begin(url);
   http.setTimeout(3000); // Quick timeout
-  http.addHeader("User-Agent", "M5Stack-Monitor");
+  http.addHeader("User-Agent", "MiSTer-Monitor");
   
   int code = http.GET();
   
@@ -2772,7 +2577,7 @@ void checkServerErrorState() {
   
   http.begin(url);
   http.setTimeout(3000); // Short timeout
-  http.addHeader("User-Agent", "M5Stack-Monitor");
+  http.addHeader("User-Agent", "MiSTer-Monitor");
   
   int code = http.GET();
   
@@ -2816,13 +2621,12 @@ void showGameImageScreen(String coreName, String gameName) {
 }
 
 
-// Fixed findCoreImage function - this was missing!
 bool findCoreImage(String coreName, String &imagePath) {
   Serial.printf("=== ENHANCED CORE IMAGE FINDER ===\n");
   Serial.printf("Core: '%s'\n", coreName.c_str());
   Serial.printf("lastArcadeSystemeId: '%s' (length: %d)\n", lastArcadeSystemeId.c_str(), lastArcadeSystemeId.length());
   
-  // Enhanced logic for Arcade: prioritize subsystem image if available and confirmed
+  // prioritize subsystem image if available and confirmed
   String coreNameLower = coreName;
   coreNameLower.toLowerCase();
   if (coreNameLower == "arcade" && lastArcadeSystemeId.length() > 0) {
@@ -2933,15 +2737,15 @@ int jpegDrawCallback(JPEGDRAW *pDraw) {
   if (finalX >= 0 && finalY >= 0 && 
       finalX + pDraw->iWidth <= TARGET_WIDTH && 
       finalY + pDraw->iHeight <= IMAGE_AREA_HEIGHT) {
-    // Use M5.Display directly (not Lcd) for image rendering
-    M5.Display.pushImage(finalX, finalY, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels);
+    // Use Board.Display directly (not Lcd) for image rendering
+    Lcd.pushImage(finalX, finalY, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels);
+  } else if (finalY + pDraw->iHeight > IMAGE_AREA_HEIGHT &&
+             finalX >= 0 && finalX + pDraw->iWidth <= TARGET_WIDTH) {
+    // Expected: block clips into the footer band. Silenced — not an error.
   } else {
-    // Log if trying to draw outside allowed area
-    Serial.printf("jpegDrawCallback: Block outside bounds at (%d,%d) size %dx%d\n",
+    // True out-of-bounds (wrong X or negative Y): log for diagnosis.
+    Serial.printf("jpegDrawCallback: Block out of bounds at (%d,%d) size %dx%d\n",
                   finalX, finalY, pDraw->iWidth, pDraw->iHeight);
-    if (finalY + pDraw->iHeight > IMAGE_AREA_HEIGHT) {
-      Serial.printf("  Would overlap footer (footer at Y=%d)\n", IMAGE_AREA_HEIGHT);
-    }
   }
   
   return 1; // Continue decoding
@@ -2999,6 +2803,7 @@ void showCoreImageScreen(String coreName) {
     Serial.println("No image found for core, showing menu image with overlay");
   }
   
+  // Show menu image with core overlay instead of "image not found"
   showMenuImageWithCoreOverlay(coreName);
 }
 
@@ -3054,16 +2859,8 @@ void showMenuImageWithCoreOverlay(String coreName) {
       Lcd.print("Menu Mode");
     }
     
-    // Footer for the pure MENU state (no game, no core overlay).
-    // Single line: just the hint, centered, with comfortable margins.
-    M5.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
-    M5.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
-    
-    M5.Display.setTextWrap(false);
-    M5.Display.setTextColor(THEME_GREEN);
-    M5.Display.setTextSize(3);
-    M5.Display.setCursor(250, 660);
-    M5.Display.print("Touch the screen to show MiSTer monitor");
+    // CYD: delegate to the shared 320x240-native footer.
+    drawCoreImageFooter();
     
     Serial.println("Menu interface displayed without active core overlay");
     return; // IMPORTANT: Exit here to avoid executing core overlay logic
@@ -3093,11 +2890,11 @@ void showMenuImageWithCoreOverlay(String coreName) {
     }
   }
   
-  // ========== IMPROVED IMAGE DISPLAY AND OVERLAY ==========
+  // ========== IMAGE DISPLAY AND OVERLAY ==========
   if (menuImageFound && displayCoreImage(menuImagePath)) {
     Serial.println("Menu image displayed, adding enhanced overlay");
     
-    // NEW INTEGRATED LOGIC: Determine overlay type based on multiple sources
+    // INTEGRATED LOGIC: Determine overlay type based on multiple sources
     bool isLocalErrorState = (coreName == "NO SERVER" || coreName == "TIMEOUT" || coreName.startsWith("ERROR"));
     bool shouldShowError = serverHasError || isLocalErrorState;
     
@@ -3114,24 +2911,24 @@ void showMenuImageWithCoreOverlay(String coreName) {
         displayError = "ERROR";
       }
       
-      M5.Display.fillRect(1100, 20, 160, 40, THEME_BLACK);
-      M5.Display.drawRect(1100, 20, 160, 40, THEME_RED);
-      M5.Display.setTextColor(THEME_RED);
-      M5.Display.setTextSize(2);
-      M5.Display.setCursor(1115, 32);
+      Lcd.fillRect(1100, 20, 160, 40, THEME_BLACK);
+      Lcd.drawRect(1100, 20, 160, 40, THEME_RED);
+      Lcd.setTextColor(THEME_RED);
+      Lcd.setTextSize(2);
+      Lcd.setCursor(1115, 32);
       
       if (displayError == "NO SERVER") {
-        M5.Display.print("NO SERVER");
+        Lcd.print("NO SERVER");
       } else if (displayError == "TIMEOUT") {
-        M5.Display.print("TIMEOUT");
+        Lcd.print("TIMEOUT");
       } else if (displayError == "OFFLINE") {
-        M5.Display.print("OFFLINE");
+        Lcd.print("OFFLINE");
       } else if (displayError == "DISCONNECTED") {
-        M5.Display.print("DISCONN.");
+        Lcd.print("DISCONN.");
       } else if (displayError.startsWith("ERROR")) {
-        M5.Display.print("ERROR");
+        Lcd.print("ERROR");
       } else {
-        M5.Display.print(displayError.substring(0, 10));
+        Lcd.print(displayError.substring(0, 10));
       }
       
       Serial.printf("Error overlay displayed: %s\n", displayError.c_str());
@@ -3143,59 +2940,11 @@ void showMenuImageWithCoreOverlay(String coreName) {
     displayMainHUD();
   }
 
-  // ========== FOOTER FOR NON-MENU CORES (with optional GAME line) ==========
-  // Layout (footer band y=621..720, height 99):
-  //   Line 1 (y=628): "ACTIVE CORE: <core>"  size 2 label + size 3 value
-  //   Line 2 (y=668): "GAME: <name>"          size 2 label + size 3 value (only if game)
-  //   Hint:    bottom-right, size 2, y=695
-  M5.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
-  M5.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
-  
-  M5.Display.setTextWrap(false);
-  bool hasGame    = (currentGame.length() > 0);
-  
-  // === Line 1: ACTIVE CORE ===
-  M5.Display.setTextColor(THEME_GREEN);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(20, 632);   // size 2 label, slightly above the size-3 value baseline
-  M5.Display.print("ACTIVE CORE:");
-  
-  M5.Display.setTextColor(THEME_YELLOW);
-  M5.Display.setTextSize(3);
-  M5.Display.setCursor(245, 628);
-  String footerCore = coreName.length() > 30 ? coreName.substring(0, 30) : coreName;
-  if (footerCore.equalsIgnoreCase("arcade")) footerCore = "Arcade";
-  M5.Display.print(footerCore);
-  
-  // === Line 2: GAME (only when a game is loaded) ===
-  if (hasGame) {
-    int visibleChars = GAME_FOOTER_VISIBLE_CHARS_FULL;
-    if (imageFooterScroll.fullText != currentGame ||
-        imageFooterScroll.maxChars != visibleChars) {
-      initScrollText(&imageFooterScroll, currentGame, visibleChars);
-    }
-    String displayGame = getScrolledText(&imageFooterScroll);
-    while ((int)displayGame.length() < imageFooterScroll.maxChars) {
-    displayGame += ' ';
-    }
-    
-    M5.Display.setTextColor(THEME_CYAN);
-    M5.Display.setTextSize(2);
-    M5.Display.setCursor(20, 672);
-    M5.Display.print("GAME:");
-    
-     M5.Display.setTextColor(THEME_YELLOW, THEME_BLACK);
-    M5.Display.setTextSize(3);
-    M5.Display.setCursor(120, 668);
-    M5.Display.print(displayGame);
-  }
-  
-  // === Hint (bottom-right, size 2) ===
-    M5.Display.setTextColor(THEME_CYAN);
-    M5.Display.setTextSize(2);
-    M5.Display.setCursor(870, 695);
-    M5.Display.print("Touch to show monitor");
-  
+  // ========== FOOTER FOR NON-MENU CORES ==========
+  // CYD: delegate to the shared 320x240-native footer. drawCoreImageFooter()
+  // already handles the hasGame case (GAME: scrolling line) vs the no-game
+  // case (single touch hint).
+  drawCoreImageFooter();
 }
 
 void showCoreNotFoundScreen(String coreName) {
@@ -3237,12 +2986,12 @@ void showCoreNotFoundScreen(String coreName) {
     Lcd.print("System Status: ERROR");
     
     // Show error in absolute top-right corner
-    M5.Display.fillRect(1100, 20, 160, 40, THEME_BLACK);
-    M5.Display.drawRect(1100, 20, 160, 40, THEME_RED);
-    M5.Display.setTextColor(THEME_RED);
-    M5.Display.setTextSize(2);
-    M5.Display.setCursor(1115, 32);
-    M5.Display.print("ERROR");
+    Lcd.fillRect(1100, 20, 160, 40, THEME_BLACK);
+    Lcd.drawRect(1100, 20, 160, 40, THEME_RED);
+    Lcd.setTextColor(THEME_RED);
+    Lcd.setTextSize(2);
+    Lcd.setCursor(1115, 32);
+    Lcd.print("ERROR");
   } else {
     Lcd.setTextColor(THEME_GREEN);
     Lcd.setTextSize(1);
@@ -3259,17 +3008,17 @@ void showCoreNotFoundScreen(String coreName) {
   Lcd.print("Check SD card: /cores/menu.jpg");
   
   // Footer in PHYSICAL coordinates
-  M5.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
-  M5.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
-  M5.Display.setTextColor(THEME_GREEN);
-  M5.Display.setTextSize(3);
-  M5.Display.setCursor(350, 660);
-  M5.Display.print("Press any button for interface");
+  Lcd.fillRect(0, 621, 1280, 99, THEME_BLACK);
+  Lcd.drawFastHLine(0, 620, 1280, THEME_GREEN);
+  Lcd.setTextColor(THEME_GREEN);
+  Lcd.setTextSize(3);
+  Lcd.setCursor(350, 660);
+  Lcd.print("Press any button for interface");
   }
 
 /**
  * Load and display full screen frame image (frame01.jpg)
- * This serves as the base frame for the entire interface
+ * This serves as the base cyberpunk frame for the entire interface
  * Returns true if successful
  */
 bool loadFullScreenFrame(const char* framePath) {
@@ -3293,8 +3042,8 @@ bool loadFullScreenFrame(const char* framePath) {
     return false;
   }
   
-  // Allocate buffer for frame image (PSRAM-aware to preserve internal heap)
-  uint8_t* buffer = (uint8_t*)psramMalloc(fileSize);
+  // Allocate buffer for frame image
+  uint8_t* buffer = (uint8_t*)malloc(fileSize);
   if (!buffer) {
     Serial.println("No memory for frame image");
     frameFile.close();
@@ -3319,7 +3068,7 @@ bool loadFullScreenFrame(const char* framePath) {
   
   // Callback for full screen frame - no offset, just raw display
   auto frameCallback = [](JPEGDRAW *pDraw) -> int {
-    M5.Display.pushImage(pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels);
+    Lcd.pushImage(pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels);
     return 1;
   };
   
@@ -3369,7 +3118,7 @@ bool loadMisterLogo(int x, int y) {
     return false;
   }
   
-  uint8_t* buffer = (uint8_t*)psramMalloc(fileSize);
+  uint8_t* buffer = (uint8_t*)malloc(fileSize);
   if (!buffer) {
     Serial.println("No memory for logo");
     logoFile.close();
@@ -3388,7 +3137,7 @@ bool loadMisterLogo(int x, int y) {
   
   // Simple callback for logo
   auto logoCallback = [](JPEGDRAW *pDraw) -> int {
-    M5.Display.pushImage(pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels);
+    Lcd.pushImage(pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels);
     return 1;
   };
   
@@ -3418,7 +3167,7 @@ void drawMisterLogoRightPanel() {
     File logoFile = SD.open(logoPath);
     if (logoFile) {
       size_t fileSize = logoFile.size();
-      uint8_t *buffer = (uint8_t*)psramMalloc(fileSize);
+      uint8_t *buffer = (uint8_t*)malloc(fileSize);
       
       if (buffer) {
         size_t bytesRead = logoFile.read(buffer, fileSize);
@@ -3457,17 +3206,17 @@ void drawMisterLogoRightPanel() {
 
 // PREV button sound - lower pitch (800 Hz)
 void playPrevButtonSound() {
-  M5.Speaker.tone(800, 80);
+  Board.Speaker.tone(800, 80);
   Serial.println("PREV sound");
 }
 
 void playScanButtonSound() {
-  M5.Speaker.tone(1200, 80);
+  Board.Speaker.tone(1200, 80);
   Serial.println("SCAN sound");
 }
 
 void playNextButtonSound() {
-  M5.Speaker.tone(1600, 80);
+  Board.Speaker.tone(1600, 80);
   Serial.println("NEXT sound");
 }
 
@@ -3491,7 +3240,7 @@ void buttonPressFeedback(TouchButton* btn, void (*soundFunction)()) {
 }
 
 /**
- * Draw frame - now just loads frame01.jpg
+ * Draw cyberpunk frame - now just loads frame01.jpg
  * If frame image fails, falls back to drawing frame programmatically
  * Uses bootFrameLoaded flag to avoid reloading
  */
@@ -3514,7 +3263,7 @@ void drawCyberpunkFrame() {
   Serial.println("Frame image not found, drawing programmatic fallback");
   
   // Clear screen with black background
-  M5.Display.fillScreen(THEME_BLACK);
+  Lcd.fillScreen(THEME_BLACK);
   
   // Draw simple frame as fallback
   int cornerCut = 30;
@@ -3529,27 +3278,27 @@ void drawCyberpunkFrame() {
   // Main frame outline
   for (int t = 0; t < frameThick; t++) {
     // Top edge
-    M5.Display.drawLine(left + cornerCut, top + t, right - cornerCut, top + t, THEME_CYAN);
+    Lcd.drawLine(left + cornerCut, top + t, right - cornerCut, top + t, THEME_CYAN);
     // Bottom edge
-    M5.Display.drawLine(left + cornerCut, bottom - t, right - cornerCut, bottom - t, THEME_CYAN);
+    Lcd.drawLine(left + cornerCut, bottom - t, right - cornerCut, bottom - t, THEME_CYAN);
     // Left edge
-    M5.Display.drawLine(left + t, top + cornerCut, left + t, bottom - cornerCut, THEME_CYAN);
+    Lcd.drawLine(left + t, top + cornerCut, left + t, bottom - cornerCut, THEME_CYAN);
     // Right edge
-    M5.Display.drawLine(right - t, top + cornerCut, right - t, bottom - cornerCut, THEME_CYAN);
+    Lcd.drawLine(right - t, top + cornerCut, right - t, bottom - cornerCut, THEME_CYAN);
   }
   
   // Corner diagonal cuts
   for (int t = 0; t < frameThick; t++) {
-    M5.Display.drawLine(left + t, top + cornerCut, left + cornerCut, top + t, THEME_CYAN);
-    M5.Display.drawLine(right - cornerCut, top + t, right - t, top + cornerCut, THEME_CYAN);
-    M5.Display.drawLine(left + t, bottom - cornerCut, left + cornerCut, bottom - t, THEME_CYAN);
-    M5.Display.drawLine(right - cornerCut, bottom - t, right - t, bottom - cornerCut, THEME_CYAN);
+    Lcd.drawLine(left + t, top + cornerCut, left + cornerCut, top + t, THEME_CYAN);
+    Lcd.drawLine(right - cornerCut, top + t, right - t, top + cornerCut, THEME_CYAN);
+    Lcd.drawLine(left + t, bottom - cornerCut, left + cornerCut, bottom - t, THEME_CYAN);
+    Lcd.drawLine(right - cornerCut, bottom - t, right - t, bottom - cornerCut, THEME_CYAN);
   }
   
   // Center divider line
   int dividerX = 640;
   for (int t = 0; t < 2; t++) {
-    M5.Display.drawFastVLine(dividerX + t, top + 50, bottom - top - 100, THEME_CYAN);
+    Lcd.drawFastVLine(dividerX + t, top + 50, bottom - top - 100, THEME_CYAN);
   }
   bootFrameLoaded = true;  // Mark as loaded even if using fallback
 }
@@ -3569,74 +3318,36 @@ void drawProgressSquares(int completedCount) {
     uint16_t color = (i < completedCount) ? THEME_GREEN : THEME_BLUE;
     
     // Filled square
-    M5.Display.fillRect(x, startY, squareSize, squareSize, color);
+    Lcd.fillRect(x, startY, squareSize, squareSize, color);
     
     // Border
-    M5.Display.drawRect(x - 2, startY - 2, squareSize + 4, squareSize + 4, THEME_CYAN);
+    Lcd.drawRect(x - 2, startY - 2, squareSize + 4, squareSize + 4, THEME_CYAN);
     
     // Inner detail
     if (i < completedCount) {
       // Checkmark pattern for completed
-      M5.Display.drawLine(x + 15, startY + 30, x + 25, startY + 40, THEME_WHITE);
-      M5.Display.drawLine(x + 25, startY + 40, x + 45, startY + 15, THEME_WHITE);
+      Lcd.drawLine(x + 15, startY + 30, x + 25, startY + 40, THEME_WHITE);
+      Lcd.drawLine(x + 25, startY + 40, x + 45, startY + 15, THEME_WHITE);
     }
   }
 }
 
 void showBootSequence() {
-  // Clear screen completely
-  M5.Display.fillScreen(THEME_BLACK);
-  
-  // ========== LOAD FULL SCREEN FRAME IMAGE ==========
-  // This replaces all the manual frame drawing
-  drawCyberpunkFrame();  // Now loads frame01.jpg
-  
-  // Small delay to ensure frame is rendered
-  delay(100);
-  
-  // ========== LOAD AND OVERLAY MISTER LOGO ==========
-  // Logo dimensions: 350x140 pixels
-  // Position: centered in right panel (785, 150)
-  bool logoLoaded = loadMisterLogo(785, 150);
-  
-  if (!logoLoaded) {
-    // Fallback: draw text-based logo
-    M5.Display.setTextColor(THEME_WHITE);
-    M5.Display.setTextSize(4);
-    M5.Display.setCursor(850, 180);
-    M5.Display.print("MiSTer");
-    M5.Display.setTextColor(THEME_YELLOW);
-    M5.Display.setTextSize(2);
-    M5.Display.setCursor(870, 230);
-    M5.Display.print("FPGA");
-    
-    Serial.println("Logo not loaded - using text fallback");
-  }
-  
-  // ========== DRAW PROGRESS SQUARES (initially blue) ==========
-  drawProgressSquares(0);
-  
-  // ========== BOOT SEQUENCE CONTENT (left panel 640x480) ==========
-  // Content area starts at physical coordinates (20, 140) with 2x scaling
-  
-  int bootOffsetX = 110;
-  int bootOffsetY = 140;
-  int scale = 2;
-  
-  // Terminal-style boot header (scaled 2x)
-  M5.Display.setTextColor(THEME_GREEN);
-  M5.Display.setTextSize(4);
-  M5.Display.setCursor(bootOffsetX + 80*scale, bootOffsetY + 20*scale);
-  M5.Display.print("SYSTEM");
-  
-  M5.Display.setTextColor(THEME_YELLOW);
-  M5.Display.setCursor(bootOffsetX + 40*scale, bootOffsetY + 45*scale);
-  M5.Display.print("INITIALIZE");
-  
+  Lcd.fillScreen(THEME_BLACK);
+
+  // Terminal-style boot header
+  Lcd.setTextColor(THEME_GREEN);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(80, 40);
+  Lcd.print("SYSTEM");
+
+  Lcd.setTextColor(THEME_YELLOW);
+  Lcd.setCursor(70, 65);
+  Lcd.print("INITIALIZE");
+
   // Boot lines with typing effect
-  M5.Display.setTextColor(THEME_CYAN);
-  M5.Display.setTextSize(2);
-  
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(1);
   String bootLines[] = {
     "> Loading MiSTer interface...",
     "> Initializing SD card system...",
@@ -3644,44 +3355,29 @@ void showBootSequence() {
     "> Establishing connection protocols...",
     "> System ready - ONLINE"
   };
-  
+
   for (int i = 0; i < 5; i++) {
-    int lineY = bootOffsetY + 90*scale + i * 15*scale;
-    M5.Display.setCursor(bootOffsetX, lineY);
-    
-    // Typing effect
-    for (int j = 0; j < bootLines[i].length(); j++) {
-      M5.Display.print(bootLines[i].charAt(j));
+    Lcd.setCursor(10, 110 + i * 15);
+    for (int j = 0; j < (int)bootLines[i].length(); j++) {
+      Lcd.print(bootLines[i].charAt(j));
       delay(20);
     }
-    
-    // Update progress squares as each line completes
-    drawProgressSquares(i + 1);
     delay(100);
   }
-  
-  // Progress bar at bottom of boot area
-  int barX = bootOffsetX + 20*scale;
-  int barY = bootOffsetY + 170*scale;
-  int barW = 240*scale;
-  int barH = 12*scale;
-  
-  M5.Display.drawRect(barX, barY, barW, barH, THEME_WHITE);
-  M5.Display.fillRect(barX + scale, barY + scale, barW - 2*scale, barH - 2*scale, THEME_BLACK);
-  
-  // Animated progress fill
-  for (int progress = 0; progress <= 100; progress += 2) {
-    int fillWidth = ((barW - 4*scale) * progress) / 100;
-    uint16_t barColor = (progress < 30) ? THEME_YELLOW :
-                       (progress < 70) ? THEME_CYAN : THEME_GREEN;
-    
-    M5.Display.fillRect(barX + 2*scale, barY + 2*scale, fillWidth, barH - 4*scale, barColor);
-    M5.Display.drawFastHLine(barX + 2*scale, barY + 2*scale, fillWidth, THEME_WHITE);
-    
-    delay(15);
+
+  const int barX = 40, barY = 200, barW = 240, barH = 12;
+  Lcd.drawRect(barX, barY, barW, barH, THEME_WHITE);
+  Lcd.fillRect(barX + 1, barY + 1, barW - 2, barH - 2, THEME_BLACK);
+
+  for (int p = 0; p <= 100; p += 2) {
+    int fillW = (p * (barW - 4)) / 100;
+    if (fillW > 0) {
+      Lcd.fillRect(barX + 2, barY + 2, fillW, barH - 4, THEME_GREEN);
+      Lcd.drawFastHLine(barX + 2, barY + 2, fillW, THEME_WHITE);
+    }
+    delay(8);   // 51 steps × 8ms ≈ 400ms total — snappy but visible
   }
-  
-  delay(1000);
+  delay(500);   // brief pause at 100% before WiFi screen
 }
 
 /**
@@ -3702,7 +3398,7 @@ void drawWiFiProgressCircles(int currentAttempt, bool connected, int maxAttempts
   // Calculate how many circles to draw
   int circlesToDraw = min(currentAttempt, maxAttempts);
   // Clear progress squares area in right panel
-  M5.Display.fillRect(780, 310, 400, 80, THEME_BLACK);
+  Lcd.fillRect(780, 310, 400, 80, THEME_BLACK);
   // Draw circles in rows of 10
   for (int i = 0; i < circlesToDraw; i++) {
     int row = i / circlesPerRow;
@@ -3716,242 +3412,139 @@ void drawWiFiProgressCircles(int currentAttempt, bool connected, int maxAttempts
     uint16_t borderColor = THEME_CYAN;
     
     // Draw filled circle
-    M5.Display.fillCircle(x, y, circleRadius, fillColor);
+    Lcd.fillCircle(x, y, circleRadius, fillColor);
     
     // Draw border
-    M5.Display.drawCircle(x, y, circleRadius + 1, borderColor);
+    Lcd.drawCircle(x, y, circleRadius + 1, borderColor);
     
     // Add inner highlight for 3D effect
     if (connected) {
-      M5.Display.fillCircle(x - 3, y - 3, 3, THEME_WHITE);
+      Lcd.fillCircle(x - 3, y - 3, 3, THEME_WHITE);
     }
   }
   
   // Draw attempt counter text below circles
-  M5.Display.setTextColor(THEME_CYAN);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(startX, startY + 100);
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(startX, startY + 100);
   
   if (connected) {
-    M5.Display.setTextColor(THEME_GREEN);
-    M5.Display.setTextSize(3);
-    M5.Display.print("CONNECTED");
+    Lcd.setTextColor(THEME_GREEN);
+    Lcd.setTextSize(3);
+    Lcd.print("CONNECTED");
   } else {
-    M5.Display.printf("ATTEMPT %02d/%02d", currentAttempt, maxAttempts);
+    Lcd.printf("ATTEMPT %02d/%02d", currentAttempt, maxAttempts);
   }
 }
 
 void connectWithAnimation() {
-  // ========== LEFT PANEL: CONNECTION ANIMATION AREA ==========
-  // Position: (110, 140) with 2x scaling (same as boot sequence)
-  int animOffsetX = 110;
-  int animOffsetY = 140;
-  int scale = 2;
-  
-  M5.Display.fillRect(90, 180, 640, 410, THEME_BLACK);  // Clear left panel only
-  
-  drawCyberpunkFrame();  // This will skip if already loaded
-  
-  delay(100);
-  
-  // ========== LOAD MISTER LOGO ==========
-  bool logoLoaded = loadMisterLogo(785, 150);
-  if (!logoLoaded) {
-    // Fallback text logo
-    M5.Display.setTextColor(THEME_WHITE);
-    M5.Display.setTextSize(4);
-    M5.Display.setCursor(850, 180);
-    M5.Display.print("MiSTer");
-    M5.Display.setTextColor(THEME_YELLOW);
-    M5.Display.setTextSize(2);
-    M5.Display.setCursor(870, 230);
-    M5.Display.print("FPGA");
-  }
-  
-  // Draw header in left panel
-  M5.Display.setTextColor(THEME_CYAN);
-  M5.Display.setTextSize(4); // 2x original size
-  M5.Display.setCursor(animOffsetX + 60*scale, animOffsetY + 15*scale);
-  M5.Display.print("CONNECTING");
-  
-  // ========== RIGHT PANEL: INITIAL STATE ==========
-  // Draw initial empty state (no circles yet)
-  drawWiFiProgressCircles(0, false, 30);
-  
+  Lcd.fillScreen(THEME_BLACK);
+
+  // Header: text logo + "CONNECTING"
+  drawMiSTerLogo(10, 5);
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(120, 15);
+  Lcd.print("CONNECTING");
+
   Serial.println("=== STARTING WiFi CONNECTION ===");
   Serial.printf("SSID: %s\n", ssid);
   Serial.printf("MiSTer IP configured: %s\n", misterIP);
-  
+
   WiFi.begin(ssid, password);
-  
+
   int attempts = 0;
-  int maxAttempts = 30;
-  
-  while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
-    attempts++;
-    
-    // ========== LEFT PANEL: RADAR ANIMATION ==========
-    // Clear animation area (but keep header)
-    M5.Display.fillRect(animOffsetX, animOffsetY + 60*scale, 
-                        520, 120*scale, THEME_BLACK);
-    
-    // Draw radar scan animation (centered in left panel)
-    int radarCenterX = animOffsetX + 80*scale;  // Center of radar
-    int radarCenterY = animOffsetY + 120*scale; // Vertical center
-    int radarRadius = 60*scale;                 // Scaled radius
-    int angle = attempts * 12;                  // Rotating angle
-    
-    // Draw radar circles
-    for (int r = 20*scale; r <= radarRadius; r += 20*scale) {
-      M5.Display.drawCircle(radarCenterX, radarCenterY, r, THEME_GREEN);
-    }
-    
-    // Draw scanning line
-    float radAngle = angle * PI / 180.0;
-    int endX = radarCenterX + radarRadius * cos(radAngle);
-    int endY = radarCenterY + radarRadius * sin(radAngle);
-    M5.Display.drawLine(radarCenterX, radarCenterY, endX, endY, THEME_YELLOW);
-    
-    // Draw radar crosshair
-    M5.Display.drawFastHLine(radarCenterX - 10*scale, radarCenterY, 20*scale, THEME_CYAN);
-    M5.Display.drawFastVLine(radarCenterX, radarCenterY - 10*scale, 20*scale, THEME_CYAN);
-    
-    // ========== RIGHT PANEL: UPDATE PROGRESS CIRCLES ==========
-    // Clear previous circles area
-    M5.Display.fillRect(670, 320, 570, 120, THEME_BLACK);
-    
-    // Draw updated circles with current attempt count
-    drawWiFiProgressCircles(attempts, false, maxAttempts);
-    
-    Serial.printf("WiFi attempt %d/%d...\n", attempts, maxAttempts);
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+    // Radar animation centered in middle of screen
+    drawRadarScan(160, 120, 60, attempts * 12);
+
+    Lcd.setTextColor(THEME_YELLOW);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(120, 190);
+    Lcd.printf("SCAN %02d/30", attempts + 1);
+
+    Serial.printf("WiFi attempt %d/30...\n", attempts + 1);
     delay(500);
+    attempts++;
   }
-  
-  // ========== CONNECTION RESULT ==========
-  // Clear left panel animation area
-  //M5.Display.fillRect(animOffsetX, animOffsetY + 60*scale, 
-  //                    520, 140*scale, THEME_BLACK);
-  
+
+  // Clear result area
+  Lcd.fillRect(0, 180, 320, 60, THEME_BLACK);
+
   if (WiFi.status() == WL_CONNECTED) {
-    // ========== SUCCESS STATE ==========
-    
-    // Left panel: Success message
-    // M5.Display.setTextColor(THEME_GREEN);
-    // M5.Display.setTextSize(4);
-    // M5.Display.setCursor(animOffsetX + 40*scale, animOffsetY + 95*scale);
-    // M5.Display.print("CONNECTED");
-    
-    M5.Display.setTextColor(THEME_CYAN);
-    M5.Display.setTextSize(2);
-    M5.Display.setCursor(animOffsetX + 30*scale, animOffsetY + 230*scale);
-    M5.Display.printf("IP: %s", WiFi.localIP().toString().c_str());
-    
+    Lcd.setTextColor(THEME_GREEN);
+    Lcd.setTextSize(2);
+    Lcd.setCursor(90, 190);
+    Lcd.print("CONNECTED");
+
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(60, 215);
+    Lcd.printf("IP: %s", WiFi.localIP().toString().c_str());
+
     Serial.printf("WiFi connected successfully!\n");
     Serial.printf("Assigned IP: %s\n", WiFi.localIP().toString().c_str());
     Serial.printf("Gateway: %s\n", WiFi.gatewayIP().toString().c_str());
-    
-    // Right panel: Turn all circles GREEN
-    M5.Display.fillRect(670, 320, 570, 120, THEME_BLACK);
-    drawWiFiProgressCircles(attempts, true, maxAttempts);
-    
-    // Test MiSTer connectivity
+
+    drawStatusIndicator(280, 195, THEME_GREEN, true);
+
+    // Test MiSTer connectivity (visual feedback inside)
     delay(1000);
-    
-    // Clear left panel for MiSTer test
-    M5.Display.fillRect(animOffsetX, animOffsetY + 60*scale, 
-                        520, 140*scale, THEME_BLACK);
-    
-    M5.Display.setTextColor(THEME_YELLOW);
-    M5.Display.setTextSize(2);
-    M5.Display.setCursor(animOffsetX + 45*scale, animOffsetY + 95*scale);
-    M5.Display.print("Testing MiSTer...");
-    
+    Lcd.fillRect(0, 180, 320, 60, THEME_BLACK);
+    Lcd.setTextColor(THEME_YELLOW);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(90, 190);
+    Lcd.print("Testing MiSTer...");
+
     Serial.println("=== TESTING MiSTer CONNECTIVITY ===");
     testMiSTerConnectivity();
-    
   } else {
-    // ========== FAILURE STATE ==========
-    
-    // Left panel: Error message
-    M5.Display.setTextColor(THEME_RED);
-    M5.Display.setTextSize(3);
-    M5.Display.setCursor(animOffsetX + 35*scale, animOffsetY + 95*scale);
-    M5.Display.print("WIFI FAILED");
-    
+    Lcd.setTextColor(THEME_RED);
+    Lcd.setTextSize(2);
+    Lcd.setCursor(70, 190);
+    Lcd.print("WIFI FAILED");
+
     Serial.printf("Error connecting WiFi!\n");
-    
-    // Right panel: Show failure with red circles
-    M5.Display.fillRect(670, 320, 580, 120, THEME_BLACK);
-    
-    // Draw all attempted circles in RED
-    for (int i = 0; i < attempts; i++) {
-      int row = i / 10;
-      int col = i % 10;
-      int x = 670 + col * 39;
-      int y = 320 + row * 39;
-      M5.Display.fillCircle(x, y, 12, THEME_RED);
-      M5.Display.drawCircle(x, y, 13, THEME_YELLOW);
-    }
-    
-    M5.Display.setTextColor(THEME_RED);
-    M5.Display.setTextSize(2);
-    M5.Display.setCursor(670, 420);
-    M5.Display.print("CONNECTION FAILED");
+    drawStatusIndicator(280, 195, THEME_RED, false);
   }
-  
+
   delay(2000);
 }
 
 void testMiSTerConnectivity() {
   HTTPClient http;
   String url = String("http://") + misterIP + ":8081/status/core";
-  
+
   Serial.printf("Testing connectivity to: %s\n", url.c_str());
-  
+
   http.begin(url);
   http.setTimeout(5000);
-  
+
   int code = http.GET();
-  
-  // Clear left panel area for result
-  int animOffsetX = 110;
-  int animOffsetY = 140;
-  int scale = 2;
-  
-  // Calculate safe width to avoid overlapping right panel circles
-  // Left panel ends at X=640, circles start at X=670
-  // Safe width = 640 - animOffsetX - margin = 640 - 110 - 10 = 520
-  int safeWidth = 520;
-  
-  M5.Display.fillRect(animOffsetX, animOffsetY + 60*scale, 
-                      safeWidth, 140*scale, THEME_BLACK);
-  
+
+  // Clear result area (bottom 60px)
+  Lcd.fillRect(0, 180, 320, 60, THEME_BLACK);
+
   if (code == 200) {
     Serial.printf("MiSTer responds correctly!\n");
-    
-    M5.Display.setTextColor(THEME_GREEN);
-    M5.Display.setTextSize(3);
-    M5.Display.setCursor(animOffsetX + 30*scale, animOffsetY + 95*scale);
-    M5.Display.print("MiSTer: ONLINE");
-    
-    M5.Display.setCursor(animOffsetX + 30*scale, animOffsetY + 115*scale);
-    M5.Display.printf("Server: %s:8081", misterIP);
-    
+    Lcd.setTextColor(THEME_GREEN);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(80, 190);
+    Lcd.print("MiSTer: ONLINE");
+    Lcd.setCursor(80, 205);
+    Lcd.printf("Server: %s:8081", misterIP);
     connected = true;
   } else {
     Serial.printf("MiSTer not responding (code: %d)\n", code);
-    
-    M5.Display.setTextColor(THEME_RED);
-    M5.Display.setTextSize(3);
-    M5.Display.setCursor(animOffsetX + 30*scale, animOffsetY + 95*scale);
-    M5.Display.print("MiSTer: OFFLINE");
-    
-    M5.Display.setCursor(animOffsetX + 30*scale, animOffsetY + 115*scale);
-    M5.Display.printf("Check: %s:8081", misterIP);
-    
+    Lcd.setTextColor(THEME_RED);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(70, 190);
+    Lcd.print("MiSTer: OFFLINE");
+    Lcd.setCursor(80, 205);
+    Lcd.printf("Check: %s:8081", misterIP);
     connected = false;
   }
-  
+
   http.end();
   delay(2000);
 }
@@ -3975,7 +3568,7 @@ void getCurrentCore() {
   
   http.begin(url);
   http.setTimeout(8000);
-  http.addHeader("User-Agent", "M5Stack-Monitor");
+  http.addHeader("User-Agent", "MiSTer-Monitor");
   
   int code = http.GET();
   Serial.printf("HTTP code: %d\n", code);
@@ -4133,7 +3726,6 @@ void startCrcRecurrentForGame(String gameName, String coreName) {
   // Short-circuit: if the core is not in ScreenScraper's DB, do not activate
   // the recurrent. ScreenScraper requires a system ID, and asking MiSTer for
   // ROM details (which calculates CRC32 over the file) is wasted work.
-  // Mark the search as exhausted from the start.
   if (getScreenScraperSystemId(coreName).length() == 0) {
     Serial.printf("Core '%s' not mapped to ScreenScraper — recurrent NOT started\n",
                   coreName.c_str());
@@ -4529,46 +4121,22 @@ void getNetworkAndSession() {
 }
 
 void updateDisplay() {
-  // Don't clear screen or draw header for pages that use frame02.jpg
-  // Those pages handle their own background and layout
-  
-  // Pages 0-4 all use frame02.jpg, so they handle everything themselves
-  // No need for Lcd.fillScreen() or drawHeader() here
-  
-  // Content by page
-  switch(currentPage) {
-    case 0: displayMainHUD(); break;
-    case 1: displaySystemMonitor(); break;
-    case 2: displayStorageArray(); break;
+  Lcd.fillScreen(THEME_BLACK);
+
+  drawHeader(getPageTitle(), getPageSubtitle());
+
+  switch (currentPage) {
+    case 0: displayMainHUD();         break;
+    case 1: displaySystemMonitor();   break;
+    case 2: displayStorageArray();    break;
     case 3: displayNetworkTerminal(); break;
-    case 4: displayDeviceScanner(); break;
+    case 4: displayDeviceScanner();   break;
   }
-  
-  // Note: Each display function now handles:
-  // - Loading frame02.jpg background (if not already loaded)
-  // - Drawing logo and buttons (if not already drawn)
-  // - Clearing and updating only its content area
-  // - Drawing footer
+
+  drawFooter();
 }
 
 void displayMainHUD() {
-  // ========== LOAD FULL SCREEN FRAME IMAGE (only if needed) ==========
-  if (!backgroundLoaded) {
-    M5.Display.fillScreen(THEME_BLACK);
-    loadFullScreenFrame("/cores/frame02.jpg");
-    // delay(50);
-    
-    // ========== DRAW MISTER LOGO IN RIGHT PANEL ==========
-    drawMisterLogoRightPanel();
-    
-    // Draw touch buttons (only once since they don't change)
-    btnPrev.draw();
-    btnScan.draw();
-    btnNext.draw();
-    
-    backgroundLoaded = true;
-  }
-  
   // ========== CLEAR CONTENT AREA ONLY ==========
   // Clear area where original 320x240 content was drawn (Y=35 to Y=205)
   Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
@@ -4635,29 +4203,9 @@ void displayMainHUD() {
     Lcd.print("Core changes show images automatically");
   }
   
-  drawPageIndicators();
-  // Footer
-  drawFooter();
 }
 
 void displaySystemMonitor() {
-  // ========== LOAD FULL SCREEN FRAME IMAGE (only if needed) ==========
-  if (!backgroundLoaded) {
-    M5.Display.fillScreen(THEME_BLACK);
-    loadFullScreenFrame("/cores/frame02.jpg");
-    delay(50);
-    
-    // ========== DRAW MISTER LOGO IN RIGHT PANEL ==========
-    drawMisterLogoRightPanel();
-    
-    // Draw touch buttons (only once since they don't change)
-    btnPrev.draw();
-    btnScan.draw();
-    btnNext.draw();
-    
-    backgroundLoaded = true;
-  }
-  
   // ========== CLEAR CONTENT AREA ONLY ==========
   Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
   
@@ -4696,29 +4244,9 @@ void displaySystemMonitor() {
   Lcd.setCursor(10, 185);
   Lcd.printf("CONNECTION: %s", connected ? "ACTIVE" : "LOST");
   
-  drawPageIndicators();
-  // Footer
-  drawFooter();
 }
 
 void displayStorageArray() {
-  // ========== LOAD FULL SCREEN FRAME IMAGE (only if needed) ==========
-  if (!backgroundLoaded) {
-    M5.Display.fillScreen(THEME_BLACK);
-    loadFullScreenFrame("/cores/frame02.jpg");
-    delay(50);
-    
-    // ========== DRAW MISTER LOGO IN RIGHT PANEL ==========
-    drawMisterLogoRightPanel();
-    
-    // Draw touch buttons (only once since they don't change)
-    btnPrev.draw();
-    btnScan.draw();
-    btnNext.draw();
-    
-    backgroundLoaded = true;
-  }
-  
   // ========== CLEAR CONTENT AREA ONLY ==========
   Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
   
@@ -4748,40 +4276,19 @@ void displayStorageArray() {
   Lcd.setCursor(10, 180);
   Lcd.printf("USAGE: %.0f%% | LOCAL SD: %s", sdUsagePercent, sdCardAvailable ? "OK" : "ERROR");
   
-  drawPageIndicators();
-  // Footer
-  drawFooter();
 }
 
 void displayNetworkTerminal() {
-  // ========== LOAD FULL SCREEN FRAME IMAGE (only if needed) ==========
-  if (!backgroundLoaded) {
-    M5.Display.fillScreen(THEME_BLACK);
-    loadFullScreenFrame("/cores/frame02.jpg");
-    delay(50);
-    
-    // ========== DRAW MISTER LOGO IN RIGHT PANEL ==========
-    drawMisterLogoRightPanel();
-    
-    // Draw touch buttons (only once since they don't change)
-    btnPrev.draw();
-    btnScan.draw();
-    btnNext.draw();
-    
-    backgroundLoaded = true;
-  }
-  
   // ========== CLEAR CONTENT AREA ONLY ==========
   Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
   
   // ========== ORIGINAL 320x240 CONTENT (auto-scaled 2x by Lcd) ==========
-  // Main panel - based on M5Stack ↔ MiSTer connection
   drawPanel(10, 50, 300, 60, connected ? THEME_GREEN : THEME_RED);
   
   Lcd.setTextColor(THEME_BLACK);
   Lcd.setTextSize(1);
   Lcd.setCursor(20, 60);
-  Lcd.print("M5STACK <-> MISTER");
+  Lcd.print("DISPLAY <-> MISTER");
   
   Lcd.setTextSize(2);
   Lcd.setCursor(20, 75);
@@ -4827,29 +4334,9 @@ void displayNetworkTerminal() {
     Lcd.print("Check server & network settings");
   }
   
-  drawPageIndicators();
-  // Footer
-  drawFooter();
 }
 
 void displayDeviceScanner() {
-  // ========== LOAD FULL SCREEN FRAME IMAGE (only if needed) ==========
-  if (!backgroundLoaded) {
-    M5.Display.fillScreen(THEME_BLACK);
-    loadFullScreenFrame("/cores/frame02.jpg");
-    delay(50);
-    
-    // ========== DRAW MISTER LOGO IN RIGHT PANEL ==========
-    drawMisterLogoRightPanel();
-    
-    // Draw touch buttons (only once since they don't change)
-    btnPrev.draw();
-    btnScan.draw();
-    btnNext.draw();
-    
-    backgroundLoaded = true;
-  }
-  
   // ========== CLEAR CONTENT AREA ONLY ==========
   Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
   
@@ -4867,14 +4354,6 @@ void displayDeviceScanner() {
   
   drawPortArray(10, 105, usbDeviceCount, serialPortCount);
   
-  Lcd.setTextColor(THEME_CYAN);
-  Lcd.setTextSize(1);
-  Lcd.setCursor(10, 202);
-  Lcd.printf("ACTIVE DEVICES DETECTED | USB PORTS SCANNED");
-  
-  drawPageIndicators();
-  // Footer
-  drawFooter();
 }
 
 void drawHeader(String title, String subtitle) {
@@ -4902,7 +4381,7 @@ void drawHeader(String title, String subtitle) {
     }
   }
   
-  drawStatusIndicator(290, 15, connected ? THEME_GREEN : THEME_RED, connected);
+  drawStatusIndicator(307, 15, connected ? THEME_GREEN : THEME_RED, connected);
 }
 
 void drawPageIndicators() {
@@ -4916,14 +4395,14 @@ void drawPageIndicators() {
     int indicatorSize = 30;
     
     // Filled square
-    M5.Display.fillRect(indicatorX, indicatorY, indicatorSize, indicatorSize, color);
+    Lcd.fillRect(indicatorX, indicatorY, indicatorSize, indicatorSize, color);
     
     // Border for active page
     if (i == currentPage) {
-      M5.Display.drawRect(indicatorX - 2, indicatorY - 2, 
+      Lcd.drawRect(indicatorX - 2, indicatorY - 2, 
                          indicatorSize + 4, indicatorSize + 4, THEME_YELLOW);
     } else {
-      M5.Display.drawRect(indicatorX, indicatorY, 
+      Lcd.drawRect(indicatorX, indicatorY, 
                          indicatorSize, indicatorSize, THEME_CYAN);
     }
   }
@@ -5656,8 +5135,8 @@ bool downloadImageFromScreenScraper(String imageUrl, String savePath) {
   
   showDownloadProgress(50, "Downloading...");
   
-  // Download to buffer (PSRAM-aware: images can be up to 500KB)
-  uint8_t* buffer = (uint8_t*)psramMalloc(contentLength);
+  // Download to buffer 
+  uint8_t* buffer = (uint8_t*)malloc(contentLength);
   if (!buffer) {
     Serial.println("No memory for download");
     http.end();
@@ -5750,8 +5229,8 @@ bool displayCoreImageCentered(String imagePath) {
     return false;
   }
   
-  // Read image to buffer (PSRAM-aware to preserve internal heap for ESP32 stack/variables)
-  uint8_t *buffer = (uint8_t*)psramMalloc(fileSize);
+  // Read image to buffer
+  uint8_t *buffer = (uint8_t*)malloc(fileSize);
   if (!buffer) {
     Serial.println("No memory for image buffer");
     imageFile.close();
@@ -5864,7 +5343,7 @@ GameInfo extractGameInfoFromJeuInfos(String& response, String originalFilename) 
     response = response.substring(0, 8000);
   }
   
-  // EXTRACT GAME ID - FIXED: Search specifically in "jeu" section
+  // EXTRACT GAME ID - Search specifically in "jeu" section
   int jeuStart = response.indexOf("\"jeu\"");
   if (jeuStart == -1) {
     jeuStart = response.indexOf("\"jeu\" :");
@@ -6123,7 +5602,7 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
   HTTPClient http;
   http.begin(currentUrl);
   http.setTimeout(25000);
-  http.addHeader("User-Agent", "M5Stack-MiSTer-Monitor");
+  http.addHeader("User-Agent", "MiSTer-Monitor");
   http.addHeader("Accept", "image/jpeg,image/png,image/*");
   
   int httpCode = http.GET();
@@ -6604,7 +6083,7 @@ bool downloadCoreImageStreamingSafe(String baseUrl, String savePath) {
     HTTPClient http;
     http.begin(currentUrl);
     http.setTimeout(25000);
-    http.addHeader("User-Agent", "M5Stack-MiSTer-Monitor");
+    http.addHeader("User-Agent", "MiSTer-Monitor");
     http.addHeader("Accept", "image/jpeg,image/png,image/*");
     
     int httpCode = http.GET();
@@ -6740,7 +6219,7 @@ String buildCorrectMediaJeuUrl(String gameId, String systemId, String mediaType,
   String mediaUrl = "https://api.screenscraper.fr/api2/mediaJeu.php";
   mediaUrl += "?devid=" + String(SCREENSCRAPER_DEV_USER);
   mediaUrl += "&devpassword=" + String(SCREENSCRAPER_DEV_PASS);
-  mediaUrl += "&softname=M5Stack-MiSTer-Monitor";
+  mediaUrl += "&softname=MiSTer-Monitor";
   mediaUrl += "&ssid=" + String(SCREENSCRAPER_USER);
   mediaUrl += "&sspassword=" + String(SCREENSCRAPER_PASS);
   
@@ -6883,7 +6362,7 @@ GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
   String url = "https://api.screenscraper.fr/api2/jeuInfos.php";
   url += "?devid=" + String(SCREENSCRAPER_DEV_USER);
   url += "&devpassword=" + String(SCREENSCRAPER_DEV_PASS);
-  url += "&softname=M5Stack-MiSTer-Monitor";
+  url += "&softname=MiSTer-Monitor";
   url += "&output=json";
   url += "&ssid=" + String(SCREENSCRAPER_USER);
   url += "&sspassword=" + String(SCREENSCRAPER_PASS);
@@ -6900,7 +6379,7 @@ GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
   HTTPClient http;
   http.begin(url);
   http.setTimeout(30000);
-  http.addHeader("User-Agent", "M5Stack-MiSTer-Monitor");
+  http.addHeader("User-Agent", "MiSTer-Monitor");
   http.addHeader("Accept", "application/json");
 
   int httpCode = http.GET();
@@ -7163,7 +6642,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
       {
         unsigned long _waitStart = millis();
         while (millis() - _waitStart < 10000) {
-          M5.update();
+          Board.update();
           screenshotServer.handleClient();
           delay(100);
         }
@@ -7210,6 +6689,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
         } else {
           Serial.println("Second CRC search also found no results");
           // ScreenScraper returned a clean response twice with no game match.
+          // Mark search as exhausted.
           lastGameSearchExhausted = true;
           Serial.println("Marked search as exhausted");
         }

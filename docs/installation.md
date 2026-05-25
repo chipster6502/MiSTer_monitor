@@ -1,7 +1,8 @@
 # Installation
 
 This guide walks through installing the MiSTer Monitor server component on
-your MiSTer, the firmware on the M5Stack Tab5, and the ScreenScraper
+your MiSTer, the firmware on your display target (M5Stack Tab5 or CYD
+ESP32-2432S028R), and the ScreenScraper
 developer account required for artwork retrieval.
 
 ## MiSTer side
@@ -122,8 +123,45 @@ at boot from `config.ini` on the microSD card (see
 2. Install required libraries via **Tools → Manage Libraries…**:
    - M5Unified
    - JPEGDEC
-   - ArduinoJson
+   
 3. Select the M5Stack Tab5 board and upload.
+
+## CYD ESP32-2432S028R side
+
+### Installing ESP32 board support in Arduino IDE
+
+The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
+
+1. Open Arduino IDE and go to **File → Preferences**.
+2. In the **Additional boards manager URLs** field, add:
+   ```
+   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+   ```
+3. Click **OK** to close Preferences.
+4. Go to **Tools → Board → Boards Manager…**
+5. Search for **esp32** and install the package named **esp32 by Espressif Systems**.
+6. Once installed, go to **Tools → Board → ESP32 Arduino** and select
+   **ESP32 Dev Module**.
+7. Connect the CYD via USB, select the correct port under **Tools → Port**,
+   and configure the remaining Tools menu options:
+   - Partition Scheme: `Huge APP (3MB No OTA/1MB SPIFFS)`
+   - Flash Size: `4MB (32Mb)`
+   - PSRAM: `Disabled`
+   - Upload Speed: `921600`
+
+### Uploading the sketch
+
+1. Open `mister_monitor_CYD/mister_monitor_CYD.ino` in Arduino IDE.
+2. Install required libraries via **Tools → Manage Libraries…**:
+   - LovyanGFX
+   - JPEGDEC
+   - ArduinoJson
+3. Copy `config.ini` to the root of the CYD's microSD card and fill in
+   your values (see [`configuration.md`](configuration.md)).
+4. Copy the required asset images to the microSD card (see the
+   [Asset images](configuration.md#asset-images) section in
+   `configuration.md`).
+5. Select the ESP32 Dev Module board and upload.
 
 ## Getting a ScreenScraper developer account
 
