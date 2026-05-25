@@ -41,11 +41,6 @@ pages, so most rendering code is identical between targets.
   the 320x240 logical design onto your panel. Use `1.0 / 0 / 0`
   for native 320x240; Tab5 uses `2.0` with
   `OFFSET_X=90, OFFSET_Y=200` for the 1280x720 panel.
-1. **Re-position the touch buttons** (`btnPrev`, `btnScan`,
-   `btnNext`, plus any rescan/footer buttons) in physical panel
-   coordinates.
-1. **(Tab5 baseline only)** Replace the frame bitmaps on the SD
-   card with versions sized for your panel.
 1. Add a row to the Supported Hardware table below.
 
 That’s the essence. Everything else — the `Board` facade, the
