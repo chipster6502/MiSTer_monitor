@@ -1,8 +1,7 @@
-# MiSTer FPGA Monitor for M5Stack Tab5
+# MiSTer FPGA Monitor
 
-A status monitor for the MiSTer FPGA platform, running on an
-M5Stack Tab5 ESP32 device. Displays the currently loaded game artwork, system
-information, storage status, and network details in real time.
+A status monitor for the MiSTer FPGA platform. Displays the currently loaded
+game artwork, system information, storage status, and network details in real time.
 
 ## Demo videos
 
@@ -21,10 +20,10 @@ console and computer games via the MiSTer Remote web application.*
 - Automatic game and system detection from OSD, MiSTer Remote web app and Super Attract Mode (SAM)
 - Reliable game load detection using nanosecond-precision filesystem timestamps when loading cores and games through the on-screen menu (OSD)
 - Automatic Arcade subsystem detection
-- Manual RESCAN GAME button on the image screen for cases where the CRC could not be detected automatically
+- Manual SCAN game button on the image screen for cases where the CRC could not be detected automatically
 - System monitor (CPU, memory, uptime, storage, network, and connected USB devices panels)
 - Touch-based navigation
-- Screenshot capture of the Tab5 display, downloadable over the local network via HTTP
+- Screenshot capture of the display, downloadable over the local network via HTTP
 
 ## Supported Hardware
 
@@ -38,28 +37,27 @@ See `docs/PORTING.md` for porting guidelines.
 ## Requirements
 
 **Hardware**
-- [M5Stack Tab5](https://docs.m5stack.com/en/core/Tab5) (ESP32-P4, 1280×720 display)
+- Supported ESP32-based display
 - MiSTer FPGA with network connectivity
-- microSD card for the Tab5 (image storage)
+- microSD card for the display (image storage)
 
 **Software**
-- Arduino IDE (for compiling and uploading the Tab5 firmware)
+- Arduino IDE (for compiling and uploading the display firmware)
 - [ScreenScraper](https://www.screenscraper.fr) developer account (free)
-- A standard MiSTer setup with Python 3 and `inotifywait` (both preinstalled
-  on official MiSTer images)
+- A standard MiSTer setup
 
 ## Installation
 
 Installation has two parts: the server component on the MiSTer and the
-firmware on the Tab5. The recommended method on the MiSTer side is the
+firmware on the ESP32-based display. The recommended method on the MiSTer side is the
 **MiSTer Downloader database** for automatic updates.
 
 See **[`docs/installation.md`](docs/installation.md)** for the complete step-by-step
-procedure, the Arduino IDE setup for the Tab5,
+procedure, the Arduino IDE setup for the display,
 and how to request a ScreenScraper developer account.
 
 After installation, configure WiFi, MiSTer IP and ScreenScraper credentials
-via `config.ini` on the Tab5 microSD card. See **[`docs/configuration.md`](docs/configuration.md)**
+via `config.ini` on the display microSD card. See **[`docs/configuration.md`](docs/configuration.md)**
 for the full reference of available settings, artwork download order, and
 asset placement.
 
@@ -69,7 +67,9 @@ A printable stand for the M5Stack Tab5 is included in the
 [`3d-printing/`](3d-printing/) folder. GitHub renders STL files in the
 browser, so you can preview the model before downloading.
 
-The STL file is ["M5Stack Tab5 Simple Stand"](https://makerworld.com/en/models/1403228-m5stack-tab5-simple-stand)
+You can find the model files for the (truly) 2,8" Cheap Yellow Display (horizontal stand) [here](https://www.printables.com/model/708127-cheap-yellow-display-cyd-horizontal-stand-m36-self/files)
+
+The Tab5 STL file is ["M5Stack Tab5 Simple Stand"](https://makerworld.com/en/models/1403228-m5stack-tab5-simple-stand)
 by [hkawakami](https://makerworld.com/es/@hkawakami), licensed under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 
@@ -84,30 +84,41 @@ The system has two components that work together:
   from OSD navigation by comparing `FILESELECT` and `CURRENTPATH`
   filesystem timestamps at nanosecond precision — no external helper
   scripts are needed.
-- **Tab5 sketch** — Polls the server every few seconds, downloads
+- **display sketch** — Polls the server every few seconds, downloads
   artwork from ScreenScraper, and renders the HUD interface. Also runs
   its own HTTP server on port 8080 for screenshot capture, accessible
-  from any device on the local network at `http://<Tab5-IP>:8080`.
+  from any device on the local network at `http://<Display-IP>:8080`.
 
-## Screenshots
+## M5STack Tab5 Screenshots (1280x720)
 
-![Screensaver](images/screenshot01_menu.png)
-![System Monitor - CPU and Memory](images/screenshot02_cpu_memory_status.png)
-![System Monitor - Storage](images/screenshot02_storage.png)
-![System Monitor - USB devices](images/screenshot03_usb_devices.png)
-![System Monitor - Arcade system artwork](images/screenshot04_arcade.png)
-![System Monitor - Arcade subsystem artwork](images/screenshot05_arcade_subsystem.png)
-![System Monitor - Arcade game artwork](images/screenshot06_arcade_game.png)
-![System Monitor - Console core artwork](images/screenshot07_console.png)
-![System Monitor - Console game artwork](images/screenshot08_console_game.png)
-![System Monitor - Computer core artwork](images/screenshot09_computer.png)
-![System Monitor - Computer game artwork](images/screenshot10_computer_game.png)
+![Screensaver](images/Tab5/screenshot01_menu.png)
+![System Monitor - CPU and Memory](images/Tab5/sscreenshot02_cpu_memory_status.png)
+![System Monitor - Storage](images/Tab5/sscreenshot02_storage.png)
+![System Monitor - USB devices](images/Tab5/sscreenshot03_usb_devices.png)
+![System Monitor - Arcade system artwork](images/Tab5/sscreenshot04_arcade.png)
+![System Monitor - Arcade subsystem artwork](images/Tab5/sscreenshot05_arcade_subsystem.png)
+![System Monitor - Arcade game artwork](images/Tab5/sscreenshot06_arcade_game.png)
+![System Monitor - Console core artwork](images/Tab5/sscreenshot07_console.png)
+![System Monitor - Console game artwork](images/Tab5/sscreenshot08_console_game.png)
+![System Monitor - Computer core artwork](images/Tab5/sscreenshot09_computer.png)
+![System Monitor - Computer game artwork](images/Tab5/sscreenshot10_computer_game.png)
+
+## 2,8" Cheap Yellow Display (CYD) Screenshots (320x240)
+
+![Screensaver](images/CYD/01_menu.png)
+![System Monitor - CPU and Memory](images/CYD/08_main_HUD.png)
+![System Monitor - Storage](images/CYD/10_storage.png)
+![System Monitor - Arcade subsystem artwork](images/CYD/03.2_arcade_game_subsystem.png)
+![System Monitor - Arcade game artwork](images/CYD/02_arcade_game_fanart.png)
+![System Monitor - Console game artwork](images/CYD/04_console_game_3dboxart.png)
+![System Monitor - Computer game artwork](images/CYD/06_computer_game_3dboxart.png)
 
 ## To Do
 
 ### Hardware support
 
-- **Cheap Yellow Display (CYD)** — Port to the widely available ESP32-2432S028R family.
+- ~**Cheap Yellow Display (CYD)** — Port to the widely available ESP32-2432S028R family.~
+- **5" CYD variant** - Port to the ESP32-S3-8048S050C-I family (800x480 touchscreen).
 - **M5Stack Core Basic support** — Port to the original Core Basic (ESP32, 320×240, physical buttons).
 - **M5Stack Core S3 support** — Port to the Core S3 (ESP32-S3, 320×240 touchscreen).
 
@@ -115,6 +126,7 @@ The system has two components that work together:
 
 - **RetroAchievements integration** — Show unlocked achievements and progress, building on [odelot/Main_MiSTer](https://github.com/odelot/Main_MiSTer).
 - **Enriched game metadata screen** — "Now Playing" view with synopsis, year, publisher, developer, genre.
+- **Game Manuals access** — Show manuals for the system or running game from the ⁠Game Manuals Databases by *Moondandy*.
 - **Regional cover comparison** — Show EU/US/JP versions of the same game's artwork.
 - **Multilanguage descriptions** — Info in the user's preferred language via ScreenScraper.
 
@@ -138,6 +150,7 @@ The system has two components that work together:
 - **Idle screensaver mode** — Cycle random covers with Ken Burns effect when MiSTer is at menu.
 - **MiSTer screenshot reception** — Display native MiSTer screenshots as per-game galleries.
 - **External launcher integration** — Show artwork on launches triggered by Zapparoo NFC tags or other web-based launchers.
+- **Zapparoo launcher integration** — Show artwork on launches triggered by Zapparoo Launcher.
 - **QR codes for expanded information** — On-screen QR linking to MobyGames database.
 
 ### Other
