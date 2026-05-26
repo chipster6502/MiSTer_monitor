@@ -107,7 +107,7 @@ Copy the contents of `assets/Tab5/` from the repository:
   placed inside the `/cores/` folder on the SD card.
 - `Arcade.jpg` and `Arcade_75.jpg` must be placed inside `/cores/A/`.
 
-`frame01.jpg` and `frame02.jpg` are the full-screen decorative cyberpunk
+`frame01.jpg` and `frame02.jpg` are the full-screen decorative
 frame bitmaps used as background on the Tab5's 1280x720 panel. They are
 **not used** by the CYD port.
 
