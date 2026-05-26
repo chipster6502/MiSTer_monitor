@@ -155,7 +155,6 @@ The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
 2. Install required libraries via **Tools → Manage Libraries…**:
    - LovyanGFX
    - JPEGDEC
-   - ArduinoJson
 3. Copy `config.ini` to the root of the CYD's microSD card and fill in
    your values (see [`configuration.md`](configuration.md)).
 4. Copy the required asset images to the microSD card (see the
