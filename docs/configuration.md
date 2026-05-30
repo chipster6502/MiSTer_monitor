@@ -1,15 +1,24 @@
 # Configuration
 
+## SD Card content
+
+The repository includes a ready-to-use microSD card layout under
+`SD_card_content/`. Choose the subfolder that matches your hardware,
+copy its contents to the **root** of your microSD card, and edit
+`config.ini` with your credentials before first boot.
+
+All other core and game images are downloaded automatically from
+ScreenScraper the first time that core or game is detected.
+Alphabetical subfolders (`/cores/B/`, `/cores/C/`, …) are created
+on demand by the firmware — you do not need to create them manually.
+
+## config.ini
+
 All user configuration lives in a single file placed in the **root** of the
 microSD card: `/config.ini`. The sketch reads it at boot before
 connecting to WiFi, so no credentials need to be hardcoded in the source.
 The same `config.ini` format is used by all hardware targets (Tab5, CYD,
 and future ports).
-
-Copy `config.ini` from the repository root to the SD card and fill in your
-values.
-
-## config.ini
 
 ```ini
 [wifi]
@@ -93,14 +102,3 @@ arcade_media_order=fanart,marquee,wheel-carbon,wheel-steel,wheel,box3d,box2d,scr
 game_media_order=box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot
 ```
 
-## SD Card content
-
-The repository includes a ready-to-use microSD card layout under
-`SD_card_content/`. Choose the subfolder that matches your hardware,
-copy its contents to the **root** of your microSD card, and edit
-`config.ini` with your credentials before first boot.
-
-All other core and game images are downloaded automatically from
-ScreenScraper the first time that core or game is detected.
-Alphabetical subfolders (`/cores/B/`, `/cores/C/`, …) are created
-on demand by the firmware — you do not need to create them manually.
