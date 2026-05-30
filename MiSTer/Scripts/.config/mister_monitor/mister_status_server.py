@@ -16,6 +16,7 @@ import hashlib
 import zlib
 import zipfile
 import io
+import socket
 from urllib.parse import urlparse
 
 def _load_names_txt():
@@ -552,6 +553,38 @@ def _watcher_thread():
         print("🔄 Watcher thread restarting...")
         time.sleep(1)
 
+# --- MiSTer Monitor UDP discovery responder -------------------------------
+DISCOVERY_PORT    = 51234
+DISCOVERY_REQUEST = b"MMON_DISCOVER_V1"
+DISCOVERY_REPLY   = b"MMON_SERVER_V1:8081"   # advertise the HTTP port too
+
+def _start_discovery_responder():
+    """
+    Lets the display find this server with no hardcoded IP.
+    The display broadcasts DISCOVERY_REQUEST; we reply (unicast) with
+    DISCOVERY_REPLY directly to the sender, which reads our address
+    from the reply's source IP.
+    """
+    def _run():
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(('', DISCOVERY_PORT))
+        except OSError as e:
+            print(f"Discovery responder: cannot bind UDP {DISCOVERY_PORT}: {e}")
+            return
+        print(f"Discovery responder listening on UDP {DISCOVERY_PORT}")
+        while True:
+            try:
+                data, addr = sock.recvfrom(64)
+                if data.strip() == DISCOVERY_REQUEST:
+                    sock.sendto(DISCOVERY_REPLY, addr)
+                    print(f"Discovery: replied to {addr[0]}")
+            except Exception as e:
+                print(f"Discovery responder error: {e}")
+                time.sleep(1)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 def _start_watcher():
     """Starts the background watcher thread as a daemon."""
@@ -2058,6 +2091,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 if __name__ == '__main__':
     try:
         _start_watcher()
+        _start_discovery_responder()
         server = ThreadingHTTPServer(('', 8081), MiSTerStatusHandler)
         print("MiSTer Monitor Status Server v2 - port 8081")
         print("Endpoints:")

@@ -26,7 +26,9 @@ ssid=YOUR_WIFI_SSID
 password=YOUR_WIFI_PASSWORD
 
 [mister]
-ip=192.168.1.100          ; must be a static IP — see note below
+; Después
+ip=                        ; leave blank — the display auto-discovers the
+                           ; MiSTer on the local network at boot (recommended)
 
 [screenscraper]
 ss_user=YOUR_SS_USERNAME
@@ -39,21 +41,23 @@ Any key that is absent keeps the built-in default. The full list of available
 keys is documented inside `config.ini` itself with comments explaining each
 option.
 
-## Static MiSTer IP address
+## MiSTer IP address
 
-The display connects to the MiSTer by IP, so a static address is required.
-Edit `/etc/dhcpcd.conf` on the MiSTer and add:
+The display locates the MiSTer automatically at boot via UDP broadcast —
+no static IP is needed on the MiSTer and no value is required in `config.ini`.
 
+If your router blocks UDP broadcast (uncommon in home networks), set a
+fallback IP manually:
+
+```ini
+[mister]
+ip=192.168.1.100
 ```
-interface eth0
-static ip_address=192.168.0.XX/24
-static routers=192.168.0.X
-static domain_name_servers=192.168.0.X 8.8.8.8
-```
 
-Use `interface wlan0` instead of `eth0` for a wireless connection. The `/24`
-netmask covers the most common home network setup; adjust if your router uses
-a different subnet.
+In that case, assign a static address to the MiSTer by editing
+`/etc/dhcpcd.conf` on it, or by reserving a DHCP lease for its MAC address
+in your router admin panel (simpler, and requires no changes on the MiSTer
+itself).
 
 ## Artwork download order
 

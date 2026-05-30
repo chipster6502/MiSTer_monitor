@@ -18,6 +18,7 @@
 #include <WebServer.h>
 #include "mister_types.h"
 #include "AppConfig.h"
+#include <WiFiUdp.h>
 
 // ===== ANTI-CRASH: Reset diagnostics, memory safety =====
 #include "esp_system.h"       // esp_reset_reason()
@@ -167,6 +168,45 @@ String lastSearchedGame = "";      // Cache to avoid repeated searches
 
 // JPEG decoder object
 JPEGDEC jpeg;
+
+// --- MiSTer Monitor UDP discovery ---
+static const uint16_t MMON_DISCOVERY_PORT = 51234;
+static const char*    MMON_DISCOVER_REQ   = "MMON_DISCOVER_V1";
+static const char*    MMON_REPLY_PREFIX   = "MMON_SERVER_V1";
+
+// Locate the server by UDP broadcast. On success sets the global misterIP
+// (the same one used to build the http://misterIP:8081 URLs) and returns true.
+bool discoverMister(uint8_t attempts = 5, uint16_t replyWaitMs = 600) {
+  WiFiUDP udp;
+  udp.begin(0);                          // ephemeral local port
+  IPAddress broadcast(255, 255, 255, 255);
+
+  for (uint8_t i = 0; i < attempts; i++) {
+    udp.beginPacket(broadcast, MMON_DISCOVERY_PORT);
+    udp.write((const uint8_t*)MMON_DISCOVER_REQ, strlen(MMON_DISCOVER_REQ));
+    udp.endPacket();
+    Serial.printf("Discovery: broadcast %d/%d\n", i + 1, attempts);
+
+    uint32_t deadline = millis() + replyWaitMs;
+    while (millis() < deadline) {
+      if (udp.parsePacket() > 0) {
+        char buf[64] = {0};
+        int len = udp.read(buf, sizeof(buf) - 1);
+        if (len > 0 && strncmp(buf, MMON_REPLY_PREFIX, strlen(MMON_REPLY_PREFIX)) == 0) {
+          appConfig.misterIP = udp.remoteIP().toString();  // persistent String backing store
+          misterIP = appConfig.misterIP.c_str();           // repoint const char* (same idiom as setup)
+          Serial.printf("Discovery: server at %s\n", misterIP);
+          udp.stop();
+          return true;
+        }
+      }
+      delay(10);
+    }
+  }
+  udp.stop();
+  Serial.println("Discovery: no server found");
+  return false;
+}
 
 // ========== SCREENSHOT SERVER ==========
 WebServer screenshotServer(8080);
@@ -3495,6 +3535,11 @@ void connectWithAnimation() {
     Lcd.setTextSize(1);
     Lcd.setCursor(90, 190);
     Lcd.print("Testing MiSTer...");
+
+    // Auto-discover the MiSTer server IP.
+    // On success overwrites misterIP; on failure leaves the config.ini value unchanged.
+    Serial.println("=== DISCOVERING MiSTer SERVER ===");
+    discoverMister();
 
     Serial.println("=== TESTING MiSTer CONNECTIVITY ===");
     testMiSTerConnectivity();
