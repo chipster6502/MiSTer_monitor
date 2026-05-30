@@ -93,32 +93,14 @@ arcade_media_order=fanart,marquee,wheel-carbon,wheel-steel,wheel,box3d,box2d,scr
 game_media_order=box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot
 ```
 
-## Asset images
+## SD Card content
 
-The repository includes a set of needed images inside the `assets/` folder,
-organised by target. Copy the files for your target to the microSD card as
-follows.
+The repository includes a ready-to-use microSD card layout under
+`SD_card_content/`. Choose the subfolder that matches your hardware,
+copy its contents to the **root** of your microSD card, and edit
+`config.ini` with your credentials before first boot.
 
-### M5Stack Tab5
-
-Copy the contents of `assets/Tab5/` from the repository:
-
-- `frame01.jpg`, `frame02.jpg`, `logomister.jpg` and `menu.jpg` must be
-  placed inside the `/cores/` folder on the SD card.
-- `Arcade.jpg` and `Arcade_75.jpg` must be placed inside `/cores/A/`.
-
-`frame01.jpg` and `frame02.jpg` are the full-screen decorative
-frame bitmaps used as background on the Tab5's 1280x720 panel. They are
-**not used** by the CYD port.
-
-### CYD ESP32-2432S028R
-
-Copy the contents of `assets/CYD/` from the repository:
-
-- `menu.jpg` must be placed inside the `/cores/` folder on the SD card.
-- `Arcade.jpg` and `Arcade_75.jpg` must be placed inside `/cores/A/`.
-
-### All targets
-
-Core and game images that are missing will be downloaded automatically from
-ScreenScraper the first time that core/game is detected.
+All other core and game images are downloaded automatically from
+ScreenScraper the first time that core or game is detected.
+Alphabetical subfolders (`/cores/B/`, `/cores/C/`, …) are created
+on demand by the firmware — you do not need to create them manually.
