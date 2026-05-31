@@ -2150,7 +2150,8 @@ void setup() {
   ssid     = appConfig.ssid.c_str();
   // Prefer the user's own dev account from config.ini if provided;
   // otherwise use the built-in credentials injected at release-build time.
-  if (appConfig.ssDevUser.length() > 0) {
+  password = appConfig.wifiPass.c_str();
+    if (appConfig.ssDevUser.length() > 0) {
     _ss_dev_user_str = appConfig.ssDevUser;
     _ss_dev_pass_str = appConfig.ssDevPass;
   } else {
@@ -2158,8 +2159,6 @@ void setup() {
     _ss_dev_pass_str = SS_DEV_PASS_EMBEDDED;
   }
 
-  _ss_dev_user_str        = appConfig.ssDevUser;
-  _ss_dev_pass_str        = appConfig.ssDevPass;
   _ss_user_str            = appConfig.ssUser;
   _ss_pass_str            = appConfig.ssPass;
   _boxart_region_str      = appConfig.boxartRegion;
@@ -3826,6 +3825,15 @@ void connectWithAnimation() {
   // Draw initial empty state (no circles yet)
   drawWiFiProgressCircles(0, false, 30);
   
+  // Temporary WiFi scan diagnostic — remove after debugging
+  Serial.println("=== SCANNING NETWORKS ===");
+  int n = WiFi.scanNetworks();
+  for (int i = 0; i < n; i++) {
+    Serial.printf("  [%d] SSID: %s  RSSI: %d  Auth: %d\n",
+      i, WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.encryptionType(i));
+  }
+  Serial.println("=== END SCAN ===");
+
   Serial.println("=== STARTING WiFi CONNECTION ===");
   Serial.printf("SSID: %s\n", ssid);
   Serial.printf("MiSTer IP configured: %s\n", misterIP);
