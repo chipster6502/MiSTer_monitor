@@ -67,12 +67,15 @@ jobs:
 
       - name: Build flasher site
         run: |
-          mkdir -p site
-          cp docs/flasher/index.html site/
-          cp dist/*.bin site/
+          mkdir -p site/flasher
+          cp docs/flasher/index.html site/flasher/
+          cp dist/*.bin site/flasher/
           VER="${GITHUB_REF_NAME}"
-          printf '{ "name": "MiSTer Monitor (CYD)", "version": "%s", "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "mister_monitor_cyd.bin", "offset": 0 } ] } ] }\n' "$VER" > site/manifest-cyd.json
-          printf '{ "name": "MiSTer Monitor (Tab5)", "version": "%s", "builds": [ { "chipFamily": "ESP32-P4", "parts": [ { "path": "mister_monitor_tab5.bin", "offset": 0 } ] } ] }\n' "$VER" > site/manifest-tab5.json
+          printf '...' > site/flasher/manifest-cyd.json
+          printf '...' > site/flasher/manifest-tab5.json
+          VER="${GITHUB_REF_NAME}"
+          printf '{ "name": "MiSTer Monitor (CYD)", "version": "%s", "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "mister_monitor_cyd.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-cyd.json
+          printf '{ "name": "MiSTer Monitor (Tab5)", "version": "%s", "builds": [ { "chipFamily": "ESP32-P4", "parts": [ { "path": "mister_monitor_tab5.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-tab5.json
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
