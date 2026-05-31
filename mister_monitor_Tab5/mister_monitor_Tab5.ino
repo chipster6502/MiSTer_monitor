@@ -8,6 +8,7 @@
 #include "mister_types.h"
 #include "AppConfig.h"
 #include <WiFiUdp.h>
+#include "ss_credentials.h"
 
 // ===== ANTI-CRASH: Reset diagnostics, memory safety =====
 #include "esp_system.h"       // esp_reset_reason()
@@ -2147,8 +2148,15 @@ void setup() {
   loadConfig(appConfig);
 
   ssid     = appConfig.ssid.c_str();
-  password = appConfig.wifiPass.c_str();
-  misterIP = appConfig.misterIP.c_str();
+  // Prefer the user's own dev account from config.ini if provided;
+  // otherwise use the built-in credentials injected at release-build time.
+  if (appConfig.ssDevUser.length() > 0) {
+    _ss_dev_user_str = appConfig.ssDevUser;
+    _ss_dev_pass_str = appConfig.ssDevPass;
+  } else {
+    _ss_dev_user_str = SS_DEV_ID_EMBEDDED;
+    _ss_dev_pass_str = SS_DEV_PASS_EMBEDDED;
+  }
 
   _ss_dev_user_str        = appConfig.ssDevUser;
   _ss_dev_pass_str        = appConfig.ssDevPass;

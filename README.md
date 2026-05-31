@@ -48,18 +48,19 @@ See `docs/PORTING.md` for porting guidelines.
 
 ## Installation
 
-Installation has two parts: the server component on the MiSTer and the
-firmware on the ESP32-based display. The recommended method on the MiSTer side is the
-**MiSTer Downloader database** for automatic updates.
+Installation has two parts: the **server** on the MiSTer and the **firmware**
+on the display.
+
+- **MiSTer side** — install the server via the **MiSTer Downloader database**
+  (recommended, auto-updating).
+- **Display side** — the easiest path is the **web flasher**: open
+  [the flasher page](https://chipster6502.github.io/MiSTer_monitor/flasher/)
+  in Chrome or Edge on desktop, connect the display via USB, and flash the
+  prebuilt firmware in one click — no Arduino IDE needed. Building from source
+  is also supported.
 
 See **[`docs/installation.md`](docs/installation.md)** for the complete step-by-step
-procedure, the Arduino IDE setup for the display,
-and how to request a ScreenScraper developer account.
-
-After installation, configure WiFi, MiSTer IP and ScreenScraper credentials
-via `config.ini` on the display microSD card. See **[`docs/configuration.md`](docs/configuration.md)**
-for the full reference of available settings, artwork download order, and
-asset placement.
+procedure, the web flasher, the Arduino IDE setup, and ScreenScraper account setup.
 
 ## 3D-printable stand
 

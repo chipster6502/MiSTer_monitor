@@ -162,31 +162,42 @@ The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
    `configuration.md`).
 5. Select the ESP32 Dev Module board and upload.
 
-## Getting a ScreenScraper developer account
+## Creating a ScreenScraper account
 
-The ScreenScraper API requires a **developer account** in addition to a
-regular user account. The process has two steps:
+The display downloads artwork from the ScreenScraper API. The app provides
+its own developer credentials, so you only need a **free member account**
 
-### 1. Create a regular user account
+1. Register for free at [https://www.screenscraper.fr](https://www.screenscraper.fr).
+   Account creation is instant.
+2. Take note of your username and password.
+3. Enter them in `config.ini` under the `[screenscraper]` section as
+   `ss_user` and `ss_pass`. See [`configuration.md`](configuration.md) for
+   the configuration reference.
 
-Register for free at [https://www.screenscraper.fr](https://www.screenscraper.fr).
-Take note of your username and password — you will enter them in `config.ini`.
+A member account is recommended because ScreenScraper ties the per-user
+request quota to it: each user's downloads count against their own account,
+not a shared one. Scraping without any account is heavily throttled.
 
-### 2. Request a developer account
+### Advanced: using your own developer account
 
-Developer accounts are granted manually by the ScreenScraper team via their
-forum. Once logged in:
+If you already have your own ScreenScraper developer account and prefer to
+use it (for its own quota and identity), set `ss_dev_user` and `ss_dev_pass`
+in `config.ini`. When present, they override the app's built-in credentials.
 
-1. Go to [https://www.screenscraper.fr/forum.php](https://www.screenscraper.fr/forum.php).
-2. Find the thread titled **"ScreenScraper WebAPI"**.
-3. Post a reply in that thread requesting a developer account. In your
-   message, briefly explain what you intend to build with the API — for
-   example: *"I want to use an open-source game artwork monitor for the
-   MiSTer FPGA platform running on an ESP32-based display."*
-4. The team will review your request and enable the developer role on your
-   account, typically within a few days.
+## Creating a ScreenScraper account
 
-Once your developer account is active, you will receive a response in the
-forum with confirmation and instructions for its use. Enter your credentials
-in `config.ini` under the `[screenscraper]` section. See
-[`configuration.md`](configuration.md) for the configuration reference.
+The display downloads artwork from the ScreenScraper API. The app provides
+its own developer credentials, so you only need a **free member account**
+
+1. Register for free at [https://www.screenscraper.fr](https://www.screenscraper.fr).
+   Account creation is instant.
+2. Take note of your username and password.
+3. Enter them in `config.ini` under the `[screenscraper]` section as
+   `ss_user` and `ss_pass`. See [`configuration.md`](configuration.md) for
+   the configuration reference.
+
+### Advanced: using your own developer account
+
+If you already have your own ScreenScraper developer account and prefer to
+use it (for its own quota and identity), set `ss_dev_user` and `ss_dev_pass`
+in `config.ini`. When present, they override the app's built-in credentials.
