@@ -5,8 +5,7 @@ MiSTer, the **firmware** on your display target (M5Stack Tab5 or CYD
 ESP32-2432S028R), and creating the free ScreenScraper account used for
 artwork retrieval.
 
-The display firmware can be installed two ways: the **web flasher** (easiest,
-no toolchain) or **compiling from source** with the Arduino IDE.
+The display firmware can be installed two ways: the **web flasher** (easiest) or **compiling from source** with the Arduino IDE.
 
 ## MiSTer side
 
@@ -110,12 +109,6 @@ The fastest way to install the firmware. No Arduino IDE, no compiling.
    built in.
 5. Prepare the display's microSD card with `config.ini` and the asset images
    (see [`configuration.md`](configuration.md)), then insert it and power on.
-
-> **M5Stack Tab5:** if the web flasher does not detect the Tab5 (its ESP32-P4
-> uses a different USB path), use **M5Burner** or `esptool` with the
-> `mister_monitor_tab5.bin` file attached to the
-> [latest release](https://github.com/chipster6502/MiSTer_monitor/releases/latest)
-> instead.
 
 ---
 
