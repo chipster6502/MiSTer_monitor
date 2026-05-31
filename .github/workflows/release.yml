@@ -40,6 +40,13 @@ jobs:
               "$SS_DEV_ID" "$SS_DEV_PASS" > "$d/ss_credentials.h"
           done
 
+      - name: Verify injection (debug)
+        run: |
+          echo "=== Tab5 ss_credentials.h ==="
+          sed 's/\(SS_DEV_ID_EMBEDDED   "\)[^"]*\(".*\)/\1[REDACTED-LEN-VISIBLE]\2/' mister_monitor_Tab5/ss_credentials.h
+          echo "ID length: $(grep -oP 'SS_DEV_ID_EMBEDDED   "\K[^"]*' mister_monitor_Tab5/ss_credentials.h | wc -c)"
+          echo "PASS length: $(grep -oP 'SS_DEV_PASS_EMBEDDED "\K[^"]*' mister_monitor_Tab5/ss_credentials.h | wc -c)"
+
       - name: Compile Tab5
         run: |
           arduino-cli compile \
@@ -71,15 +78,15 @@ jobs:
             The display now finds the MiSTer automatically at boot via UDP broadcast. No need to configure a static IP on the MiSTer or set one in `config.ini`. A manually configured IP is still supported as a fallback for networks that block UDP broadcast.
 
             ### No ScreenScraper developer account required
-            A free [ScreenScraper](https://www.screenscraper.fr) member account is all you need — no developer registration or manual approval. The app provides its own developer credentials. Users with their own developer account can still override via `config.ini`.
+            A free [ScreenScraper](https://www.screenscraper.fr) member account is all you need - no developer registration or manual approval. The app provides its own developer credentials. Users with their own developer account can still override via `config.ini`.
 
             ### Web flasher
-            Firmware can now be flashed directly from the browser — no Arduino IDE needed:
+            Firmware can now be flashed directly from the browser - no Arduino IDE needed:
             **[Open web flasher](https://chipster6502.github.io/MiSTer_monitor/flasher/)**
             Requires Chrome or Edge on desktop. M5Stack Tab5 users: if the web flasher does not detect your device, use the `.bin` file below with [M5Burner](https://docs.m5stack.com/en/download) or `esptool`.
 
             ### SD card content included
-            The repository now includes ready-to-use SD card layouts under `SD_card_content/Tab5/` and `SD_card_content/CYD/`. Copy the contents of your target folder to the root of the display's microSD card and edit `config.ini` with your credentials.
+            The repository now includes ready-to-use SD card layouts under `SD_card_content/`.
 
             ---
 
@@ -89,17 +96,13 @@ jobs:
 
             **Display side** — flash the firmware for your board using the [web flasher](https://chipster6502.github.io/MiSTer_monitor/flasher/), or download the `.bin` below and flash with M5Burner / `esptool`.
 
-            After flashing, copy `config.ini` from `SD_card_content/<your board>/` to the root of the microSD card and fill in your WiFi and ScreenScraper credentials. See [`docs/configuration.md`](https://github.com/chipster6502/MiSTer_monitor/blob/main/docs/configuration.md) for the full reference.
-
+After flashing, Copy the contents of your target folder to the root of the display's microSD card and edit `config.ini` with your WiFi and ScreenScraper credentials. See [`docs/configuration.md`](https://github.com/chipster6502/MiSTer_monitor/blob/main/docs/configuration.md) for the full reference.
 
       - name: Build flasher site
         run: |
           mkdir -p site/flasher
           cp docs/flasher/index.html site/flasher/
           cp dist/*.bin site/flasher/
-          VER="${GITHUB_REF_NAME}"
-          printf '...' > site/flasher/manifest-cyd.json
-          printf '...' > site/flasher/manifest-tab5.json
           VER="${GITHUB_REF_NAME}"
           printf '{ "name": "MiSTer Monitor (CYD)", "version": "%s", "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "mister_monitor_cyd.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-cyd.json
           printf '{ "name": "MiSTer Monitor (Tab5)", "version": "%s", "builds": [ { "chipFamily": "ESP32-P4", "parts": [ { "path": "mister_monitor_tab5.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-tab5.json
