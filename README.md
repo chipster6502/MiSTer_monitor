@@ -44,7 +44,6 @@ See `docs/PORTING.md` for porting guidelines.
 **Software**
 - [ScreenScraper](https://www.screenscraper.fr) member account (free, instant signup)
 - A standard MiSTer setup
-- Arduino IDE — only if building the firmware from source (not needed with the web flasher)
 
 ## Installation
 
@@ -60,7 +59,7 @@ on the display.
   is also supported.
 
 See **[`docs/installation.md`](docs/installation.md)** for the complete step-by-step
-procedure, the web flasher, the Arduino IDE setup, and ScreenScraper account setup.
+procedure, the web flasher and ScreenScraper account setup.
 
 ## 3D-printable stand
 
