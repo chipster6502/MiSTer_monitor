@@ -1,9 +1,12 @@
 # Installation
 
-This guide walks through installing the MiSTer Monitor server component on
-your MiSTer, the firmware on your display target (M5Stack Tab5 or CYD
-ESP32-2432S028R), and the ScreenScraper
-developer account required for artwork retrieval.
+This guide walks through installing the MiSTer Monitor **server** on your
+MiSTer, the **firmware** on your display target (M5Stack Tab5 or CYD
+ESP32-2432S028R), and creating the free ScreenScraper account used for
+artwork retrieval.
+
+The display firmware can be installed two ways: the **web flasher** (easiest,
+no toolchain) or **compiling from source** with the Arduino IDE.
 
 ## MiSTer side
 
@@ -91,6 +94,34 @@ log_file_entry=1
 This is required for the Python server to detect which core and game are
 currently loaded.
 
+## Display firmware — quick install (web flasher)
+
+The fastest way to install the firmware. No Arduino IDE, no compiling.
+
+1. Use **Google Chrome or Microsoft Edge on a desktop computer** (the flasher
+   relies on Web Serial, which mobile browsers and Firefox/Safari do not
+   support).
+2. Connect the display to the computer with a USB cable.
+3. Open the flasher page:
+   [https://chipster6502.github.io/MiSTer_monitor/flasher/](https://chipster6502.github.io/MiSTer_monitor/flasher/)
+4. Click the **Connect** button for your board (CYD or Tab5), select the
+   serial port in the browser dialog, and let it flash. It installs the
+   latest released firmware, with the ScreenScraper credentials already
+   built in.
+5. Prepare the display's microSD card with `config.ini` and the asset images
+   (see [`configuration.md`](configuration.md)), then insert it and power on.
+
+> **M5Stack Tab5:** if the web flasher does not detect the Tab5 (its ESP32-P4
+> uses a different USB path), use **M5Burner** or `esptool` with the
+> `mister_monitor_tab5.bin` file attached to the
+> [latest release](https://github.com/chipster6502/MiSTer_monitor/releases/latest)
+> instead.
+
+---
+
+The sections below describe building and uploading the firmware from source
+with the Arduino IDE — only needed if you are **not** using the web flasher.
+
 ## Tab5 side
 
 ### Installing M5Stack board support in Arduino IDE
@@ -161,28 +192,6 @@ The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
    [Asset images](configuration.md#asset-images) section in
    `configuration.md`).
 5. Select the ESP32 Dev Module board and upload.
-
-## Creating a ScreenScraper account
-
-The display downloads artwork from the ScreenScraper API. The app provides
-its own developer credentials, so you only need a **free member account**
-
-1. Register for free at [https://www.screenscraper.fr](https://www.screenscraper.fr).
-   Account creation is instant.
-2. Take note of your username and password.
-3. Enter them in `config.ini` under the `[screenscraper]` section as
-   `ss_user` and `ss_pass`. See [`configuration.md`](configuration.md) for
-   the configuration reference.
-
-A member account is recommended because ScreenScraper ties the per-user
-request quota to it: each user's downloads count against their own account,
-not a shared one. Scraping without any account is heavily throttled.
-
-### Advanced: using your own developer account
-
-If you already have your own ScreenScraper developer account and prefer to
-use it (for its own quota and identity), set `ss_dev_user` and `ss_dev_pass`
-in `config.ini`. When present, they override the app's built-in credentials.
 
 ## Creating a ScreenScraper account
 

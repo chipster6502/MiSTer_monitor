@@ -28,7 +28,7 @@ jobs:
 
       - name: Install libraries
         run: |
-          arduino-cli lib install "M5Unified" "M5GFX" "JPEGDEC" "ArduinoJson" "LovyanGFX"
+          arduino-cli lib install "M5Unified" "M5GFX" "JPEGDEC" "ArduinoJson" "LovyanGFX" "XPT2046_Touchscreen"
 
       - name: Inject ScreenScraper credentials
         env:
