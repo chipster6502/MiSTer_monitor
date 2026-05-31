@@ -3825,7 +3825,7 @@ void connectWithAnimation() {
   // Draw initial empty state (no circles yet)
   drawWiFiProgressCircles(0, false, 30);
   
-  // Temporary WiFi scan diagnostic — remove after debugging
+  // WiFi scan diagnostic
   Serial.println("=== SCANNING NETWORKS ===");
   int n = WiFi.scanNetworks();
   for (int i = 0; i < n; i++) {

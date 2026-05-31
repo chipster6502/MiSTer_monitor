@@ -40,13 +40,6 @@ jobs:
               "$SS_DEV_ID" "$SS_DEV_PASS" > "$d/ss_credentials.h"
           done
 
-      - name: Verify injection (debug)
-        run: |
-          echo "=== Tab5 ss_credentials.h ==="
-          sed 's/\(SS_DEV_ID_EMBEDDED   "\)[^"]*\(".*\)/\1[REDACTED-LEN-VISIBLE]\2/' mister_monitor_Tab5/ss_credentials.h
-          echo "ID length: $(grep -oP 'SS_DEV_ID_EMBEDDED   "\K[^"]*' mister_monitor_Tab5/ss_credentials.h | wc -c)"
-          echo "PASS length: $(grep -oP 'SS_DEV_PASS_EMBEDDED "\K[^"]*' mister_monitor_Tab5/ss_credentials.h | wc -c)"
-
       - name: Compile Tab5
         run: |
           arduino-cli compile \
