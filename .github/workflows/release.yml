@@ -64,6 +64,33 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.bin
+          body: |
+            ## What's new in v2.3.0
+
+            ### No static IP required
+            The display now finds the MiSTer automatically at boot via UDP broadcast. No need to configure a static IP on the MiSTer or set one in `config.ini`. A manually configured IP is still supported as a fallback for networks that block UDP broadcast.
+
+            ### No ScreenScraper developer account required
+            A free [ScreenScraper](https://www.screenscraper.fr) member account is all you need — no developer registration or manual approval. The app provides its own developer credentials. Users with their own developer account can still override via `config.ini`.
+
+            ### Web flasher
+            Firmware can now be flashed directly from the browser — no Arduino IDE needed:
+            **[Open web flasher](https://chipster6502.github.io/MiSTer_monitor/flasher/)**
+            Requires Chrome or Edge on desktop. M5Stack Tab5 users: if the web flasher does not detect your device, use the `.bin` file below with [M5Burner](https://docs.m5stack.com/en/download) or `esptool`.
+
+            ### SD card content included
+            The repository now includes ready-to-use SD card layouts under `SD_card_content/Tab5/` and `SD_card_content/CYD/`. Copy the contents of your target folder to the root of the display's microSD card and edit `config.ini` with your credentials.
+
+            ---
+
+            ## Installation
+
+            **MiSTer side** — install or update via [MiSTer Downloader](https://github.com/chipster6502/MiSTer_monitor_DB) (recommended).
+
+            **Display side** — flash the firmware for your board using the [web flasher](https://chipster6502.github.io/MiSTer_monitor/flasher/), or download the `.bin` below and flash with M5Burner / `esptool`.
+
+            After flashing, copy `config.ini` from `SD_card_content/<your board>/` to the root of the microSD card and fill in your WiFi and ScreenScraper credentials. See [`docs/configuration.md`](https://github.com/chipster6502/MiSTer_monitor/blob/main/docs/configuration.md) for the full reference.
+
 
       - name: Build flasher site
         run: |
