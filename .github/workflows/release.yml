@@ -96,7 +96,7 @@ jobs:
 
             **Display side** — flash the firmware for your board using the [web flasher](https://chipster6502.github.io/MiSTer_monitor/flasher/), or download the `.bin` below and flash with M5Burner / `esptool`.
 
-After flashing, Copy the contents of your target folder to the root of the display's microSD card and edit `config.ini` with your WiFi and ScreenScraper credentials. See [`docs/configuration.md`](https://github.com/chipster6502/MiSTer_monitor/blob/main/docs/configuration.md) for the full reference.
+            After flashing, Copy the contents of your target folder to the root of the display's microSD card and edit `config.ini` with your WiFi and ScreenScraper credentials. See [`docs/configuration.md`](https://github.com/chipster6502/MiSTer_monitor/blob/main/docs/configuration.md) for the full reference.
 
       - name: Build flasher site
         run: |
