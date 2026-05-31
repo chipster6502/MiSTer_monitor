@@ -196,7 +196,8 @@ The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
 ## Creating a ScreenScraper account
 
 The display downloads artwork from the ScreenScraper API. The app provides
-its own developer credentials, so you only need a **free member account**
+its own developer credentials, so you only need a **free member account** —
+no developer account or manual approval required.
 
 1. Register for free at [https://www.screenscraper.fr](https://www.screenscraper.fr).
    Account creation is instant.

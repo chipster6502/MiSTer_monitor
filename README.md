@@ -42,9 +42,9 @@ See `docs/PORTING.md` for porting guidelines.
 - microSD card for the display (image storage)
 
 **Software**
-- Arduino IDE (for compiling and uploading the display firmware)
-- [ScreenScraper](https://www.screenscraper.fr) developer account (free)
+- [ScreenScraper](https://www.screenscraper.fr) member account (free, instant signup)
 - A standard MiSTer setup
+- Arduino IDE — only if building the firmware from source (not needed with the web flasher)
 
 ## Installation
 
@@ -85,8 +85,9 @@ The system has two components that work together:
   from OSD navigation by comparing `FILESELECT` and `CURRENTPATH`
   filesystem timestamps at nanosecond precision — no external helper
   scripts are needed.
-- **display sketch** — Polls the server every few seconds, downloads
-  artwork from ScreenScraper, and renders the HUD interface. Also runs
+- **display sketch** — Discovers the MiSTer automatically on the local
+  network via UDP broadcast at boot, polls the server every few seconds,
+  downloads artwork from ScreenScraper, and renders the HUD interface. Also runs
   its own HTTP server on port 8080 for screenshot capture, accessible
   from any device on the local network at `http://<Display-IP>:8080`.
 

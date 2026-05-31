@@ -5,13 +5,13 @@
 //  ESP32-2432S028R "CYD" board with no changes to the drawing logic.
 //
 //  Display calls are routed to a LovyanGFX instance configured
-//  for the CYD's ILI9341 panel; Touch is currently a stub (XPT2046 wiring
-//  will be added in a later step); Speaker is a no-op by default (CYD has no DAC speaker).
+//  for the CYD's ILI9341 panel; Touch uses the XPT2046 controller via
+//  software SPI; Speaker is a no-op (CYD has no DAC speaker).
 //
 //  Pinout reference (CYD ESP32-2432S028R, classic XPT2046 variant):
 //    TFT (VSPI):  SCK=14  MOSI=13  MISO=12  DC=2  CS=15  RST=hw  BL=21
 //    SD  (HSPI):  SCK=18  MOSI=23  MISO=19  CS=5     (handled in .ino, not here)
-//    Touch (VSPI shared, separate CS): CS=33  IRQ=36  (wired up later)
+//    Touch (software SPI, separate pins): CLK=25 MOSI=32 MISO=39 CS=33 IRQ=36
 // ============================================================================
 
 #pragma once
@@ -91,8 +91,7 @@ extern LGFX_CYD display;
 #define XPT2046_IRQ   36
 
 // Raw-ADC -> screen calibration for landscape rotation=1 (USB on the right).
-// These are typical CYD values; refine them with the calibration mode in
-// Step 9.4 if touches land off-target.
+// These are typical CYD values; refine them if touches land off-target.
 #define TS_RAW_X_MIN  850      // physical BOTTOM of screen
 #define TS_RAW_X_MAX  6600     // physical TOP of screen
 #define TS_RAW_Y_MIN  1350     // physical LEFT
@@ -154,10 +153,6 @@ inline bool xpt2046_read(int* outX, int* outY) {
 
   *outX = constrain(sx, 0, 319);
   *outY = constrain(sy, 0, 239);
-
-  // CALIBRATION LOG: remove once TS_RAW_*_MIN/MAX are confirmed
-  Serial.printf("RAW: x=%d y=%d  ->  screen=(%d,%d)\n",
-                rawX, rawY, *outX, *outY);
 
   return true;
 }

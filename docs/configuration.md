@@ -26,15 +26,15 @@ ssid=YOUR_WIFI_SSID
 password=YOUR_WIFI_PASSWORD
 
 [mister]
-; Después
 ip=                        ; leave blank — the display auto-discovers the
                            ; MiSTer on the local network at boot (recommended)
 
 [screenscraper]
 ss_user=YOUR_SS_USERNAME
 ss_pass=YOUR_SS_PASSWORD
-ss_dev_user=YOUR_SS_USERNAME
-ss_dev_pass=YOUR_SS_DEV_PASSWORD
+; Advanced: only to use your own developer account instead of the built-in one
+;ss_dev_user=
+;ss_dev_pass=
 ```
 
 Any key that is absent keeps the built-in default. The full list of available

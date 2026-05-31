@@ -82,12 +82,12 @@ struct AppConfig {
   // Within each token the region fallback order is fixed:
   //   wor → us → eu → jp → generic
   //
-  // Three separate lists for the three download contexts:
+  // Four separate lists for the four download contexts:
   //
-  //   game_media_order   — non-arcade games
-  //   arcade_media_order — arcade games
-  //   core_media_order   — system-level core artwork (non-arcade systems
-  //                        AND arcade subsystems)
+  //   game_media_order              — non-arcade games
+  //   arcade_media_order            — arcade games
+  //   arcade_subsystem_media_order  — arcade subsystems (hardware platform)
+  //   core_media_order              — system-level core artwork (non-arcade systems)
 
   // Non-arcade games: boxes first, then wheels, then other types
   String gameMediaOrder   = "box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot";

@@ -25,16 +25,17 @@ pages, so most rendering code is identical between targets.
    baseline (`.ino`, `AppConfig.h`, `mister_types.h`, plus
    `board_hal.{h,cpp}` from the CYD port). Rename the `.ino` to
    match the folder.
-1. **Adapt `board_hal.{h,cpp}`** for your panel controller and
+2. **Adapt `board_hal.{h,cpp}`** for your panel controller and
    touch chip. The CYD’s `board_hal` uses **LovyanGFX**, the
    library expected for new ports. It covers essentially every
    ESP32-family panel a porter will encounter (ILI9341, ST7789,
    ST7735, ILI9486, GC9A01, ST7262 RGB, etc.) over SPI or 8/16-bit
    parallel on ESP32 and ESP32-S3. The only realistic exception is
    ESP32-P4 MIPI-DSI panels — LovyanGFX support for that interface
-   is still experimental and those targets need `esp_lcd` or
-   Arduino_GFX directly.
-1. **Set the panel constants** at the top of the `.ino`:
+   is still experimental. The Tab5 port handles this through
+   M5Unified/M5GFX rather than LovyanGFX; other ESP32-P4 MIPI-DSI
+   targets may need `esp_lcd` or Arduino_GFX directly.
+3. **Set the panel constants** at the top of the `.ino`:
 - `TARGET_WIDTH`, `TARGET_HEIGHT` — physical panel size.
 - `IMAGE_AREA_HEIGHT` — vertical space reserved for artwork.
 - `ScaledDisplay::SCALE_FACTOR`, `OFFSET_X`, `OFFSET_Y` — map
@@ -74,4 +75,4 @@ Arduino IDE → Tools:
 - Flash Size: `4MB (32Mb)`
 - PSRAM: `Disabled`
 - Upload Speed: `921600`
-- Libraries: `LovyanGFX`, `XPT2046_Touchscreen`, `JPEGDEC`,
+- Libraries: `LovyanGFX`, `XPT2046_Touchscreen`, `JPEGDEC`

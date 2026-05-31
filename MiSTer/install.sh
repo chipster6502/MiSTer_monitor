@@ -130,8 +130,8 @@ echo "The monitor server is running and will start automatically on boot."
 echo
 echo "Next steps:"
 echo "  1. Make sure your MiSTer.ini has log_file_entry=1 (see above)."
-echo "  2. Configure config.ini on your Tab5 SD card with WiFi/MiSTer IP/ScreenScraper credentials."
-echo "  3. Flash the firmware to your Tab5 (see README for details)."
+echo "  2. Configure config.ini on your display's SD card with your WiFi and ScreenScraper member account (the MiSTer IP is auto-discovered)."
+echo "  3. Flash the firmware to your display via the web flasher or Arduino IDE (see README)."
 echo
 echo "To check the server status:    ${SCRIPTS_DIR}/start_monitor.sh status"
 echo "To stop the server:            ${SCRIPTS_DIR}/start_monitor.sh stop"
