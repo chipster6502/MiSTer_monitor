@@ -8,7 +8,7 @@ sketch.
 
 Two existing sketches; choose by **panel size**, not by MCU:
 
-- **Small panels (~320x240)** → start from `mister_monitor_CYD/`.
+- **Small panels (~320x240)** → start from `mister_monitor_CYD28R/`.
   Full-panel UI: artwork on top, button footer at bottom, no
   decorative frame.
 - **Large panels (5”+ / 800x480+)** → start from
@@ -26,7 +26,7 @@ pages, so most rendering code is identical between targets.
    `board_hal.{h,cpp}` from the CYD port). Rename the `.ino` to
    match the folder.
 2. **Adapt `board_hal.{h,cpp}`** for your panel controller and
-   touch chip. The CYD’s `board_hal` uses **LovyanGFX**, the
+   touch chip. The CYD28R’s `board_hal` uses **LovyanGFX**, the
    library expected for new ports. It covers essentially every
    ESP32-family panel a porter will encounter (ILI9341, ST7789,
    ST7735, ILI9486, GC9A01, ST7262 RGB, etc.) over SPI or 8/16-bit
