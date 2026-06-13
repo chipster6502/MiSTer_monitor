@@ -258,6 +258,22 @@ _WATCHED_FILES = [
     '/tmp/STARTPATH',   # arcade ROM path — needed to detect arcade game changes
 ]
 
+def _ensure_watched_files():
+    """
+    inotifywait aborts entirely if ANY watched path is missing. On setups
+    without MiSTer Remote, /tmp/ACTIVEGAME (and others) may never be created,
+    which traps the watcher in an endless restart loop and detection never
+    runs. Create any missing target as an empty file so the watch can attach;
+    MiSTer overwrites it with real content the moment it writes.
+    """
+    for path in _WATCHED_FILES:
+        try:
+            if not os.path.exists(path):
+                open(path, 'a').close()
+                print(f"📄 Created missing watch target: {path}")
+        except Exception as e:
+            print(f"⚠️ Could not create {path}: {e}")
+
 def _is_known_non_arcade(corename):
     """Returns True if corename belongs to a known non-arcade system."""
     return (corename.lower() in [s.lower() for s in KNOWN_NON_ARCADE_SYSTEMS])
@@ -520,11 +536,12 @@ def _watcher_thread():
     """
     print("👁️ Watcher thread started")
     while True:
+        _ensure_watched_files()
         try:
             proc = subprocess.Popen(
                 ['inotifywait', '-m', '-e', 'close_write,create'] + _WATCHED_FILES,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 text=True
             )
             for line in proc.stdout:
@@ -548,6 +565,9 @@ def _watcher_thread():
                 
                 _update_state()
             proc.wait()
+            err = (proc.stderr.read() or '').strip()  # ← NUEVO
+            if err or proc.returncode not in (0, None):
+                print(f"⚠️ inotifywait exited (code={proc.returncode}): {err or 'no stderr'}")
         except Exception as e:
             print(f"⚠️ Watcher thread error: {e}")
         print("🔄 Watcher thread restarting...")
