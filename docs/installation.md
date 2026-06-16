@@ -9,13 +9,15 @@ The display firmware can be installed two ways: the **web flasher** (easiest) or
 
 ## MiSTer side
 
-Three installation methods are available. The MiSTer Downloader method is
-recommended for automatic future updates.
+Two installation methods are available. The **MiSTer Downloader** method
+is recommended: it installs the server and keeps it updated automatically,
+and a one-time setup script takes care of all the system configuration for
+you. A manual install is documented afterwards as a fallback.
 
 ### Recommended: MiSTer Downloader database
 
-The easiest way to install the server-side component is through the
-MiSTer Downloader. Add this database to your MiSTer:
+This installs the server through the MiSTer Downloader and configures
+everything with a single setup step.
 
 1. Download the drop-in `.ini` file:
 
@@ -23,54 +25,42 @@ MiSTer Downloader. Add this database to your MiSTer:
 
 2. Extract the `.ini` from that ZIP and place it in the **root of your
    MiSTer SD card** (`/media/fat/`).
-3. Run *Update All* or *Downloader* from your MiSTer scripts menu.
-   The files are installed automatically into:
+3. Run *Update All* or *Downloader* from your MiSTer Scripts menu.
+   The Downloader installs these files automatically:
    - `/media/fat/Scripts/start_monitor.sh`
+   - `/media/fat/Scripts/MiSTer_Monitor_setup.sh`
+   - `/media/fat/Scripts/MiSTer_Monitor_uninstall.sh`
    - `/media/fat/Scripts/.config/mister_monitor/mister_status_server.py`
-4. After the first install, do these one-time setup steps:
-```bash
-   chmod +x /media/fat/Scripts/start_monitor.sh
-```
-   Add this line to `/media/fat/linux/user-startup.sh`:
-```bash
-   /media/fat/Scripts/start_monitor.sh start
-```
-   And enable `log_file_entry=1` in `/media/fat/MiSTer.ini` (under the
-   `[MiSTer]` section).
-5. Reboot or run `/media/fat/Scripts/start_monitor.sh start`.
+4. Back in the Scripts menu, run **`MiSTer_Monitor_setup`** once.
+   This makes the launcher executable, enables auto-start on boot, ensures
+   `log_file_entry=1` in `MiSTer.ini`, and starts the server. You can run it
+   again at any time; it is safe to repeat.
 
-Future updates to the server are automatically picked up by *Update All*
-or *Downloader*. Database repository:
+That's it. Future updates to the server are picked up automatically whenever
+you run *Update All* or *Downloader* — no need to run the setup again unless
+you have deactivated the monitor. Database repository:
 [chipster6502/MiSTer_monitor_DB](https://github.com/chipster6502/MiSTer_monitor_DB).
 
-### Alternative: install.sh
+#### Uninstalling (Downloader method)
 
-If you prefer not to use the MiSTer Downloader, the repository includes
-an automated installer that does the same job in one step.
+Run **`MiSTer_Monitor_uninstall`** from the Scripts menu. This *deactivates*
+the monitor: it stops the server and removes the auto-start entry, but leaves
+the program files in place so you can re-enable it later by running
+`MiSTer_Monitor_setup` again — no re-download needed.
 
-1. Copy the contents of the entire `MiSTer/` folder from this
-   repository to your MiSTer's SD card (e.g. `/media/fat/MiSTer_monitor_install/`).
-2. SSH into your MiSTer and run the installer:
-```bash
-   bash /media/fat/MiSTer_monitor_install/install.sh
-```
-3. Verify that `log_file_entry=1` is set in `/media/fat/MiSTer.ini`
-   under the `[MiSTer]` section. The installer warns you if this line
-   is missing — without it, core and game detection will not work.
+To remove MiSTer Monitor **completely**, after running the uninstall script
+also delete the drop-in file
+`downloader_chipster6502_MiSTer_monitor_DB.ini` from the root of your SD
+card (`/media/fat/`), so the Downloader stops tracking and updating it.
 
-The installer copies all files to their canonical locations, configures
-auto-start in `user-startup.sh`, and launches the server immediately.
-It is idempotent: running it again on an existing installation simply
-updates the files and restarts the server.
+> `log_file_entry=1` in `MiSTer.ini` is left untouched by the uninstall
+> script, because other tools may rely on it. Set it back to `0` manually if
+> you want.
 
-To uninstall:
-```bash
-bash /media/fat/Scripts/.config/mister_monitor/uninstall.sh
-```
+### Alternative: manual install
 
-### Manual install
-
-If you prefer to install manually, follow these steps:
+If you prefer not to use the MiSTer Downloader, you can install everything
+by hand.
 
 1. Copy `MiSTer/Scripts/.config/mister_monitor/mister_status_server.py` to
    `/media/fat/Scripts/.config/mister_monitor/` on your MiSTer (create the
