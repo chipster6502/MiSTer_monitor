@@ -757,8 +757,10 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         parsed_path = urlparse(self.path)
         path = parsed_path.path
         
-        # Endpoints principales
-        if path == '/status/core':
+        # Main endpoints
+        if path == '/' or path == '/status':
+            self.send_index_page()
+        elif path == '/status/core':
             self.send_text_response(self.get_current_core())
         elif path == '/status/game':
             self.send_text_response(self.get_current_game())
@@ -1049,55 +1051,17 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
     
     def get_current_rom(self):
         """
-        Gets the current ROM using multiple methods
+        Returns the current ROM filename from centralized state.
+
         """
-        # Method 1: Read ACTIVEGAME (priority)
-        try:
-            with open('/tmp/ACTIVEGAME', 'r') as f:
-                content = f.read().strip()
-                if content:
-                    return os.path.basename(content)
-        except:
-            pass
-        
-        # Method 2: Read SAM_Game.txt
-        try:
-            with open('/tmp/SAM_Game.txt', 'r') as f:
-                content = f.read().strip()
-                if content:
-                    return os.path.basename(content)
-        except:
-            pass
-        
-        # Method 3: Parse SAM_Game.mgl
-        try:
-            with open('/tmp/SAM_Game.mgl', 'r') as f:
-                content = f.read()
-                match = re.search(r'<file[^>]*>([^<]+)</file>', content)
-                if match:
-                    file_path = match.group(1)
-                    return os.path.basename(file_path)
-        except:
-            pass
-        
-        # Method 4: Search for LASTGAME/LASTROM files
-        try:
-            game_patterns = ['/tmp/LASTGAME*', '/tmp/LASTROM*', '/tmp/*ROM*']
-            for pattern in game_patterns:
-                games = glob.glob(pattern)
-                if games:
-                    latest_file = max(games, key=os.path.getctime)
-                    try:
-                        with open(latest_file, 'r') as f:
-                            content = f.read().strip()
-                            if content:
-                                return os.path.basename(content)
-                    except:
-                        continue
-        except:
-            pass
-        
-        return "Sin ROM"
+        with _state_lock:
+            game_path = _state['game_path']
+            game_name = _state['game']
+        if game_path:
+            return os.path.basename(game_path)
+        if game_name:
+            return game_name
+        return "No ROM"
 
     def get_system_info(self):
         """
@@ -2172,6 +2136,42 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(str(data).encode('utf-8'))
+
+    def send_index_page(self):
+        """Friendly landing page for humans hitting the server root.
+
+        The display never calls '/'; this exists only so that a manual
+        connectivity test (typing the server URL into a browser) returns
+        something reassuring instead of a 404 that looks like a failure.
+        """
+        endpoints = [
+            ('/status/core', 'Active core'),
+            ('/status/game', 'Active game'),
+            ('/status/rom', 'Loaded ROM'),
+            ('/status/rom/details', 'ROM details (CRC, hash, path)'),
+            ('/status/system', 'CPU, memory, uptime'),
+            ('/status/storage', 'SD / USB storage'),
+            ('/status/network', 'Network status'),
+            ('/status/usb', 'USB devices'),
+            ('/status/session', 'Session statistics'),
+            ('/status/all', 'All data combined'),
+        ]
+        rows = ''.join(
+            f'<li><a href="{p}">{p}</a> — {d}</li>' for p, d in endpoints
+        )
+        html = (
+            '<!DOCTYPE html><html><head><meta charset="utf-8">'
+            '<title>MiSTer Monitor</title></head><body>'
+            '<h1>MiSTer Monitor server</h1>'
+            '<p>The server is running. Available endpoints:</p>'
+            f'<ul>{rows}</ul>'
+            '</body></html>'
+        )
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(html.encode('utf-8'))
     
     def send_json_response(self, data):
         self.send_response(200)
