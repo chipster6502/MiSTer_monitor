@@ -37,7 +37,7 @@ def _load_names_txt():
                         names[key] = value
         print(f"✅ names.txt loaded: {len(names)} entries")
     except FileNotFoundError:
-        print("ℹ️ names.txt not found, using CORE_NAME_MAPPING only")
+        print("ℹ️ names.txt not found - this is normal; using raw core names.")
     except Exception as e:
         print(f"⚠️ Error reading names.txt: {e}")
     return names
