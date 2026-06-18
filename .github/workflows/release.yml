@@ -52,13 +52,13 @@ jobs:
           arduino-cli compile \
             --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app,FlashSize=4M,PSRAM=disabled" \
             --output-dir build/cyd \
-            mister_monitor_CYD
+            mister_monitor_CYD28R
 
       - name: Collect binaries
         run: |
           mkdir -p dist
           cp build/tab5/mister_monitor_Tab5.ino.merged.bin dist/mister_monitor_tab5.bin
-          cp build/cyd/mister_monitor_CYD.ino.merged.bin   dist/mister_monitor_cyd.bin
+          cp build/cyd/mister_monitor_CYD28R.ino.merged.bin   dist/mister_monitor_cyd.bin
 
       - name: Create release
         uses: softprops/action-gh-release@v2
