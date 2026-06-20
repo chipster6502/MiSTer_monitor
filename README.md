@@ -29,8 +29,8 @@ console and computer games via the MiSTer Remote web application.*
 
 | Target | Status |
 |---|---|
-| M5Stack Tab5 (ESP32-P4) | Stable — reference implementation |
-| Cheap Yellow Display (ESP32-2432S028R) | Stable |
+| [M5Stack Tab5 (ESP32-P4)](https://www.digikey.com/en/products/detail/m5stack-technology-co-ltd/C145/26740595) 5" 1280x720 Touch Display | Stable — reference implementation |
+| [Cheap Yellow Display (ESP32-2432S028R)](https://a.aliexpress.com/_EJ4r0Hg) 2.4" 320x240 Display - Resistive Touch | Stable |
 
 See `docs/PORTING.md` for porting guidelines.
 
