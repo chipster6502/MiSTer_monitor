@@ -1809,6 +1809,14 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                     else:
                         print(f"❌ Direct file not found: {final_path}")
 
+                        # CD images: some cores (PSX, Saturn) write CURRENTPATH without the
+                        # extension. Try common disc-image extensions before giving up.
+                        for ext in ('.chd', '.cue', '.iso', '.pbp'):
+                            cd_candidate = final_path + ext
+                            if os.path.exists(cd_candidate):
+                                print(f"✅ CD image found ({source_name}): {cd_candidate}")
+                                return cd_candidate
+
                         # Last resort: same-name ZIP in the same directory
                         # (handles individual per-game ZIPs: game.dsk → game.zip/game.dsk)
                         parent_dir = os.path.dirname(final_path)
@@ -1844,6 +1852,14 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         if os.path.isabs(path):
             resolved = os.path.normpath(path)
             print(f"✅ Already absolute: {resolved}")
+            return resolved
+        
+        # USB/external drives mount at /media/usbN, NOT under /media/fat.
+        # Resolve any leading ../ sequence pointing at usb0..usb7 correctly.
+        m = re.match(r'(?:\.\./)+(usb[0-7]/.*)$', path)
+        if m:
+            resolved = os.path.normpath('/media/' + m.group(1))
+            print(f"🔧 USB path resolved: {resolved}")
             return resolved
         
         # Case 2: Starts with ../../../media/fat/ - remove the ../ and normalize
@@ -1911,13 +1927,16 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             
             print(f"Processing ROM: {filename} ({file_size:,} bytes)")
             
-            # Calculate hashes (only for files < 100MB for performance)
+            # Calculate hashes (skip only for pathologically large files)
             crc32 = ""
             md5 = ""
             sha1 = ""
             
-            # Size limit to avoid blocking server with very large files
-            MAX_SIZE_FOR_HASH = 100 * 1024 * 1024  # 100MB
+            # Size limit to avoid blocking the server with very large files.
+            # 1GB safely covers any single CD image (CDs cap at ~700MB, and a CHD
+            # is compressed) while still guarding against a corrupt or mis-resolved
+            # path pointing at something huge.
+            MAX_SIZE_FOR_HASH = 1024 * 1024 * 1024  # 1GB
             
             if file_size <= MAX_SIZE_FOR_HASH:
                 try:
@@ -1928,7 +1947,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                     
                     with open(rom_path, 'rb') as f:
                         # Read file in chunks to avoid saturating memory
-                        chunk_size = 64 * 1024  # 64KB chunks
+                        chunk_size = 1024 * 1024  # 1MB chunks
                         crc32_calc = 0
                         md5_calc = hashlib.md5()
                         sha1_calc = hashlib.sha1()
@@ -1945,6 +1964,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                             sha1_calc.update(chunk)
                             
                             bytes_processed += len(chunk)
+                            time.sleep(0.003)   # ~0.3s extra per 100MB hashed
                     
                     # Format results
                     crc32 = format(crc32_calc & 0xffffffff, '08X')

@@ -975,138 +975,104 @@ static bool _parseRomDetailsJson(String& response, RomDetails& details, const ch
 
 RomDetails getCurrentRomDetails() {
   RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0};
-  
+
   Serial.printf("=== GETTING ROM DETAILS ===\n");
   Serial.printf("Free heap before request: %d bytes\n", ESP.getFreeHeap());
-  
-  // Check memory before starting
+
   if (ESP.getFreeHeap() < 50000) {
     Serial.printf("Low memory for ROM details (%d bytes)\n", ESP.getFreeHeap());
     details.error = "Low memory";
     return details;
   }
-  
-  HTTPClient http;
+
   String url = String("http://") + misterIP + ":8081/status/rom/details";
-  
   Serial.printf("Requesting ROM details from: %s\n", url.c_str());
-  
-  http.begin(url);
-  http.setTimeout(8000);
-  http.addHeader("User-Agent", "MiSTer-Monitor");
-  
-  unsigned long requestStart = millis();
-  int code = http.GET();
-  unsigned long requestDuration = millis() - requestStart;
-  
-  Serial.printf("HTTP Response: %d (took %lu ms)\n", code, requestDuration);
-  
-  if (code == 200) {
-    String response = http.getString();
-    Serial.printf("ROM details response: %d bytes\n", response.length());
-    
-    // Show response preview
-    Serial.printf("Response preview (first 200 chars):\n%s\n", 
-                  response.substring(0, min(200, (int)response.length())).c_str());
-    
-    // SAFETY: Limit response size
-    if (response.length() > 5000) {
-      Serial.printf("Large ROM response (%d bytes), truncating\n", response.length());
-      response = response.substring(0, 5000);
-    }
-    
-    if (!_parseRomDetailsJson(response, details, "")) {
-      http.end();
-      Serial.printf("Free heap after ROM details: %d bytes\n", ESP.getFreeHeap());
-      Serial.printf("=== ROM DETAILS COMPLETE (MEMORY FAIL) ===\n\n");
-      return details;
-    }
-    
-  } else {
-    Serial.printf("First attempt failed: HTTP %d\n", code);
-    details.error = "HTTP " + String(code);
-    
-    String errorResponse = http.getString();
-    if (errorResponse.length() > 0 && errorResponse.length() < 200) {
-      Serial.printf("First attempt error response: %s\n", errorResponse.c_str());
-    }
-    
-    http.end(); // Close first connection
-    
-    // SECOND ATTEMPT: Retry ROM details with longer delay
-    Serial.printf("ATTEMPTING SECOND ROM DETAILS REQUEST...\n");
-    Serial.printf("Waiting 20 seconds before retry...\n");
-    
-    // WDT-safe wait: yields to OS in 100ms slices instead of blocking 20s
-    Serial.printf("Waiting 20s before retry (WDT-safe, yielding every 100ms)...\n");
-    {
-      unsigned long _waitStart = millis();
-      while (millis() - _waitStart < 20000) {
-        Board.update();                    // Keep touch state fresh
-        screenshotServer.handleClient(); // Keep HTTP server alive
-        delay(100);                     // Yield to FreeRTOS / feed WDT
-      }
-    }
-    
-    // Check memory before second attempt
+
+  // The first request kicks off the server-side hash; large CD images won't be
+  // ready within a single HTTP timeout.
+  // Later attempts harvest the cached CRC once the server has computed it, so we
+  // poll on timeout/empty until the CRC arrives or we hit the attempt ceiling.
+  //
+  // Budget ≈ MAX_ATTEMPTS * (TIMEOUT + RETRY_WAIT). 5 * (12 s + 20 s) ≈ 150 s.
+  const int           ROM_DETAILS_MAX_ATTEMPTS  = 5;
+  const unsigned long ROM_DETAILS_TIMEOUT_MS    = 12000;
+  const unsigned long ROM_DETAILS_RETRY_WAIT_MS = 20000;
+
+  for (int attempt = 1; attempt <= ROM_DETAILS_MAX_ATTEMPTS; attempt++) {
     if (ESP.getFreeHeap() < 45000) {
-      Serial.printf("Low memory for ROM details retry (%d bytes), skipping\n", ESP.getFreeHeap());
-      details.error += " + Low memory for retry";
-      Serial.printf("Free heap after ROM details: %d bytes\n", ESP.getFreeHeap());
-      Serial.printf("=== ROM DETAILS COMPLETE (RETRY SKIPPED) ===\n\n");
-      return details;
+      Serial.printf("Low memory for ROM details (%d bytes), aborting\n", ESP.getFreeHeap());
+      details.error += " + Low memory";
+      break;
     }
-    
-    // Second attempt with increased timeout
-    HTTPClient httpRetry;
-    httpRetry.begin(url);
-    httpRetry.setTimeout(12000); // Increased from 8000 to 12000
-    httpRetry.addHeader("User-Agent", "MiSTer-Monitor");
-    
-    unsigned long retryStart = millis();
-    int retryCode = httpRetry.GET();
-    unsigned long retryDuration = millis() - retryStart;
-    
-    Serial.printf("Retry HTTP Response: %d (took %lu ms)\n", retryCode, retryDuration);
-    
-    if (retryCode == 200) {
-      String retryResponse = httpRetry.getString();
-      Serial.printf("ROM details retry response: %d bytes\n", retryResponse.length());
-      
-      // Show response preview
-      Serial.printf("Retry response preview (first 200 chars):\n%s\n", 
-                    retryResponse.substring(0, min(200, (int)retryResponse.length())).c_str());
-      
-      // SAFETY: Limit response size
-      if (retryResponse.length() > 5000) {
-        Serial.printf("Large ROM retry response (%d bytes), truncating\n", retryResponse.length());
-        retryResponse = retryResponse.substring(0, 5000);
+
+    Serial.printf("ROM details attempt %d/%d...\n", attempt, ROM_DETAILS_MAX_ATTEMPTS);
+
+    HTTPClient http;
+    http.begin(url);
+    http.setTimeout(ROM_DETAILS_TIMEOUT_MS);
+    http.addHeader("User-Agent", "MiSTer-Monitor");
+
+    unsigned long requestStart = millis();
+    int code = http.GET();
+    Serial.printf("HTTP Response: %d (took %lu ms)\n", code, millis() - requestStart);
+
+    if (code == 200) {
+      String response = http.getString();
+      Serial.printf("ROM details response: %d bytes\n", response.length());
+      Serial.printf("Response preview (first 200 chars):\n%s\n",
+                    response.substring(0, min(200, (int)response.length())).c_str());
+
+      if (response.length() > 5000) {
+        Serial.printf("Large ROM response (%d bytes), truncating\n", response.length());
+        response = response.substring(0, 5000);
       }
-      
-      if (!_parseRomDetailsJson(retryResponse, details, "Retry ")) {
-        httpRetry.end();
+
+      if (!_parseRomDetailsJson(response, details, "")) {
+        http.end();
         Serial.printf("Free heap after ROM details: %d bytes\n", ESP.getFreeHeap());
-        Serial.printf("=== ROM DETAILS COMPLETE (RETRY MEMORY FAIL) ===\n\n");
+        Serial.printf("=== ROM DETAILS COMPLETE (MEMORY FAIL) ===\n\n");
         return details;
       }
-      
+      http.end();
+
+      // Success: server returned a usable CRC.
+      if (details.available && details.crc32.length() > 0) {
+        Serial.printf("ROM details ready on attempt %d (CRC %s)\n",
+                      attempt, details.crc32.c_str());
+        break;
+      }
+
+      // Definitive negative: no ROM, or file can't be hashed. Stop polling.
+      if (!details.available || details.fileTooLarge) {
+        Serial.printf("ROM details: definitive negative (available=%s, tooLarge=%s) - stopping\n",
+                      details.available ? "YES" : "NO",
+                      details.fileTooLarge ? "YES" : "NO");
+        break;
+      }
+
+      // 200 but CRC not ready yet — fall through to wait and retry.
+      Serial.printf("ROM details: 200 without CRC yet, will retry\n");
     } else {
-      Serial.printf("Retry also failed: HTTP %d\n", retryCode);
-      details.error += " + Retry HTTP " + String(retryCode);
-      
-      String retryErrorResponse = httpRetry.getString();
-      if (retryErrorResponse.length() > 0 && retryErrorResponse.length() < 200) {
-        Serial.printf("Retry error response: %s\n", retryErrorResponse.c_str());
+      http.end();
+      Serial.printf("Attempt %d/%d failed: HTTP %d\n", attempt, ROM_DETAILS_MAX_ATTEMPTS, code);
+      details.error = "HTTP " + String(code);
+    }
+
+    // Wait before the next attempt (skip after the final one).
+    if (attempt < ROM_DETAILS_MAX_ATTEMPTS) {
+      Serial.printf("Waiting %lus before retry (WDT-safe, yielding every 100ms)...\n",
+                    ROM_DETAILS_RETRY_WAIT_MS / 1000);
+      unsigned long _waitStart = millis();
+      while (millis() - _waitStart < ROM_DETAILS_RETRY_WAIT_MS) {
+        Board.update();                   // Keep touch state fresh
+        screenshotServer.handleClient();  // Keep HTTP server alive
+        delay(100);
       }
     }
-    
-    httpRetry.end();
   }
-  
-  http.end(); // Ensure original connection is closed
+
   Serial.printf("Free heap after ROM details: %d bytes\n", ESP.getFreeHeap());
   Serial.printf("=== ROM DETAILS COMPLETE ===\n\n");
-  
   return details;
 }
 
@@ -1116,50 +1082,108 @@ RomDetails getCurrentRomDetailsForced() {
   RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0};
 
   Serial.printf("=== FORCED ROM DETAILS (bypass timestamp) ===\n");
+  Serial.printf("Free heap before request: %d bytes\n", ESP.getFreeHeap());
 
   if (ESP.getFreeHeap() < 50000) {
     details.error = "Low memory";
     return details;
   }
 
-  HTTPClient http;
   String url = String("http://") + misterIP + ":8081/status/rom/details?force=1";
   Serial.printf("Requesting forced ROM details from: %s\n", url.c_str());
 
-  http.begin(url);
-  http.setTimeout(15000);
-  http.addHeader("User-Agent", "MiSTer-Monitor");
+  // Same bounded-retry rationale as getCurrentRomDetails(): ?force=1 triggers a
+  // fresh server-side hash, so large CD images won't be ready within a single
+  // HTTP timeout. Poll until the CRC is cached or we hit the attempt ceiling.
+  // Budget ≈ MAX_ATTEMPTS * (TIMEOUT + RETRY_WAIT). 5 * (12 s + 20 s) ≈ 150 s.
+  const int           ROM_DETAILS_MAX_ATTEMPTS  = 5;
+  const unsigned long ROM_DETAILS_TIMEOUT_MS    = 12000;
+  const unsigned long ROM_DETAILS_RETRY_WAIT_MS = 20000;
 
-  int code = http.GET();
-  Serial.printf("Forced HTTP Response: %d\n", code);
+  for (int attempt = 1; attempt <= ROM_DETAILS_MAX_ATTEMPTS; attempt++) {
+    if (ESP.getFreeHeap() < 45000) {
+      Serial.printf("Low memory for forced ROM details (%d bytes), aborting\n", ESP.getFreeHeap());
+      details.error += " + Low memory";
+      break;
+    }
 
-  if (code == 200) {
-    String response = http.getString();
-    Serial.printf("Forced response (%d bytes): %s\n", response.length(),
-                  response.substring(0, min(200, (int)response.length())).c_str());
+    Serial.printf("Forced ROM details attempt %d/%d...\n", attempt, ROM_DETAILS_MAX_ATTEMPTS);
 
-    details.filename      = extractStringValue(response, "filename");
-    details.crc32         = extractStringValue(response, "crc32");
-    details.md5           = extractStringValue(response, "md5");
-    details.sha1          = extractStringValue(response, "sha1");
-    details.filesize      = extractIntValue(response,  "size");
-    details.available     = extractBoolValue(response, "available");
-    details.hashCalculated= extractBoolValue(response, "hash_calculated");
-    details.fileTooLarge  = extractBoolValue(response, "file_too_large");
-    details.error         = extractStringValue(response, "error");
-    details.path          = extractStringValue(response, "path");
-    details.timestamp     = extractIntValue(response,  "timestamp");
+    HTTPClient http;
+    http.begin(url);
+    http.setTimeout(ROM_DETAILS_TIMEOUT_MS);
+    http.addHeader("User-Agent", "MiSTer-Monitor");
 
-    Serial.printf("Forced CRC32: '%s' | available=%s | hashOK=%s\n",
-                  details.crc32.c_str(),
-                  details.available ? "YES" : "NO",
-                  details.hashCalculated ? "YES" : "NO");
-  } else {
-    details.error = "Forced HTTP " + String(code);
-    Serial.printf("Forced request failed: %d\n", code);
+    unsigned long requestStart = millis();
+    int code = http.GET();
+    Serial.printf("Forced HTTP Response: %d (took %lu ms)\n", code, millis() - requestStart);
+
+    if (code == 200) {
+      String response = http.getString();
+      Serial.printf("Forced response (%d bytes): %s\n", response.length(),
+                    response.substring(0, min(200, (int)response.length())).c_str());
+
+      if (response.length() > 5000) {
+        Serial.printf("Large forced ROM response (%d bytes), truncating\n", response.length());
+        response = response.substring(0, 5000);
+      }
+
+      details.filename      = extractStringValue(response, "filename");
+      details.crc32         = extractStringValue(response, "crc32");
+      details.md5           = extractStringValue(response, "md5");
+      details.sha1          = extractStringValue(response, "sha1");
+      details.filesize      = extractIntValue(response,  "size");
+      details.available     = extractBoolValue(response, "available");
+      details.hashCalculated= extractBoolValue(response, "hash_calculated");
+      details.fileTooLarge  = extractBoolValue(response, "file_too_large");
+      details.error         = extractStringValue(response, "error");
+      details.path          = extractStringValue(response, "path");
+      details.timestamp     = extractIntValue(response,  "timestamp");
+
+      Serial.printf("Forced CRC32: '%s' | available=%s | hashOK=%s\n",
+                    details.crc32.c_str(),
+                    details.available ? "YES" : "NO",
+                    details.hashCalculated ? "YES" : "NO");
+
+      http.end();
+
+      // Success: server returned a usable CRC.
+      if (details.available && details.crc32.length() > 0) {
+        Serial.printf("Forced ROM details ready on attempt %d (CRC %s)\n",
+                      attempt, details.crc32.c_str());
+        break;
+      }
+
+      // Definitive negative: no ROM, or file can't be hashed. Stop polling.
+      if (!details.available || details.fileTooLarge) {
+        Serial.printf("Forced ROM details: definitive negative (available=%s, tooLarge=%s) - stopping\n",
+                      details.available ? "YES" : "NO",
+                      details.fileTooLarge ? "YES" : "NO");
+        break;
+      }
+
+      // 200 but CRC not ready yet — fall through to wait and retry.
+      Serial.printf("Forced ROM details: 200 without CRC yet, will retry\n");
+    } else {
+      http.end();
+      Serial.printf("Forced attempt %d/%d failed: HTTP %d\n", attempt, ROM_DETAILS_MAX_ATTEMPTS, code);
+      details.error = "Forced HTTP " + String(code);
+    }
+
+    // Wait before the next attempt (skip after the final one).
+    if (attempt < ROM_DETAILS_MAX_ATTEMPTS) {
+      Serial.printf("Waiting %lus before retry (WDT-safe, yielding every 100ms)...\n",
+                    ROM_DETAILS_RETRY_WAIT_MS / 1000);
+      unsigned long _waitStart = millis();
+      while (millis() - _waitStart < ROM_DETAILS_RETRY_WAIT_MS) {
+        Board.update();                   // Keep touch state fresh
+        screenshotServer.handleClient();  // Keep HTTP server alive
+        delay(100);                       // Yield to FreeRTOS / feed WDT
+      }
+    }
   }
 
-  http.end();
+  Serial.printf("Free heap after forced ROM details: %d bytes\n", ESP.getFreeHeap());
   Serial.printf("=== FORCED ROM DETAILS COMPLETE ===\n\n");
   return details;
 }
