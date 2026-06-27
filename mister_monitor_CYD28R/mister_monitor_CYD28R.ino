@@ -1981,6 +1981,11 @@ void setup() {
   // Prefer the user's own dev account from config.ini if provided;
   // otherwise use the built-in credentials injected at release-build time.
   password = appConfig.wifiPass.c_str();
+  // MiSTer IP from config.ini. UDP discovery overwrites this at boot on
+  // success; on failure this value remains as the fallback (which is the
+  // whole point of the config.ini ip= key). appConfig is global, so the
+  // c_str() pointer stays valid for the program's lifetime.
+  misterIP = appConfig.misterIP.c_str();
     if (appConfig.ssDevUser.length() > 0) {
     _ss_dev_user_str = appConfig.ssDevUser;
     _ss_dev_pass_str = appConfig.ssDevPass;

@@ -51,13 +51,13 @@ fallback IP manually:
 
 ```ini
 [mister]
-ip=192.168.1.100
+ip=192.168.1.50          ; example only — use your MiSTer's actual IP
 ```
 
-In that case, assign a static address to the MiSTer by editing
-`/etc/dhcpcd.conf` on it, or by reserving a DHCP lease for its MAC address
-in your router admin panel (simpler, and requires no changes on the MiSTer
-itself).
+To keep that address stable across reboots, give the MiSTer a fixed IP:
+reserve a DHCP lease for its MAC in your router's admin panel (simplest, no
+changes on the MiSTer), or set a static address by editing
+`/etc/dhcpcd.conf` on it.
 
 ## Artwork download order
 
