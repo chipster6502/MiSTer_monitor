@@ -3,7 +3,6 @@
 #include <HTTPClient.h>
 #include <SD.h>
 #include <JPEGDEC.h>
-#include <ArduinoJson.h>
 #include <WebServer.h>
 #include "mister_types.h"
 #include "AppConfig.h"
