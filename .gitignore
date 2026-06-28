@@ -16,3 +16,5 @@ Thumbs.db
 # Personal credentials (never commit these)
 credentials.h
 secrets.h
+# ScreenScraper dev credentials — injected by CI, never committed
+ss_credentials.h
