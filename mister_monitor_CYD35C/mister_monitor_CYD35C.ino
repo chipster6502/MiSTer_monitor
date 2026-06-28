@@ -149,6 +149,7 @@ int requestsCount = 0;
 
 // Interface variables
 bool connected = false;
+bool wasConnected = false;
 bool sdCardAvailable = false;
 int currentPage = 0;
 const int totalPages = 5;  // Back to 5 pages
@@ -358,6 +359,7 @@ void showBootSequence();
 void connectWithAnimation();
 void buttonPressFeedback(TouchButton* btn, void (*soundFn)());
 void testMiSTerConnectivity(bool discovered);
+void showReconnectBanner();
 void updateMiSTerData();
 void getCurrentCore();
 void getCurrentGame();
@@ -2028,6 +2030,36 @@ void setup() {
 void loop() {
   Board.update();
   screenshotServer.handleClient();  // Non-blocking screenshot server poll
+
+  // --- Periodic MiSTer re-discovery while offline ---------------------------
+  // Discovery runs once at boot. If the MiSTer wasn't on the network yet
+  // (e.g. its IP was delayed by a CIFS mount), boot-time discovery fails and
+  // the display would stay OFFLINE forever. While disconnected, re-broadcast
+  // periodically to pick the MiSTer up once it appears, then refresh state.
+  {
+    static unsigned long lastRediscovery = 0;
+    const unsigned long  REDISCOVERY_INTERVAL_MS = 10000;
+    if (!connected && WiFi.status() == WL_CONNECTED &&
+        millis() - lastRediscovery > REDISCOVERY_INTERVAL_MS) {
+      lastRediscovery = millis();
+      Serial.println("[REDISCOVERY] Offline — re-broadcasting for MiSTer...");
+      if (discoverMister(2, 400)) {        // quick probe (<=0.8s); sets misterIP
+        Serial.printf("[REDISCOVERY] Found at %s — back online\n", misterIP);
+        updateMiSTerData();                // getCurrentCore() sets connected on HTTP 200
+        needsRedraw = true;                // next loop repaints the normal UI over it
+      }
+    }
+  }
+  // --------------------------------------------------------------------------
+  // Reconnect banner: fire on any OFFLINE -> ONLINE transition, no matter which
+  // path restored the link (re-discovery, screensaver refresh, normal polling).
+  if (connected && !wasConnected) {
+    Serial.println("[RECONNECT] Link restored — showing banner");
+    showReconnectBanner();
+    delay(2400);
+    needsRedraw = true;          // repaint normal UI over the banner next loop
+  }
+  wasConnected = connected;
   // SAFETY: Check for critical memory levels every 30 seconds
   static unsigned long lastMemoryCheck = 0;
   if (millis() - lastMemoryCheck > 30000) {
@@ -3310,6 +3342,24 @@ void testMiSTerConnectivity(bool discovered) {
 
   http.end();
   delay(2000);
+}
+
+void showReconnectBanner() {
+  // Footer-style banner in the image footer band (Y=270..320). Drawn inside the
+  // band so the footer restore below fully covers it.
+  const char* msg = "MiSTer RECONNECTED";
+  int tw = (int)strlen(msg) * 12;            // ~12 px/char at 1.5x
+  Lcd.fillRect(0, 270, 480, 50, THEME_GREEN);
+  Lcd.setTextSize(2);
+  Lcd.setTextColor(THEME_BLACK, THEME_GREEN);
+  Lcd.setCursor((480 - tw) / 2, 286);        // centered in the 50px band
+  Lcd.print(msg);
+
+  delay(2400);                               // hold long enough to read
+
+  // Restore the image footer over the banner.
+  if (currentGame.length() > 0) addGameImageFooter(currentGame);
+  else                          drawCoreImageFooter();
 }
 
 void updateMiSTerData() {
