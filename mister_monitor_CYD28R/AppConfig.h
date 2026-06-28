@@ -24,7 +24,7 @@ struct AppConfig {
   String wifiPass     = "YOUR_WIFI_PASSWORD";
 
   // --- MiSTer ----------------------------------------------------------------
-  String misterIP     = "192.168.1.100";
+  String misterIP = "";   // empty = unknown; set by config.ini ip= or UDP discovery
 
   // --- ScreenScraper credentials ---------------------------------------------
   String ssUser       = "";

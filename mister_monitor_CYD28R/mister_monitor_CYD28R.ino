@@ -47,7 +47,7 @@ AppConfig appConfig;          // Populated from /config.ini in setup()
 // Network — pointers are reassigned from appConfig after SD init
 const char* ssid     = "YOUR_WIFI_SSID";
 const char* password = "YOUR_WIFI_PASSWORD";
-const char* misterIP = "192.168.1.100";
+const char* misterIP = "";   // set in setup() from appConfig.misterIP (single source of truth: AppConfig.h)
 
 // ScreenScraper runtime strings.
 String _ss_dev_user_str;
@@ -362,7 +362,7 @@ void showBootSequence();
 void drawWiFiProgressCircles(int currentAttempt, bool connected, int maxAttempts);
 void connectWithAnimation();
 void buttonPressFeedback(TouchButton* btn, void (*soundFn)());
-void testMiSTerConnectivity();
+void testMiSTerConnectivity(bool discovered);
 void updateMiSTerData();
 void getCurrentCore();
 void getCurrentGame();
@@ -1978,8 +1978,6 @@ void setup() {
   loadConfig(appConfig);
 
   ssid     = appConfig.ssid.c_str();
-  // Prefer the user's own dev account from config.ini if provided;
-  // otherwise use the built-in credentials injected at release-build time.
   password = appConfig.wifiPass.c_str();
   // MiSTer IP from config.ini. UDP discovery overwrites this at boot on
   // success; on failure this value remains as the fallback (which is the
@@ -3542,7 +3540,7 @@ void connectWithAnimation() {
     // Radar animation centered in middle of screen
     drawRadarScan(160, 120, 60, attempts * 12);
 
-    Lcd.setTextColor(THEME_YELLOW);
+    Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
     Lcd.setTextSize(1);
     Lcd.setCursor(120, 190);
     Lcd.printf("SCAN %02d/30", attempts + 1);
@@ -3583,10 +3581,10 @@ void connectWithAnimation() {
     // Auto-discover the MiSTer server IP.
     // On success overwrites misterIP; on failure leaves the config.ini value unchanged.
     Serial.println("=== DISCOVERING MiSTer SERVER ===");
-    discoverMister();
+    bool discovered = discoverMister();
 
     Serial.println("=== TESTING MiSTer CONNECTIVITY ===");
-    testMiSTerConnectivity();
+    testMiSTerConnectivity(discovered);
   } else {
     Lcd.setTextColor(THEME_RED);
     Lcd.setTextSize(2);
@@ -3600,7 +3598,24 @@ void connectWithAnimation() {
   delay(2000);
 }
 
-void testMiSTerConnectivity() {
+void testMiSTerConnectivity(bool discovered) {
+  // No IP available: UDP discovery failed AND no ip= was set in config.ini.
+  // Don't probe http://:8081 — give the user an actionable message instead.
+  if (strlen(misterIP) == 0) {
+    Serial.println("MiSTer IP unknown: discovery failed and no ip= in config.ini");
+    Lcd.fillRect(0, 180, 320, 60, THEME_BLACK);
+    Lcd.setTextColor(THEME_RED);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(70, 190);
+    Lcd.print("MiSTer NOT FOUND");
+    Lcd.setTextColor(THEME_YELLOW);
+    Lcd.setCursor(45, 205);
+    Lcd.print("Set ip= in config.ini");
+    connected = false;
+    delay(2000);
+    return;
+  }
+  
   HTTPClient http;
   String url = String("http://") + misterIP + ":8081/status/core";
 
@@ -3627,11 +3642,22 @@ void testMiSTerConnectivity() {
     Serial.printf("MiSTer not responding (code: %d)\n", code);
     Lcd.setTextColor(THEME_RED);
     Lcd.setTextSize(1);
-    Lcd.setCursor(70, 190);
-    Lcd.print("MiSTer: OFFLINE");
-    Lcd.setCursor(80, 205);
-    Lcd.printf("Check: %s:8081", misterIP);
-    connected = false;
+    if (discovered) {
+      // The discovery process found the MiSTer, but :8081 is not responding:
+      // The HTTP server (the Python script) is likely not running.
+      Lcd.setCursor(45, 190);
+      Lcd.print("MiSTer FOUND, no reply");
+      Lcd.setTextColor(THEME_YELLOW);
+      Lcd.setCursor(50, 205);
+      Lcd.print("Is the script running?");
+    } else {
+      // We are using the fallback IP from config.ini, and it is not responding:
+      // The IP address is probably incorrect.
+      Lcd.setCursor(70, 190);
+      Lcd.print("MiSTer: OFFLINE");
+      Lcd.setCursor(60, 205);
+      Lcd.printf("Check IP: %s", misterIP);
+    }
   }
 
   http.end();

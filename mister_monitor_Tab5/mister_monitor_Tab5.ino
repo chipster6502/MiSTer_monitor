@@ -55,7 +55,7 @@ AppConfig appConfig;          // Populated from /config.ini in setup()
 // Network — pointers are reassigned from appConfig after SD init
 const char* ssid     = "YOUR_WIFI_SSID";
 const char* password = "YOUR_WIFI_PASSWORD";
-const char* misterIP = "192.168.1.100";
+const char* misterIP = "";   // set in setup() from appConfig.misterIP (single source of truth: AppConfig.h)
 
 // ScreenScraper runtime strings.
 String _ss_dev_user_str;
@@ -373,7 +373,7 @@ void drawProgressSquares(int completedCount);
 void showBootSequence();
 void drawWiFiProgressCircles(int currentAttempt, bool connected, int maxAttempts);
 void connectWithAnimation();
-void testMiSTerConnectivity();
+void testMiSTerConnectivity(bool discovered);
 void updateMiSTerData();
 void getCurrentCore();
 void getCurrentGame();
@@ -3943,10 +3943,10 @@ void connectWithAnimation() {
     // Auto-discover the MiSTer server IP.
     // On success overwrites misterIP; on failure leaves the config.ini value unchanged.
     Serial.println("=== DISCOVERING MiSTer SERVER ===");
-    discoverMister();
+    bool discovered = discoverMister();
 
     Serial.println("=== TESTING MiSTer CONNECTIVITY ===");
-    testMiSTerConnectivity();
+    testMiSTerConnectivity(discovered);
     
   } else {
     // ========== FAILURE STATE ==========
@@ -3981,56 +3981,71 @@ void connectWithAnimation() {
   delay(2000);
 }
 
-void testMiSTerConnectivity() {
+void testMiSTerConnectivity(bool discovered) {
+  // No IP to probe (empty default + discovery failed + no ip= in config):
+  // skip http://:8081 and tell the user what to do.
+  if (strlen(misterIP) == 0) {
+    Serial.println("MiSTer IP unknown: discovery failed and no ip= in config.ini");
+    int animOffsetX = 110, animOffsetY = 140, scale = 2;
+    M5.Display.fillRect(animOffsetX, animOffsetY + 60*scale, 520, 140*scale, THEME_BLACK);
+    M5.Display.setTextColor(THEME_RED);
+    M5.Display.setTextSize(3);
+    M5.Display.setCursor(animOffsetX + 30*scale, animOffsetY + 95*scale);
+    M5.Display.print("MiSTer NOT FOUND");
+    M5.Display.setTextColor(THEME_YELLOW);
+    M5.Display.setTextSize(2);
+    M5.Display.setCursor(animOffsetX + 30*scale, animOffsetY + 120*scale);
+    M5.Display.print("Set ip= in config.ini");
+    connected = false;
+    delay(2000);
+    return;
+  }
+
   HTTPClient http;
   String url = String("http://") + misterIP + ":8081/status/core";
-  
   Serial.printf("Testing connectivity to: %s\n", url.c_str());
-  
   http.begin(url);
   http.setTimeout(5000);
-  
   int code = http.GET();
-  
-  // Clear left panel area for result
+
   int animOffsetX = 110;
   int animOffsetY = 140;
   int scale = 2;
-  
-  // Calculate safe width to avoid overlapping right panel circles
-  // Left panel ends at X=640, circles start at X=670
-  // Safe width = 640 - animOffsetX - margin = 640 - 110 - 10 = 520
   int safeWidth = 520;
-  
-  M5.Display.fillRect(animOffsetX, animOffsetY + 60*scale, 
-                      safeWidth, 140*scale, THEME_BLACK);
-  
+
+  M5.Display.fillRect(animOffsetX, animOffsetY + 60*scale, safeWidth, 140*scale, THEME_BLACK);
+
   if (code == 200) {
     Serial.printf("MiSTer responds correctly!\n");
-    
     M5.Display.setTextColor(THEME_GREEN);
     M5.Display.setTextSize(3);
     M5.Display.setCursor(animOffsetX + 30*scale, animOffsetY + 95*scale);
     M5.Display.print("MiSTer: ONLINE");
-    
     M5.Display.setCursor(animOffsetX + 30*scale, animOffsetY + 115*scale);
     M5.Display.printf("Server: %s:8081", misterIP);
-    
     connected = true;
   } else {
+    connected = false;
     Serial.printf("MiSTer not responding (code: %d)\n", code);
-    
     M5.Display.setTextColor(THEME_RED);
     M5.Display.setTextSize(3);
-    M5.Display.setCursor(animOffsetX + 30*scale, animOffsetY + 95*scale);
-    M5.Display.print("MiSTer: OFFLINE");
-    
-    M5.Display.setCursor(animOffsetX + 30*scale, animOffsetY + 115*scale);
-    M5.Display.printf("Check: %s:8081", misterIP);
-    
-    connected = false;
+    if (discovered) {
+      // Found via UDP but :8081 is silent → the Python server probably isn't running.
+      M5.Display.setCursor(animOffsetX + 30*scale, animOffsetY + 95*scale);
+      M5.Display.print("MiSTer FOUND, no reply");
+      M5.Display.setTextColor(THEME_YELLOW);
+      M5.Display.setTextSize(2);
+      M5.Display.setCursor(animOffsetX + 30*scale, animOffsetY + 120*scale);
+      M5.Display.print("Is the script running?");
+    } else {
+      // Using the config.ini fallback IP and it doesn't answer → likely wrong IP.
+      M5.Display.setCursor(animOffsetX + 30*scale, animOffsetY + 95*scale);
+      M5.Display.print("MiSTer: OFFLINE");
+      M5.Display.setCursor(animOffsetX + 30*scale, animOffsetY + 115*scale);
+      M5.Display.printf("Check IP: %s", misterIP);
+    }
   }
-  
+
   http.end();
   delay(2000);
 }

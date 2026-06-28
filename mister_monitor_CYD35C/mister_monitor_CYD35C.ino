@@ -47,7 +47,7 @@ AppConfig appConfig;          // Populated from /config.ini in setup()
 // Network — pointers are reassigned from appConfig after SD init
 const char* ssid     = "YOUR_WIFI_SSID";
 const char* password = "YOUR_WIFI_PASSWORD";
-const char* misterIP = "192.168.1.100";
+const char* misterIP = "";   // set in setup() from appConfig.misterIP (single source of truth: AppConfig.h)
 
 // ScreenScraper runtime strings.
 String _ss_dev_user_str;
@@ -357,7 +357,7 @@ void showImageNotFound(String coreName);
 void showBootSequence();
 void connectWithAnimation();
 void buttonPressFeedback(TouchButton* btn, void (*soundFn)());
-void testMiSTerConnectivity();
+void testMiSTerConnectivity(bool discovered);
 void updateMiSTerData();
 void getCurrentCore();
 void getCurrentGame();
@@ -3207,9 +3207,12 @@ void connectWithAnimation() {
     Lcd.print("CONNECTED");
 
     Lcd.setTextColor(THEME_CYAN);
-    Lcd.setTextSize(1);
-    Lcd.setCursor(180, 284);
-    Lcd.printf("IP: %s", WiFi.localIP().toString().c_str());
+    Lcd.setTextSize(2);
+    {
+      String ipLine = "IP: " + WiFi.localIP().toString();
+      Lcd.setCursor((480 - (int)ipLine.length() * 12) / 2, 282);
+      Lcd.print(ipLine);
+    }
 
     Serial.printf("Assigned IP: %s\n", WiFi.localIP().toString().c_str());
 
@@ -3218,17 +3221,17 @@ void connectWithAnimation() {
     delay(1000);
     Lcd.fillRect(0, 240, 480, 70, THEME_BLACK);
     Lcd.setTextColor(THEME_YELLOW);
-    Lcd.setTextSize(1);
-    Lcd.setCursor(175, 258);
+    Lcd.setTextSize(2);
+    Lcd.setCursor((480 - 17 * 12) / 2, 256);   // = 138
     Lcd.print("Testing MiSTer...");
 
     // Auto-discover the MiSTer server IP.
     // On success overwrites misterIP; on failure leaves the config.ini value unchanged.
     Serial.println("=== DISCOVERING MiSTer SERVER ===");
-    discoverMister();
+    bool discovered = discoverMister();
 
     Serial.println("=== TESTING MiSTer CONNECTIVITY ===");
-    testMiSTerConnectivity();
+    testMiSTerConnectivity(discovered);
   } else {
     Lcd.setTextColor(THEME_RED);
     Lcd.setTextSize(2);
@@ -3240,7 +3243,27 @@ void connectWithAnimation() {
   delay(2000);
 }
 
-void testMiSTerConnectivity() {
+void testMiSTerConnectivity(bool discovered) {
+  const int CW   = 12;              // ancho de carácter a setTextSize(2), SCALE_FACTOR 1.0
+  const int ROW1 = 244, ROW2 = 268; // dos filas separadas, debajo del radar
+
+  if (strlen(misterIP) == 0) {
+    Serial.println("MiSTer IP unknown: discovery failed and no ip= in config.ini");
+    Lcd.fillRect(0, 214, 480, 96, THEME_BLACK);
+    Lcd.setTextSize(2);
+    Lcd.setTextColor(THEME_RED);
+    const char* a = "MiSTer NOT FOUND";
+    Lcd.setCursor((480 - (int)strlen(a) * CW) / 2, ROW1);
+    Lcd.print(a);
+    Lcd.setTextColor(THEME_YELLOW);
+    const char* b = "Set ip= in config.ini";
+    Lcd.setCursor((480 - (int)strlen(b) * CW) / 2, ROW2);
+    Lcd.print(b);
+    connected = false;
+    delay(2000);
+    return;
+  }
+
   HTTPClient http;
   String url = String("http://") + misterIP + ":8081/status/core";
   Serial.printf("Testing connectivity to: %s\n", url.c_str());
@@ -3248,29 +3271,43 @@ void testMiSTerConnectivity() {
   http.setTimeout(5000);
   int code = http.GET();
 
-  // Clear only BELOW the radar (radar bottom is at y=210), so its lower arc
-  // stays visible. This also wipes the leftover SCAN counter / CONNECTED line.
   Lcd.fillRect(0, 214, 480, 96, THEME_BLACK);
+  Lcd.setTextSize(2);
 
   if (code == 200) {
     Serial.printf("MiSTer responds correctly!\n");
     Lcd.setTextColor(THEME_GREEN);
-    Lcd.setTextSize(1);
-    Lcd.setCursor(198, 248);
-    Lcd.print("MiSTer: ONLINE");
-    Lcd.setCursor(160, 270);
-    Lcd.printf("Server: %s:8081", misterIP);
+    const char* a = "MiSTer: ONLINE";
+    Lcd.setCursor((480 - (int)strlen(a) * CW) / 2, ROW1);
+    Lcd.print(a);
+    Lcd.setTextColor(THEME_CYAN);
+    String b = "Server: " + String(misterIP) + ":8081";
+    Lcd.setCursor((480 - (int)b.length() * CW) / 2, ROW2);
+    Lcd.print(b);
     connected = true;
   } else {
+    connected = false;
     Serial.printf("MiSTer not responding (code: %d)\n", code);
     Lcd.setTextColor(THEME_RED);
-    Lcd.setTextSize(1);
-    Lcd.setCursor(195, 248);
-    Lcd.print("MiSTer: OFFLINE");
-    Lcd.setCursor(165, 270);
-    Lcd.printf("Check: %s:8081", misterIP);
-    connected = false;
+    if (discovered) {
+      const char* a = "MiSTer FOUND, no reply";
+      Lcd.setCursor((480 - (int)strlen(a) * CW) / 2, ROW1);
+      Lcd.print(a);
+      Lcd.setTextColor(THEME_YELLOW);
+      const char* b = "Is the script running?";
+      Lcd.setCursor((480 - (int)strlen(b) * CW) / 2, ROW2);
+      Lcd.print(b);
+    } else {
+      const char* a = "MiSTer: OFFLINE";
+      Lcd.setCursor((480 - (int)strlen(a) * CW) / 2, ROW1);
+      Lcd.print(a);
+      Lcd.setTextColor(THEME_YELLOW);
+      String b = "Check IP: " + String(misterIP);
+      Lcd.setCursor((480 - (int)b.length() * CW) / 2, ROW2);
+      Lcd.print(b);
+    }
   }
+
   http.end();
   delay(2000);
 }
