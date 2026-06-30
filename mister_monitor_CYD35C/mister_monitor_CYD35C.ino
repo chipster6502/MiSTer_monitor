@@ -2021,10 +2021,13 @@ void setup() {
     Serial.println("ScreenScraper auto-download enabled");
     Serial.printf("User: %s\n", SCREENSCRAPER_USER);
   }
-  // Start screenshot HTTP server (only if WiFi connected)
-  if (WiFi.status() == WL_CONNECTED) {
-    setupScreenshotServer();
-  }
+  // Screenshot server intentionally NOT started on the CYD35C: its ST7796 panel
+  // is write-only over SPI — framebuffer readback (RAMRD) returns 0x0000, so any
+  // capture comes out all black. 
+  // Re-enable only on a panel that supports readback.
+  // if (WiFi.status() == WL_CONNECTED) {
+  //   setupScreenshotServer();
+  // }
 }
 
 void loop() {
