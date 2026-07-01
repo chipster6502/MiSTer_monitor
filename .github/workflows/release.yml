@@ -35,7 +35,7 @@ jobs:
           SS_DEV_ID:   ${{ secrets.SS_DEV_ID }}
           SS_DEV_PASS: ${{ secrets.SS_DEV_PASS }}
         run: |
-          for d in mister_monitor_Tab5 mister_monitor_CYD28R; do
+          for d in mister_monitor_Tab5 mister_monitor_CYD28R mister_monitor_CYD35C mister_monitor_CYD35R; do
             printf '#pragma once\n#define SS_DEV_ID_EMBEDDED   "%s"\n#define SS_DEV_PASS_EMBEDDED "%s"\n' \
               "$SS_DEV_ID" "$SS_DEV_PASS" > "$d/ss_credentials.h"
           done
@@ -54,11 +54,27 @@ jobs:
             --output-dir build/cyd \
             mister_monitor_CYD28R
 
+      - name: Compile CYD35C
+        run: |
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app,FlashSize=4M,PSRAM=disabled" \
+            --output-dir build/cyd35c \
+            mister_monitor_CYD35C
+
+      - name: Compile CYD35R
+        run: |
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app,FlashSize=4M,PSRAM=disabled" \
+            --output-dir build/cyd35r \
+            mister_monitor_CYD35R
+
       - name: Collect binaries
         run: |
           mkdir -p dist
           cp build/tab5/mister_monitor_Tab5.ino.merged.bin dist/mister_monitor_tab5.bin
           cp build/cyd/mister_monitor_CYD28R.ino.merged.bin   dist/mister_monitor_cyd.bin
+          cp build/cyd35c/mister_monitor_CYD35C.ino.merged.bin dist/mister_monitor_cyd35c.bin
+          cp build/cyd35r/mister_monitor_CYD35R.ino.merged.bin dist/mister_monitor_cyd35r.bin
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -99,6 +115,8 @@ jobs:
           VER="${GITHUB_REF_NAME}"
           printf '{ "name": "MiSTer Monitor (CYD)", "version": "%s", "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "mister_monitor_cyd.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-cyd.json
           printf '{ "name": "MiSTer Monitor (Tab5)", "version": "%s", "builds": [ { "chipFamily": "ESP32-P4", "parts": [ { "path": "mister_monitor_tab5.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-tab5.json
+          printf '{ "name": "MiSTer Monitor (CYD 3.5\" capacitive)", "version": "%s", "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "mister_monitor_cyd35c.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-cyd35c.json
+          printf '{ "name": "MiSTer Monitor (CYD 3.5\" resistive)", "version": "%s", "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "mister_monitor_cyd35r.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-cyd35r.json
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
