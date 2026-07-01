@@ -26,8 +26,9 @@ ssid=YOUR_WIFI_SSID
 password=YOUR_WIFI_PASSWORD
 
 [mister]
-ip=                        ; leave blank — the display auto-discovers the
-                           ; MiSTer on the local network at boot (recommended)
+; IP address of the MiSTer. LEAVE BLANK to auto-discover it on the LAN (recommended).
+; Set it only as a fallback if your router blocks UDP broadcast.
+ip=
 
 [screenscraper]
 ss_user=YOUR_SS_USERNAME
@@ -51,7 +52,8 @@ fallback IP manually:
 
 ```ini
 [mister]
-ip=192.168.1.50          ; example only — use your MiSTer's actual IP
+; example only — use your MiSTer's actual IP
+ip=192.168.1.50
 ```
 
 To keep that address stable across reboots, give the MiSTer a fixed IP:
