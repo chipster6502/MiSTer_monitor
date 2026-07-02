@@ -3700,7 +3700,7 @@ void testMiSTerConnectivity(bool discovered) {
 void showReconnectBanner() {
   // Footer-style banner in the image footer band (Y=200..240). Drawn inside the
   // band so the footer restore below fully covers it (no leftover over the image).
-  const char* msg = "MiSTer RECONNECTED";
+  const char* msg = "CONNECTED TO MiSTer";
   int tw = (int)strlen(msg) * 12;            // 12 px/char at size 2
   Lcd.fillRect(0, 200, 320, 40, THEME_GREEN);
   Lcd.setTextSize(2);

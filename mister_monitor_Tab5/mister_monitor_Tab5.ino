@@ -4087,7 +4087,7 @@ void showReconnectBanner() {
   // Footer-style success banner across the bottom band (Y=620..720), which sits
   // BELOW the image area — so it can be restored independently without
   // re-decoding the full-screen image. Holds briefly, then repaints the footer.
-  const char* msg = "MiSTer RECONNECTED";
+  const char* msg = "CONNECTED TO MiSTer";
   int tw = (int)strlen(msg) * 18;                 // 18 px/char at size 3
   M5.Display.fillRect(0, 620, 1280, 100, THEME_GREEN);
   M5.Display.setTextSize(3);
