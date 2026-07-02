@@ -1795,6 +1795,7 @@ void handleTouch() {
           scanInProgress  = false;
           lastButtonPress = millis();
           showGameImageScreen(currentCore, currentGame);
+          showingCoreImage   = true;
           coreImageStartTime = millis();
           return;   // switched to the image screen; skip the HUD-redraw tail
         }
@@ -2379,6 +2380,8 @@ void loop() {
   // Navigation with debounce
   handleTouch();
   
+  if (showingCoreImage) return;
+
   static unsigned long lastStateLog = 0;
   if (millis() - lastStateLog > 30000) {
     Serial.printf("STATE: currentGame='%s', crcRecurrentActive=%s, downloadInProgress=%s\n", 
