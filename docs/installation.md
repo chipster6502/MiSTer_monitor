@@ -68,8 +68,12 @@ card (`/media/fat/`), so the Downloader stops tracking and updating it.
 
 ### Alternative: manual install
 
-If you prefer not to use the MiSTer Downloader, you can install everything
-by hand.
+Only needed if you prefer not to use the MiSTer Downloader. Most users should
+use the Downloader method above, which also keeps the server updated
+automatically.
+
+<details>
+<summary><strong>Show manual install steps</strong></summary>
 
 1. Copy `MiSTer/Scripts/.config/mister_monitor/mister_status_server.py` to
    `/media/fat/Scripts/.config/mister_monitor/` on your MiSTer (create the
@@ -91,6 +95,8 @@ log_file_entry=1
 ```
 This is required for the Python server to detect which core and game are
 currently loaded.
+
+</details>
 
 ## Display side
 
