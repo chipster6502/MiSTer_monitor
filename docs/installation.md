@@ -1,11 +1,26 @@
 # Installation
 
 This guide walks through installing the MiSTer Monitor **server** on your
-MiSTer, the **firmware** on your display target (M5Stack Tab5 or CYD
-ESP32-2432S028R), and creating the free ScreenScraper account used for
-artwork retrieval.
+MiSTer, the **firmware** on your display target (M5Stack Tab5 or any of the
+Cheap Yellow Display variants), and creating the free ScreenScraper account
+used for artwork retrieval.
 
 The display firmware can be installed two ways: the **web flasher** (easiest) or **compiling from source** with the Arduino IDE.
+
+## Contents
+
+- [MiSTer side](#mister-side)
+  - [Recommended: MiSTer Downloader database](#recommended-mister-downloader-database)
+  - [Alternative: manual install](#alternative-manual-install)
+- [Display firmware — quick install (web flasher)](#display-firmware--quick-install-web-flasher)
+- [Tab5 side](#tab5-side)
+  - [Installing M5Stack board support in Arduino IDE](#installing-m5stack-board-support-in-arduino-ide)
+  - [Uploading the sketch](#uploading-the-sketch)
+- [CYD side](#cyd-side)
+  - [Installing ESP32 board support in Arduino IDE](#installing-esp32-board-support-in-arduino-ide)
+  - [Uploading the sketch](#uploading-the-sketch-1)
+- [Creating a ScreenScraper account](#creating-a-screenscraper-account)
+  - [Advanced: using your own developer account](#advanced-using-your-own-developer-account)
 
 ## MiSTer side
 
@@ -93,10 +108,11 @@ The fastest way to install the firmware. No Arduino IDE, no compiling.
 2. Connect the display to the computer with a USB cable.
 3. Open the flasher page:
    [https://chipster6502.github.io/MiSTer_monitor/flasher/](https://chipster6502.github.io/MiSTer_monitor/flasher/)
-4. Click the **Connect** button for your board (CYD or Tab5), select the
-   serial port in the browser dialog, and let it flash. It installs the
-   latest released firmware, with the ScreenScraper credentials already
-   built in.
+4. Click the **Connect** button for your display, select the serial port in
+   the browser dialog, and let it flash. The page lists every supported board
+   and explains how to tell the CYD variants apart (2.8" 1-USB vs 2-USB, and
+   3.5" capacitive vs resistive). It installs the latest released firmware,
+   with the ScreenScraper credentials already built in.
 5. Prepare the display's microSD card with `config.ini` and the asset images
    (see [`configuration.md`](configuration.md)), then insert it and power on.
 
@@ -137,10 +153,14 @@ at boot from `config.ini` on the microSD card (see
 2. Install required libraries via **Tools → Manage Libraries…**:
    - M5Unified
    - JPEGDEC
-   
+
 3. Select the M5Stack Tab5 board and upload.
 
-## CYD ESP32-2432S028R side
+## CYD side
+
+All Cheap Yellow Display variants share the same Espressif ESP32 board
+package and the same Tools settings — they differ only in which sketch folder
+you open (one per panel and touch combination).
 
 ### Installing ESP32 board support in Arduino IDE
 
@@ -165,9 +185,23 @@ The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
 
 ### Uploading the sketch
 
-1. Open `mister_monitor_CYD/mister_monitor_CYD.ino` in Arduino IDE.
+1. Open the sketch folder for your board variant in Arduino IDE:
+
+   | Board | Sketch folder |
+   |---|---|
+   | CYD 2.8" 1-USB (ESP32-2432S028R, ILI9341) | `mister_monitor_CYD28R/mister_monitor_CYD28R.ino` |
+   | CYD 2.8" 2-USB (ESP32-2432S028, ST7789) | `mister_monitor_CYD28R_2USB/mister_monitor_CYD28R_2USB.ino` |
+   | CYD 3.5" capacitive (ESP32-3248S035C, GT911) | `mister_monitor_CYD35C/mister_monitor_CYD35C.ino` |
+   | CYD 3.5" resistive (ESP32-3248S035R, XPT2046) | `mister_monitor_CYD35R/mister_monitor_CYD35R.ino` |
+
+   The 2.8" variants are told apart by USB-port count (1 = ILI9341, 2 =
+   ST7789). The 3.5" variants share the same panel and PCB; if touch does not
+   respond after flashing one, flash the other. Note that screenshot capture
+   over HTTP is **not** available on the 3.5" (ST7796) boards, whose panel has
+   no SPI readback.
 2. Install required libraries via **Tools → Manage Libraries…**:
    - LovyanGFX
+   - XPT2046_Touchscreen
    - JPEGDEC
 3. Copy `config.ini` to the root of the CYD's microSD card and fill in
    your values (see [`configuration.md`](configuration.md)).
