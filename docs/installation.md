@@ -5,20 +5,14 @@ MiSTer, the **firmware** on your display target (M5Stack Tab5 or any of the
 Cheap Yellow Display variants), and creating the free ScreenScraper account
 used for artwork retrieval.
 
-The display firmware can be installed two ways: the **web flasher** (easiest) or **compiling from source** with the Arduino IDE.
-
 ## Contents
 
 - [MiSTer side](#mister-side)
   - [Recommended: MiSTer Downloader database](#recommended-mister-downloader-database)
   - [Alternative: manual install](#alternative-manual-install)
-- [Display firmware — quick install (web flasher)](#display-firmware--quick-install-web-flasher)
-- [Tab5 side](#tab5-side)
-  - [Installing M5Stack board support in Arduino IDE](#installing-m5stack-board-support-in-arduino-ide)
-  - [Uploading the sketch](#uploading-the-sketch)
-- [CYD side](#cyd-side)
-  - [Installing ESP32 board support in Arduino IDE](#installing-esp32-board-support-in-arduino-ide)
-  - [Uploading the sketch](#uploading-the-sketch-1)
+- [Display side](#display-side)
+  - [Recommended: Quick install (web flasher)](#recommended-quick-install-web-flasher)
+  - [Alternative: Building from source (advanced)](#alternative-building-from-source-advanced)
 - [Creating a ScreenScraper account](#creating-a-screenscraper-account)
   - [Advanced: using your own developer account](#advanced-using-your-own-developer-account)
 
@@ -98,7 +92,12 @@ log_file_entry=1
 This is required for the Python server to detect which core and game are
 currently loaded.
 
-## Display firmware — quick install (web flasher)
+## Display side
+
+The display firmware can be installed two ways: the **web flasher** (easiest,
+recommended) or **building from source** with the Arduino IDE.
+
+### Recommended: Quick install (web flasher)
 
 The fastest way to install the firmware. No Arduino IDE, no compiling.
 
@@ -116,14 +115,18 @@ The fastest way to install the firmware. No Arduino IDE, no compiling.
 5. Prepare the display's microSD card with `config.ini` and the asset images
    (see [`configuration.md`](configuration.md)), then insert it and power on.
 
----
+### Alternative: Building from source (advanced)
 
-The sections below describe building and uploading the firmware from source
-with the Arduino IDE — only needed if you are **not** using the web flasher.
+Only needed if you can't use the web flasher — a browser other than Chrome or
+Edge on desktop, Linux, or you want to modify the firmware yourself. Most
+users should use the web flasher above.
 
-## Tab5 side
+<details>
+<summary><strong>Show Arduino IDE build instructions (Tab5 and CYD)</strong></summary>
 
-### Installing M5Stack board support in Arduino IDE
+#### Tab5 side
+
+##### Installing M5Stack board support in Arduino IDE
 
 Before opening the sketch you need to register the M5Stack board package
 with Arduino IDE so the Tab5 target appears in the board selector.
@@ -133,7 +136,7 @@ with Arduino IDE so the Tab5 target appears in the board selector.
    (click the icon to the right of the field if you need to add it to an
    existing list):
    ```
-   https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json 
+   https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json
    ```
 3. Click **OK** to close Preferences.
 4. Go to **Tools → Board → Boards Manager…**
@@ -143,7 +146,7 @@ with Arduino IDE so the Tab5 target appears in the board selector.
 7. Connect the Tab5 via USB-C, select the correct port under **Tools → Port**,
    and you are ready to upload.
 
-### Uploading the sketch
+##### Uploading the sketch
 
 No credentials need to be hardcoded in the source. All configuration is read
 at boot from `config.ini` on the microSD card (see
@@ -156,13 +159,13 @@ at boot from `config.ini` on the microSD card (see
 
 3. Select the M5Stack Tab5 board and upload.
 
-## CYD side
+#### CYD side
 
 All Cheap Yellow Display variants share the same Espressif ESP32 board
 package and the same Tools settings — they differ only in which sketch folder
 you open (one per panel and touch combination).
 
-### Installing ESP32 board support in Arduino IDE
+##### Installing ESP32 board support in Arduino IDE
 
 The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
 
@@ -183,7 +186,7 @@ The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
    - PSRAM: `Disabled`
    - Upload Speed: `921600`
 
-### Uploading the sketch
+##### Uploading the sketch
 
 1. Open the sketch folder for your board variant in Arduino IDE:
 
@@ -209,6 +212,8 @@ The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
    [Asset images](configuration.md#asset-images) section in
    `configuration.md`).
 5. Select the ESP32 Dev Module board and upload.
+
+</details>
 
 ## Creating a ScreenScraper account
 
