@@ -2160,10 +2160,10 @@ void loop() {
     
   // === Default: exit to monitor ===
     Serial.println("Touch detected - exiting core image to interface");
-    Lcd.fillRect(0, 100, 320, 40, THEME_CYAN);
+    Lcd.fillRect(0, 0, 320, 40, THEME_CYAN);
     Lcd.setTextSize(2);
     Lcd.setTextColor(THEME_BLACK);
-    Lcd.setCursor(100, 112);
+    Lcd.setCursor(100, 12);
     Lcd.print("LOADING...");
     showingCoreImage         = false;
     backgroundLoaded         = false;
