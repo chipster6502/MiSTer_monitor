@@ -3,6 +3,20 @@
 A status monitor for the MiSTer FPGA platform. Displays the currently loaded
 game artwork, system information, storage status, and network details in real time.
 
+## Contents
+
+- [Demo videos](#demo-videos)
+- [Features](#features)
+- [Supported Hardware](#supported-hardware)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [3D-printable stand](#3d-printable-stand)
+- [Architecture](#architecture)
+- [M5Stack Tab5 screenshots](#m5stack-tab5-screenshots-1280x720)
+- [Cheap Yellow Display screenshots](#28-cheap-yellow-display-cyd-screenshots-320x240)
+- [To Do](#to-do)
+- [License](#license)
+
 ## Demo videos
 
 [![Boot, game loading and artwork display](https://img.youtube.com/vi/2N9_1_c8_N4/maxresdefault.jpg)](https://youtu.be/2N9_1_c8_N4)
@@ -21,16 +35,28 @@ console and computer games via the MiSTer Remote web application.*
 - Reliable game load detection using nanosecond-precision filesystem timestamps when loading cores and games through the on-screen menu (OSD)
 - Automatic Arcade subsystem detection
 - Manual SCAN game button on the image screen for cases where the CRC could not be detected automatically
+- Automatic MiSTer discovery on the network via UDP broadcast (no static IP needed), with automatic reconnection if the MiSTer is not ready at boot
 - System monitor (CPU, memory, uptime, storage, network, and connected USB devices panels)
 - Touch-based navigation
-- Screenshot capture of the display, downloadable over the local network via HTTP
+- Screenshot capture of the display, downloadable over the local network via HTTP (Tab5 and 2.8" CYD boards; not available on 3.5"/ST7796 panels)
 
 ## Supported Hardware
 
-| Target | Status |
-|---|---|
-| [M5Stack Tab5 (ESP32-P4)](https://www.digikey.com/en/products/detail/m5stack-technology-co-ltd/C145/26740595) 5" 1280x720 Touch Display | Stable — reference implementation |
-| [Cheap Yellow Display (ESP32-2432S028R)](https://a.aliexpress.com/_EJ4r0Hg) 2.4" 320x240 Display - Resistive Touch | Stable |
+| Target | Display / Touch | Status |
+|---|---|---|
+| [M5Stack Tab5 (ESP32-P4)](https://www.digikey.com/en/products/detail/m5stack-technology-co-ltd/C145/26740595) | 5" 1280×720 IPS · capacitive | Stable — reference implementation |
+| [Cheap Yellow Display 2.8" — 1-USB (ESP32-2432S028)](https://a.aliexpress.com/_EJ4r0Hg) | 320×240 ILI9341 · resistive | Stable |
+| [Cheap Yellow Display 2.8" — 2-USB (ESP32-2432S028)](https://a.aliexpress.com/_EJ4r0Hg) | 320×240 ST7789 · resistive | Stable |
+| [Cheap Yellow Display 3.5" capacitive (ESP32-3248S035)](https://a.aliexpress.com/_EJ4r0Hg) | 480×320 ST7796 · GT911 capacitive | Stable |
+| [Cheap Yellow Display 3.5" resistive (ESP32-3248S035)](https://a.aliexpress.com/_EJ4r0Hg) | 480×320 ST7796 · XPT2046 resistive | Stable |
+
+The two 2.8" variants look identical but use different panel controllers —
+count the USB ports to tell them apart (**1 port** → ILI9341, **2 ports** →
+ST7789). The two 3.5" variants share the same panel and PCB and differ only in
+the touch controller. The
+[web flasher](https://chipster6502.github.io/MiSTer_monitor/flasher/) walks you
+through picking the right build. Screenshot capture over HTTP is available on
+all boards **except the 3.5" (ST7796)**, whose panel has no SPI readback.
 
 See `docs/PORTING.md` for porting guidelines.
 
@@ -63,8 +89,8 @@ procedure, the web flasher and ScreenScraper account setup.
 
 ## 3D-printable stand
 
-A printable stand for the M5Stack Tab5 is included in the
-[`3d-printing/`](3d-printing/) folder. GitHub renders STL files in the
+A printable stand for the M5Stack Tab5 and the 3.5" Cheap Yellow Display are
+included in the [`3d-printing/`](3d-printing/) folder. GitHub renders STL files in the
 browser, so you can preview the model before downloading.
 
 You can find the model files for the (truly) 2,8" Cheap Yellow Display (horizontal stand) [here](https://www.printables.com/model/708127-cheap-yellow-display-cyd-horizontal-stand-m36-self/files)
@@ -72,6 +98,10 @@ You can find the model files for the (truly) 2,8" Cheap Yellow Display (horizont
 The Tab5 STL file is ["M5Stack Tab5 Simple Stand"](https://makerworld.com/en/models/1403228-m5stack-tab5-simple-stand)
 by [hkawakami](https://makerworld.com/es/@hkawakami), licensed under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
+The 3.5" CYD stand STL is ["Stand for Cheap Yellow Display 3.5 inch"](https://www.printables.com/model/1050896-stand-for-cheap-yellow-display-35-inch)
+by [uli_2035](https://www.printables.com/@uli_2035_28350), licensed under
+[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
 
 ## Architecture
 
@@ -86,11 +116,13 @@ The system has two components that work together:
   scripts are needed.
 - **display sketch** — Discovers the MiSTer automatically on the local
   network via UDP broadcast at boot, polls the server every few seconds,
-  downloads artwork from ScreenScraper, and renders the HUD interface. Also runs
-  its own HTTP server on port 8080 for screenshot capture, accessible
-  from any device on the local network at `http://<Display-IP>:8080`.
+  downloads artwork from ScreenScraper, and renders the HUD interface. On
+  the Tab5 and 2.8" CYD boards it also runs its own HTTP server on port
+  8080 for screenshot capture, accessible from any device on the local
+  network at `http://<Display-IP>:8080` (the 3.5"/ST7796 panels have no
+  SPI readback, so capture is disabled there).
 
-## M5STack Tab5 Screenshots (1280x720)
+## M5Stack Tab5 Screenshots (1280x720)
 
 ![Screensaver](images/Tab5/screenshot01_menu.png)
 ![System Monitor - CPU and Memory](images/Tab5/screenshot02_cpu_memory_status.png)
@@ -119,6 +151,7 @@ The system has two components that work together:
 ### Hardware support
 
 - ~**Cheap Yellow Display (CYD)** — Port to the widely available ESP32-2432S028R family.~
+- **Guition 10.1" ESP32-P4 display** — Port to the Guition JC8012P4A1 family (ESP32-P4 + C6, 1280×800 MIPI-DSI capacitive touchscreen).
 - **5" CYD variant** - Port to the ESP32-S3-8048S050C-I family (800x480 touchscreen).
 - **M5Stack Core Basic support** — Port to the original Core Basic (ESP32, 320×240, physical buttons).
 - **M5Stack Core S3 support** — Port to the Core S3 (ESP32-S3, 320×240 touchscreen).
