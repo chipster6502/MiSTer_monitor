@@ -10,10 +10,34 @@
   <h1>MiSTer Monitor — Web Flasher</h1>
   <p>Use <strong>Chrome or Edge on desktop</strong> and connect the display via USB.</p>
 
-  <h2>Cheap Yellow Display (ESP32)</h2>
+  <h2>Cheap Yellow Display 2.8" (ESP32-2432S028, 320x240)</h2>
+  <p><strong>Which variant do I have?</strong> Count the USB ports on the board:
+     <strong>1 port</strong> (Micro-USB only) → ILI9341,
+     <strong>2 ports</strong> (USB-C + Micro-USB) → ST7789.</p>
+
+  <h3>1-USB — ILI9341</h3>
   <esp-web-install-button manifest="./manifest-cyd.json"></esp-web-install-button>
 
-  <h2>M5Stack Tab5 (ESP32-P4)</h2>
+  <h3>2-USB — ST7789</h3>
+  <esp-web-install-button manifest="./manifest-cyd2usb.json"></esp-web-install-button>
+
+  <h2>Cheap Yellow Display 3.5" (ESP32-3248S035, 480x320)</h2>
+  <p><strong>Capacitive or resistive?</strong> You usually can't tell from the
+     board — both 3.5" variants use the same display and PCB, and the touch
+     chips present don't reliably indicate the variant. It doesn't matter if you
+     pick wrong: the picture is identical either way, and the only symptom of the
+     wrong build is an unresponsive touchscreen —
+     <strong>if touch doesn't work, just flash the other one</strong>. (Hint:
+     capacitive reacts to a light finger touch; resistive needs a firm press or a
+     stylus.)</p>
+
+  <h3>Capacitive</h3>
+  <esp-web-install-button manifest="./manifest-cyd35c.json"></esp-web-install-button>
+
+  <h3>Resistive</h3>
+  <esp-web-install-button manifest="./manifest-cyd35r.json"></esp-web-install-button>
+
+  <h2>M5Stack Tab5 (ESP32-P4, 1280x720)</h2>
   <esp-web-install-button manifest="./manifest-tab5.json"></esp-web-install-button>
 </body>
 </html>
