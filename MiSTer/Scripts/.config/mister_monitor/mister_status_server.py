@@ -181,6 +181,13 @@ CORE_NAME_MAPPING = {
     'NEOGEO': 'Neo-Geo',
     'NeoGeo-CD': 'Neo-Geo CD',
     'NeoGeoPocket': 'Neo-Geo Pocket',
+    'cdi':          'Phillips CD-i',
+    'colecovision': 'Colecovision',
+    'jaguar':       'Atari Jaguar',
+    'neogeocd':     'Neo-Geo CD',
+    'tgfx16cd':     'TurboGrafx-16/PC Engine CD-Rom',
+    'x68k':         'Sharp X68000',
+    'Neo Geo MVS/AES': 'Neo-Geo',
     'Casio_PV-1000': 'Casio PV-1000',
     'VC4000': 'Interton VC 4000',
     'PocketChallenge': 'Pocket Challenge V2',
@@ -443,6 +450,7 @@ def _sam_get_current():
             sam_core      = (CORE_NAME_MAPPING.get(sam_core_raw) or
                              CORE_NAME_MAPPING_LOWER.get(sam_core_raw.lower()) or
                              sam_core_raw)
+            sam_core      = CORE_NAME_MAPPING.get(sam_core, sam_core)
             print(f"✅ SAM detected — core='{sam_core}' game='{sam_game}'")
             return True, sam_core_raw, sam_core, sam_game, sam_path
 
@@ -555,6 +563,7 @@ def _update_state():
     friendly_name = (CORE_NAME_MAPPING.get(corename) or
                     CORE_NAME_MAPPING_LOWER.get(corename.lower()) or
                     corename)
+    friendly_name = CORE_NAME_MAPPING.get(friendly_name, friendly_name)
 
     # --- Arcade detection ---
     ARCADE_FRESHNESS = 30  # seconds
