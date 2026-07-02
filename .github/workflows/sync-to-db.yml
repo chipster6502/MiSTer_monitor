@@ -1,0 +1,45 @@
+name: Sync MiSTer files to DB repo
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read        # only reads this repo; the DB push uses the PAT below
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo (source of the MiSTer-side files)
+        uses: actions/checkout@v4
+        with:
+          path: source
+
+      - name: Checkout the DB repo (main = tracked source files)
+        uses: actions/checkout@v4
+        with:
+          repository: chipster6502/MiSTer_monitor_DB
+          ref: main
+          token: ${{ secrets.DB_PUSH_TOKEN }}
+          path: db
+
+      - name: Mirror MiSTer/Scripts/ into the DB repo's Scripts/
+        run: |
+          rsync -a --delete \
+            source/MiSTer/Scripts/ \
+            db/Scripts/
+
+      - name: Commit and push to the DB repo if anything changed
+        working-directory: db
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Scripts/
+          if git diff --cached --quiet; then
+            echo "DB repo already matches — nothing to sync."
+            exit 0
+          fi
+          git commit -m "sync: MiSTer server files from ${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}"
+          git push origin HEAD:main
