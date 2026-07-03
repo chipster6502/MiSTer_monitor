@@ -89,31 +89,28 @@ jobs:
         with:
           files: dist/*.bin
           body: |
-            ## What's new in v2.3.0
+            ## What's new in v2.5.0
 
-            ### No static IP required
-            The display now finds the MiSTer automatically at boot via UDP broadcast. No need to configure a static IP on the MiSTer or set one in `config.ini`. A manually configured IP is still supported as a fallback for networks that block UDP broadcast.
+            ### New display support
+            - **CYD 2.8" dual-USB (ST7789)** — the 2-USB variant of the ESP32-2432S028.
+            - **CYD 3.5" capacitive (ESP32-3248S035C)** — 480×320, GT911 touch.
+            - **CYD 3.5" resistive (ESP32-3248S035R)** — 480×320, XPT2046 touch.
 
-            ### No ScreenScraper developer account required
-            A free [ScreenScraper](https://www.screenscraper.fr) member account is all you need - no developer registration or manual approval. The app provides its own developer credentials. Users with their own developer account can still override via `config.ini`.
+            The web flasher now lists every board and helps you pick the right build.
 
-            ### Web flasher
-            Firmware can now be flashed directly from the browser - no Arduino IDE needed:
-            **[Open web flasher](https://chipster6502.github.io/MiSTer_monitor/flasher/)**
-            Requires Chrome or Edge on desktop. M5Stack Tab5 users: if the web flasher does not detect your device, use the `.bin` file below with [M5Burner](https://docs.m5stack.com/en/download) or `esptool`.
+            ### New features
+            - **Actionable connectivity states** — the connection screen now tells you exactly what's wrong: MiSTer not found, found but not responding, or a configured IP that doesn't answer.
+            - **Automatic offline recovery** — if the MiSTer isn't ready when the display boots, the display keeps looking and reconnects on its own, with an on-screen banner.
 
-            ### SD card content included
-            The repository now includes ready-to-use SD card layouts under `SD_card_content/`.
+            ### Fixes
+            - **Games from USB** — games loaded from USB storage are now detected and their artwork downloaded.
+            - **CHD games** — games in `.chd` format now get their artwork downloaded, including large files that were previously skipped.
+            - **config.ini fallback IP** is now correctly applied when UDP auto-discovery fails.
+            - **Better game detection** — all cores launched via SAM now map correctly to ScreenScraper.
+            - Assorted display fixes (SCAN counter redraw, loading overlay position, artwork/footer repaint).
 
-            ---
-
-            ## Installation
-
-            **MiSTer side** — install or update via [MiSTer Downloader](https://github.com/chipster6502/MiSTer_monitor_DB) (recommended).
-
-            **Display side** — flash the firmware for your board using the [web flasher](https://chipster6502.github.io/MiSTer_monitor/flasher/), or download the `.bin` below and flash with M5Burner / `esptool`.
-
-            After flashing, Copy the contents of your target folder to the root of the display's microSD card and edit `config.ini` with your WiFi and ScreenScraper credentials. See [`docs/configuration.md`](https://github.com/chipster6502/MiSTer_monitor/blob/main/docs/configuration.md) for the full reference.
+            ### Notes
+            - Screenshot capture over HTTP is available on the Tab5 and 2.8" CYD boards; the 3.5" (ST7796) panels don't support it (no SPI readback).
 
       - name: Build flasher site
         run: |
