@@ -1,5 +1,12 @@
 # Configuration
 
+## Contents
+
+- [SD Card content](#sd-card-content)
+- [config.ini](#configini)
+- [MiSTer IP address](#mister-ip-address)
+- [Artwork download order](#artwork-download-order)
+
 ## SD Card content
 
 The repository includes a ready-to-use microSD card layout under
@@ -107,4 +114,3 @@ arcade_media_order=fanart,marquee,wheel-carbon,wheel-steel,wheel,box3d,box2d,scr
 
 game_media_order=box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot
 ```
-
