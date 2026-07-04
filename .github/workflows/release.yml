@@ -121,8 +121,8 @@ jobs:
           printf '{ "name": "MiSTer Monitor (CYD)", "version": "%s", "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "mister_monitor_cyd.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-cyd.json
           printf '{ "name": "MiSTer Monitor (CYD 2-USB / ST7789)", "version": "%s", "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "mister_monitor_cyd2usb.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-cyd2usb.json
           printf '{ "name": "MiSTer Monitor (Tab5)", "version": "%s", "builds": [ { "chipFamily": "ESP32-P4", "parts": [ { "path": "mister_monitor_tab5.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-tab5.json
-          printf '{ "name": "MiSTer Monitor (CYD 3.5\" capacitive)", "version": "%s", "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "mister_monitor_cyd35c.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-cyd35c.json
-          printf '{ "name": "MiSTer Monitor (CYD 3.5\" resistive)", "version": "%s", "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "mister_monitor_cyd35r.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-cyd35r.json
+          printf '{ "name": "MiSTer Monitor (CYD 3.5-inch capacitive)", "version": "%s", "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "mister_monitor_cyd35c.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-cyd35c.json
+          printf '{ "name": "MiSTer Monitor (CYD 3.5-inch resistive)", "version": "%s", "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "mister_monitor_cyd35r.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-cyd35r.json
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
