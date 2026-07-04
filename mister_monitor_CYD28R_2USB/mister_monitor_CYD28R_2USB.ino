@@ -57,6 +57,10 @@ String _ss_pass_str;
 String _boxart_region_str       = "wor";
 String _core_images_path_str    = "/cores";
 String _default_core_image_str  = "/cores/menu.jpg";
+// Last HTTP status code returned by any ScreenScraper endpoint. Written by
+// every ScreenScraper HTTP call and read afterwards to surface the failure
+// reason on screen once a download attempt has given up.
+int g_lastSSHttpCode = 0;
 
 // Media type search order — updated from appConfig in setup()
 // Defaults match AppConfig struct defaults (overridden by config.ini).
@@ -1225,10 +1229,11 @@ String urlEncode(String str) {
     } else if (c == ' ') {
       encoded += "%20";
     } else {
-      // Convertir a hex
-      encoded += '%';
-      if (c < 16) encoded += '0';
-      encoded += String(c, HEX);
+      // Percent-encode as an unsigned byte. Casting avoids sign extension on
+      // bytes above 0x7F, which would otherwise emit a broken escape sequence.
+      char hexBuf[4];
+      snprintf(hexBuf, sizeof(hexBuf), "%%%02X", (uint8_t)c);
+      encoded += hexBuf;
     }
   }
   
@@ -1305,6 +1310,80 @@ void handleScreenScraperError(int httpCode, String response) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Credential-safe logging helpers.
+//
+// ScreenScraper URLs carry credentials as plain-text query parameters, so any
+// log line that prints a full URL must be routed through
+// redactScreenScraperUrl() first. The shared developer password is ALWAYS
+// masked, even in debug mode, because it ships embedded in every public
+// binary. The user's own password is masked by default and only revealed when
+// the user enables debug=true in config.ini.
+// ---------------------------------------------------------------------------
+void maskUrlParameter(String &url, const char *param) {
+  int keyPos = url.indexOf(param);
+  if (keyPos < 0) return;
+  int valueStart = keyPos + strlen(param);
+  int valueEnd = url.indexOf('&', valueStart);
+  if (valueEnd < 0) valueEnd = url.length();
+  url = url.substring(0, valueStart) + "***" + url.substring(valueEnd);
+}
+
+String redactScreenScraperUrl(const String &url) {
+  String out = url;
+  maskUrlParameter(out, "devpassword=");
+  if (!ENABLE_DEBUG_MODE) {
+    maskUrlParameter(out, "sspassword=");
+  }
+  return out;
+}
+
+// Logs structural properties of a credential (length, boundary characters,
+// whitespace, URL-breaking characters) without revealing its value. This is
+// enough to diagnose the common config.ini mistakes: an empty value, trailing
+// spaces, an inline comment swallowed into the value, or characters that
+// break the query string.
+void logCredentialShape(const char *label, const String &value) {
+  if (value.length() == 0) {
+    Serial.printf("[SS] %s: EMPTY\n", label);
+    return;
+  }
+  bool hasWhitespace = false;
+  bool hasUrlUnsafe = false;
+  for (unsigned int i = 0; i < value.length(); i++) {
+    char c = value.charAt(i);
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\n') hasWhitespace = true;
+    if (c == '&' || c == '+' || c == '#' || c == '%' || c == '=' ||
+        c == '?' || c == '/' || c == ';') hasUrlUnsafe = true;
+  }
+  Serial.printf("[SS] %s: len=%u first='%c' last='%c' whitespace=%s url-unsafe=%s\n",
+                label, value.length(),
+                value.charAt(0), value.charAt(value.length() - 1),
+                hasWhitespace ? "YES" : "NO", hasUrlUnsafe ? "YES" : "NO");
+}
+
+// Maps a ScreenScraper HTTP status code to a short on-screen message.
+// Semantics match handleScreenScraperError(). The numeric code is included
+// so a user can report it verbatim in a support request.
+String ssHudMessage(int httpCode) {
+  const char *label;
+  switch (httpCode) {
+    case 400: label = "SS BAD REQUEST";     break;
+    case 401: label = "SS SERVER BUSY";     break;
+    case 403: label = "SS LOGIN FAILED";    break;
+    case 404: label = "NOT IN SS DATABASE"; break;
+    case 423: label = "SS API CLOSED";      break;
+    case 426: label = "SS UPDATE REQUIRED"; break;
+    case 429: label = "SS RATE LIMIT";      break;
+    case 430: label = "SS DAILY QUOTA";     break;
+    case 431: label = "SS ROM QUOTA";       break;
+    case -1:  label = "SS UNREACHABLE";     break;
+    case -11: label = "SS TIMEOUT";         break;
+    default:  label = (httpCode <= 0) ? "SS CONNECTION ERROR" : "SS ERROR"; break;
+  }
+  return String(label) + " (" + String(httpCode) + ")";
+}
+
 String getCoreSavePath(String searchCore) {
   String savePath;
   
@@ -1354,6 +1433,7 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
   }
   
   downloadInProgress = true;
+  g_lastSSHttpCode = 0;
   bool success = false;
   
   Serial.printf("\n=== ENHANCED CORE IMAGE DOWNLOAD ===\n");
@@ -1417,8 +1497,8 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
   baseUrl += "?devid=" + String(SCREENSCRAPER_DEV_USER);
   baseUrl += "&devpassword=" + String(SCREENSCRAPER_DEV_PASS);
   baseUrl += "&softname=" + String(SCREENSCRAPER_SOFTWARE);
-  baseUrl += "&ssid=" + String(SCREENSCRAPER_USER);
-  baseUrl += "&sspassword=" + String(SCREENSCRAPER_PASS);
+  baseUrl += "&ssid=" + urlEncode(String(SCREENSCRAPER_USER));
+  baseUrl += "&sspassword=" + urlEncode(String(SCREENSCRAPER_PASS));
   baseUrl += "&systemeid=" + systemId;
   
   // Empty hash parameters (required by API)
@@ -1426,7 +1506,7 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
   baseUrl += "&md5=";
   baseUrl += "&sha1=";
   
-  Serial.printf("Base URL: %s\n", baseUrl.c_str());
+  Serial.printf("Base URL: %s\n", redactScreenScraperUrl(baseUrl).c_str());
   
   // Determine save path for core image
   String searchCore = coreName;
@@ -1473,6 +1553,8 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
     }
   } else {
     Serial.println("Core image download failed for all media types");
+    Serial.printf("Last ScreenScraper HTTP status: %d (%s)\n",
+                  g_lastSSHttpCode, ssHudMessage(g_lastSSHttpCode).c_str());
     Serial.printf("   Core: %s\n", coreName.c_str());
     Serial.printf("   System ID: %s\n", systemId.c_str());
     Serial.println("   Possible reasons:");
@@ -5274,7 +5356,7 @@ bool downloadImageFromScreenScraper(String imageUrl, String savePath) {
   resizedUrl += "&maxheight=" + String(IMAGE_AREA_HEIGHT);  // Use 645 instead of 720
   resizedUrl += "&outputformat=jpg";
   
-  Serial.printf("Downloading resized image: %s\n", resizedUrl.c_str());
+  Serial.printf("Downloading resized image: %s\n", redactScreenScraperUrl(resizedUrl).c_str());
   
   HTTPClient http;
   http.begin(resizedUrl);
@@ -5282,9 +5364,12 @@ bool downloadImageFromScreenScraper(String imageUrl, String savePath) {
   http.addHeader("User-Agent", SCREENSCRAPER_SOFTWARE);
   
   int httpCode = http.GET();
-  
+  g_lastSSHttpCode = httpCode;
+
   if (httpCode != 200) {
     Serial.printf("Download failed: %d\n", httpCode);
+    showDownloadProgress(50, ssHudMessage(httpCode));
+    delay(2000);
     http.end();
     return false;
   }
@@ -5644,7 +5729,7 @@ bool isArcadeCore(String coreName) {
 
 // ULTRA OPTIMIZED VERSION - NO LARGE STACK ARRAYS
 bool downloadImageFromMediaJeu(String mediaUrl, String savePath) {
-  Serial.printf("Downloading from mediaJeu.php: %s\n", mediaUrl.c_str());
+  Serial.printf("Downloading from mediaJeu.php: %s\n", redactScreenScraperUrl(mediaUrl).c_str());
   
   // CRITICAL: Check memory first
   int freeHeap = ESP.getFreeHeap();
@@ -5766,7 +5851,7 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
   currentUrl += "&outputformat=jpg&crc=&md5=&sha1=";
   
   Serial.printf("Trying: %s\n", mediaName);
-  Serial.printf("   URL: %s\n", currentUrl.c_str());
+  Serial.printf("   URL: %s\n", redactScreenScraperUrl(currentUrl).c_str());
   
   HTTPClient http;
   http.begin(currentUrl);
@@ -5776,6 +5861,7 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
   
   int httpCode = http.GET();
   Serial.printf("   HTTP Response: %d\n", httpCode);
+  g_lastSSHttpCode = httpCode;
   
   if (httpCode == 200) {
     // METHOD FROM BACKUP: Get complete response first
@@ -6247,7 +6333,7 @@ bool downloadCoreImageStreamingSafe(String baseUrl, String savePath) {
     currentUrl += "&maxheight=" + String(IMAGE_AREA_HEIGHT);  // Use 645 instead of 720
     currentUrl += "&outputformat=jpg";
     
-    Serial.printf("   URL: %s\n", currentUrl.c_str());
+    Serial.printf("   URL: %s\n", redactScreenScraperUrl(currentUrl).c_str());
     
     HTTPClient http;
     http.begin(currentUrl);
@@ -6256,6 +6342,8 @@ bool downloadCoreImageStreamingSafe(String baseUrl, String savePath) {
     http.addHeader("Accept", "image/jpeg,image/png,image/*");
     
     int httpCode = http.GET();
+    g_lastSSHttpCode = httpCode;
+    
     Serial.printf("HTTP Response: %d\n", httpCode);
     
     if (httpCode == 200) {
@@ -6417,7 +6505,7 @@ String buildCorrectMediaJeuUrl(String gameId, String systemId, String mediaType,
   
   // ========== FINAL URL DEBUG ==========
   Serial.printf("FINAL MEDIAJEU URL:\n");
-  Serial.printf("   %s\n", mediaUrl.c_str());
+  Serial.printf("   %s\n", redactScreenScraperUrl(mediaUrl).c_str());
   
   // Extract and highlight the systemeid parameter for verification
   int systemeidPos = mediaUrl.indexOf("systemeid=");
@@ -6533,8 +6621,8 @@ GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
   url += "&devpassword=" + String(SCREENSCRAPER_DEV_PASS);
   url += "&softname=MiSTer-Monitor";
   url += "&output=json";
-  url += "&ssid=" + String(SCREENSCRAPER_USER);
-  url += "&sspassword=" + String(SCREENSCRAPER_PASS);
+  url += "&ssid=" + urlEncode(String(SCREENSCRAPER_USER));
+  url += "&sspassword=" + urlEncode(String(SCREENSCRAPER_PASS));
   url += "&systemeid=" + systemId;
   url += "&romtype=rom";
   url += "&romnom=" + urlEncode(romDetails.filename);
@@ -6543,7 +6631,11 @@ GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
   url += "&md5=" + romDetails.md5;
   url += "&sha1=";
 
-  Serial.printf("JSON Search URL: %s\n", url.c_str());
+  Serial.printf("JSON Search URL: %s\n", redactScreenScraperUrl(url).c_str());
+  logCredentialShape("ss_pass", String(SCREENSCRAPER_PASS));
+  Serial.printf("[SS] devid='%s' devpassword=[%s]\n",
+                String(SCREENSCRAPER_DEV_USER).c_str(),
+                String(SCREENSCRAPER_DEV_PASS).length() > 0 ? "set" : "EMPTY");
 
   HTTPClient http;
   http.begin(url);
@@ -6553,6 +6645,7 @@ GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
 
   int httpCode = http.GET();
   Serial.printf("HTTP Response: %d\n", httpCode);
+  g_lastSSHttpCode = httpCode;
 
   if (httpCode == 200) {
     int contentLength = http.getSize();
@@ -6684,7 +6777,7 @@ GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
           result.boxartUrl = buildCorrectMediaJeuUrl(result.gameId, systemId,
                                                      detectedMediaType, result.systemeId);
           if (result.boxartUrl.length() > 0) {
-            Serial.printf("BUILT MEDIAJEU URL:\n   %s\n", result.boxartUrl.c_str());
+            Serial.printf("BUILT MEDIAJEU URL:\n   %s\n", redactScreenScraperUrl(result.boxartUrl).c_str());
           } else {
             Serial.println("Failed to build mediaJeu URL");
             result.found = false;
@@ -6717,6 +6810,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
   }
   
   downloadInProgress = true;
+  g_lastSSHttpCode = 0;
   bool success = false;
 
   // OPTIONAL: Detect if it is a recurring search
@@ -6871,8 +6965,12 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
   
   if (!success) {
     Serial.println("JSON method failed");
-    showDownloadProgress(0, "Download failed");
-    delay(2000);
+    if (g_lastSSHttpCode != 0 && g_lastSSHttpCode != 200) {
+      showDownloadProgress(0, ssHudMessage(g_lastSSHttpCode));
+    } else {
+      showDownloadProgress(0, "Download failed");
+    }
+    delay(6000);
   }
   
   downloadInProgress = false;
