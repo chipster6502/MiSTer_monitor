@@ -5955,6 +5955,7 @@ bool downloadCoreImageStreamingSafe(String baseUrl, String savePath) {
     http.addHeader("Accept", "image/jpeg,image/png,image/*");
     
     int httpCode = http.GET();
+    g_lastSSHttpCode = httpCode;
     
     Serial.printf("HTTP Response: %d\n", httpCode);
     
