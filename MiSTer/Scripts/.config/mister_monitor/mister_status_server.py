@@ -482,7 +482,7 @@ def _sam_is_current():
 
 _KNOWN_ROM_EXTS = {
     '.zip', '.mra', '.mgl', '.rom', '.bin', '.iso', '.chd',
-    '.nes', '.sfc', '.smd', '.md', '.gba', '.gb', '.gbc',
+    '.nes', '.sfc', '.smd', '.md', '.32x', '.gba', '.gb', '.gbc',
     '.a78', '.a52', '.a26', '.n64', '.z64', '.pce', '.cue',
     '.lnx', '.ngp', '.ngc', '.neo', '.ws', '.wsc', '.sg', '.sms',
     '.gg', '.col', '.vec', '.int', '.psx', '.img',
