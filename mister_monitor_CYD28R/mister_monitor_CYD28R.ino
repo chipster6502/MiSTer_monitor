@@ -5178,7 +5178,7 @@ String getScreenScraperSystemId(String coreName) {
   if (core == "Nintendo 64") return "14";
   if (core == "Nintendo Game Boy" || core == "Game Boy") return "9";
   if (core == "Nintendo Game Boy Color" || core == "Game Boy Color") return "10";
-  if (core == "Nintendo Game Boy Advance" || core == "Game Boy Advance") return "12";
+  if (core == "Nintendo Game Boy Advance" || core == "Game Boy Advance" || core == "Nintendo Game Boy Advance 2P") return "12";
   if (core == "Famicom Disk System" || core == "Family Computer Disk System") return "106";
   if (core == "Nintendo Super Game Boy" || core == "Super Game Boy") return "127";
   if (core == "Nintendo Game & Watch" || core == "Game & Watch") return "52";
@@ -5199,10 +5199,13 @@ String getScreenScraperSystemId(String coreName) {
   // PC Engine / TurboGrafx
   if (core == "TurboGrafx-16/PC Engine" || core == "PC Engine") return "31";
   if (core == "PC Engine CD-Rom" || core == "TurboGrafx-16/PC Engine CD-Rom") return "114";
+  if (core == "PC Engine SuperGrafx" || core == "SuperGrafx") return "105";
   
   // Neo-Geo
   if (core == "Neo-Geo") return "142";
   if (core == "Neo-Geo CD") return "70";
+  if (core == "Neo Geo Pocket" || core == "Neo-Geo Pocket") return "25";
+  if (core == "Neo Geo Pocket Color" || core == "Neo-Geo Pocket Color") return "82";
   
   // Arcade — accept all known aliases that may arrive from server or SAM
   if (core == "Arcade" ||
@@ -5222,8 +5225,8 @@ String getScreenScraperSystemId(String coreName) {
   // Commodore / Amiga
   if (core == "Commodore Amiga") return "64";
   if (core == "Amiga CD32") return "130";
-  if (core == "Commodore 64") return "66";
-  if (core == "Vic-20" || core == "Commodore VIC-20") return "73";
+  if (core == "Commodore 64" || core == "Commodore 128") return "66";
+  if (core == "Vic-20" || core == "Commodore VIC-20" || core == "Commodore Vic-20") return "73";
   if (core == "PET" || core == "Commodore PET") return "240";
   if (core == "C16") return "99";
   
@@ -5276,6 +5279,7 @@ String getScreenScraperSystemId(String coreName) {
   if (core == "Adam") return "89";
   if (core == "PV-1000" || core == "Casio PV-1000") return "74";
   if (core == "CD-i" || core == "Philips CD-i" || core == "Phillips CD-i") return "133";
+  if (core == "3DO" || core == "Panasonic 3DO") return "29";
   if (core == "Gamate" || core == "Bit Corporation Gamate") return "266";
   if (core == "Mega Duck") return "90";
   if (core == "Pocket Challenge V2") return "237";
@@ -5324,7 +5328,7 @@ String getScreenScraperSystemId(String coreName) {
   if (coreLower == "atarist") return "42";
   if (coreLower == "amiga" || coreLower == "minimig") return "64";
   if (coreLower == "amigacd32") return "130";
-  if (coreLower == "c64" || coreLower == "commodore64") return "66";
+  if (coreLower == "c64" || coreLower == "commodore64" || coreLower == "c128") return "66";
   if (coreLower == "ao486" || coreLower == "pc dos" || coreLower == "pcxt") return "135";
   if (coreLower == "amstrad" || coreLower == "cpc") return "65";
   if (coreLower == "sam" || coreLower == "samcoupe") return "213";
@@ -5334,6 +5338,11 @@ String getScreenScraperSystemId(String coreName) {
   if (coreLower == "vectrex") return "102";
   if (coreLower == "coleco") return "48";
   if (coreLower == "intellivision") return "115";
+  if (coreLower == "3do") return "29";
+  if (coreLower == "supergrafx") return "105";
+  if (coreLower == "ngp") return "25";
+  if (coreLower == "ngpc") return "82";
+  if (coreLower == "gba2p") return "12";
   if (coreLower == "menu" || coreLower == "main") return "";
   
   Serial.printf("Core '%s' not mapped to ScreenScraper system\n", coreName.c_str());
