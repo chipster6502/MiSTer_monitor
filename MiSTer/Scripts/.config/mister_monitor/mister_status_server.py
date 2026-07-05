@@ -484,7 +484,7 @@ _KNOWN_ROM_EXTS = {
     '.zip', '.mra', '.mgl', '.rom', '.bin', '.iso', '.chd',
     '.nes', '.sfc', '.smd', '.md', '.gba', '.gb', '.gbc',
     '.a78', '.a52', '.a26', '.n64', '.z64', '.pce', '.cue',
-    '.lnx', '.ngp', '.ngc', '.ws', '.wsc', '.sg', '.sms',
+    '.lnx', '.ngp', '.ngc', '.neo', '.ws', '.wsc', '.sg', '.sms',
     '.gg', '.col', '.vec', '.int', '.psx', '.img',
     # 8-bit computers
     '.prg', '.d64', '.t64', '.tap', '.crt', '.g64',  # Commodore
@@ -1714,6 +1714,31 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                             print(f"✅ Same-name ZIP found ({source_name}): {virtual_path}")
                             return virtual_path
 
+                        # Title-based fallbacks: some cores (notably NEOGEO) write
+                        # the game's display TITLE to CURRENTPATH instead of the
+                        # filename on disk.
+
+                        # (a) Directory scan: a file whose name starts with the
+                        #     title and has a known ROM extension.
+                        try:
+                            entries = sorted(os.listdir(parent_dir))
+                        except Exception:
+                            entries = []
+                        title_l = target_filename.lower()
+                        for entry in entries:
+                            stem, ext = os.path.splitext(entry)
+                            if ext.lower() in _KNOWN_ROM_EXTS and stem.lower().startswith(title_l):
+                                candidate = os.path.join(parent_dir, entry)
+                                if os.path.isfile(candidate):
+                                    print(f"✅ Title-prefix match ({source_name}): {candidate}")
+                                    return candidate
+
+                        # (b) romsets.xml reverse lookup: display title -> romset
+                        #     name -> romset file (NEOGEO layouts).
+                        candidate = self._lookup_neogeo_romset(parent_dir, target_filename)
+                        if candidate:
+                            print(f"✅ romsets.xml match ({source_name}): {candidate}")
+                            return candidate
                         print(f"❌ No valid path found via {source_name} - trying next source")
                         continue
 
@@ -1723,7 +1748,73 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
         print(f"❌ No valid ROM path found from any source")
         return None
-        
+    
+    def _lookup_neogeo_romset(self, directory, title):
+        """
+        Reverse lookup in romsets.xml (NEOGEO): display title -> romset name.
+        The core shows the title from the .neo header / romsets.xml and writes
+        that TITLE to CURRENTPATH, so the file on disk (e.g. 'blazstar.neo')
+        can have a completely different name. Punctuation also differs between
+        sources (':' in the XML vs ' - ' in CURRENTPATH), so titles are
+        compared on their alphanumeric characters only.
+        """
+        xml_path = os.path.join(directory, 'romsets.xml')
+        if not os.path.isfile(xml_path):
+            return None
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.parse(xml_path).getroot()
+        except Exception as e:
+            print(f"⚠️ romsets.xml parse failed: {e}")
+            return None
+
+        def norm(s):
+            return re.sub(r'[^a-z0-9]', '', s.lower())
+
+        wanted = norm(title)
+        if not wanted:
+            return None
+        # Pass 1: exact match on normalized title (altname or romset name).
+        # Pass 2: prefix match. A prefix candidate only counts if its file
+        # actually exists on disk, and if more than one qualifies we refuse
+        # to guess.
+        exact_file = None
+        prefix_files = []
+        for rs in root.iter('romset'):
+            name    = rs.get('name') or ''
+            altname = rs.get('altname') or ''
+            norm_alt  = norm(altname)
+            norm_name = norm(name)
+
+            is_exact  = (norm_alt == wanted or norm_name == wanted)
+            is_prefix = (not is_exact and
+                         (norm_alt.startswith(wanted) or norm_name.startswith(wanted)))
+            if not (is_exact or is_prefix):
+                continue
+
+            found = None
+            for filename in (name + '.neo', name + '.zip'):
+                p = os.path.join(directory, filename)
+                if os.path.isfile(p):
+                    found = p
+                    break
+
+            if is_exact:
+                if found:
+                    return found
+                print(f"ℹ️ romsets.xml maps '{title}' -> '{name}' but no matching file on disk")
+                return None
+            if found:
+                prefix_files.append((name, found))
+
+        if len(prefix_files) == 1:
+            print(f"ℹ️ romsets.xml prefix match: '{title}' -> '{prefix_files[0][0]}'")
+            return prefix_files[0][1]
+        if len(prefix_files) > 1:
+            names = ', '.join(n for n, _ in prefix_files)
+            print(f"⚠️ romsets.xml: '{title}' is ambiguous ({names}) — not guessing")
+        return None
+
     def _resolve_mister_path(self, path):
         """
         Intelligently resolve MiSTer paths handling various relative path patterns
