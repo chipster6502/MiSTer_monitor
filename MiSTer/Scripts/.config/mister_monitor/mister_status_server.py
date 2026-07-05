@@ -482,21 +482,46 @@ def _sam_is_current():
 
 _KNOWN_ROM_EXTS = {
     '.zip', '.mra', '.mgl', '.rom', '.bin', '.iso', '.chd',
-    '.nes', '.sfc', '.smd', '.md', '.32x', '.gba', '.gb', '.gbc',
-    '.a78', '.a52', '.a26', '.n64', '.z64', '.pce', '.cue',
-    '.lnx', '.ngp', '.ngc', '.neo', '.ws', '.wsc', '.sg', '.sms',
-    '.gg', '.col', '.vec', '.int', '.psx', '.img',
-    # 8-bit computers
-    '.prg', '.d64', '.t64', '.tap', '.crt', '.g64',  # Commodore
-    '.atr', '.xex', '.cas', '.car',                   # Atari 8bit
-    '.dsk', '.st', '.msa', '.stx', '.dim',            # Atari ST
-    '.tzx', '.tap', '.z80', '.sna', '.trd', '.scl',  # Spectrum
-    '.cdt', '.cpc', '.voc',                           # Amstrad CPC
-    '.vhd', '.hdf', '.adf', '.adz',                   # Amiga
-    '.do', '.po', '.2mg',                             # Apple II
-    '.mx1', '.mx2',                                   # MSX
-    '.col', '.cv',                                     # ColecoVision
-    '.m3u',                                            # playlists
+    # Nintendo
+    '.nes', '.fds', '.nsf', '.sfc', '.smc', '.bs', '.spc',
+    '.gba', '.gb', '.gbc', '.n64', '.z64', '.min',
+    # Sega
+    '.smd', '.md', '.gen', '.32x', '.sg', '.sms', '.gg',
+    # Sony
+    '.psx', '.exe',
+    # NEC / Hudson
+    '.pce', '.sgx',
+    # SNK
+    '.neo', '.ngp', '.ngc',
+    # Atari
+    '.a78', '.a52', '.a26', '.lnx', '.jag', '.j64',
+    '.atr', '.xex', '.cas', '.car', '.atx', '.xfd',
+    '.st', '.msa', '.stx', '.dim',
+    # Other consoles / handhelds
+    '.ws', '.wsc', '.pc2', '.col', '.cv', '.vec', '.ovr', '.int',
+    '.sv', '.ch8', '.hex', '.gmc',
+    # Commodore
+    '.prg', '.d64', '.d81', '.t64', '.tap', '.crt', '.g64', '.reu',
+    # Spectrum / SAM / Next
+    '.tzx', '.z80', '.sna', '.trd', '.scl', '.csw', '.mgt',
+    # Amstrad CPC
+    '.cdt', '.cpc', '.voc',
+    # Amiga / PC
+    '.vhd', '.hdf', '.adf', '.adz', '.img', '.ima', '.vfd',
+    # Apple
+    '.do', '.po', '.2mg', '.nib', '.hdv',
+    # MSX
+    '.mx1', '.mx2', '.dsk', '.cue',
+    # Japanese computers
+    '.d88', '.ram',
+    # British / misc micros
+    '.ssd', '.dsd', '.ace', '.mdv', '.win', '.bas', '.lod',
+    '.vz', '.caq', '.c10', '.ccc', '.cmd', '.jvi', '.m99',
+    # Eastern-bloc / other computers
+    '.c00', '.com', '.edd', '.fdd', '.rka', '.rkr', '.rks',
+    '.rmm', '.odi', '.gam', '.cin', '.k7', '.p',
+    # PDP-1
+    '.pdp', '.rim',
 }
 
 def _game_name_from_path(path):
