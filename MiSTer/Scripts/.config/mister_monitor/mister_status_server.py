@@ -569,11 +569,30 @@ def _update_state():
     ARCADE_FRESHNESS = 30  # seconds
     corename_ts   = _get_mtime_ns('/tmp/CORENAME') / 1e9
     activegame_ts = _get_mtime_ns('/tmp/ACTIVEGAME') / 1e9
+    startpath_ts  = _get_mtime_ns('/tmp/STARTPATH') / 1e9
 
     activegame_arcade_fresh = (
         activegame and
         '/_Arcade/' in activegame and
         activegame_ts >= corename_ts - ARCADE_FRESHNESS
+    )
+
+    # STARTPATH points at the launched .mra for arcade cores. The .mra
+    # extension is arcade-exclusive and independent of the launch folder,
+    # so this catches arcades started from _@Favorites, custom folders,
+    # etc. — cases where FULLPATH doesn't contain "arcade". Freshness is
+    # checked against CORENAME so a stale STARTPATH from a previous arcade
+    # session doesn't misclassify a console game loaded afterwards.
+    startpath = ''
+    try:
+        with open('/tmp/STARTPATH', 'r') as f:
+            startpath = f.read().strip()
+    except Exception:
+        pass
+
+    startpath_arcade_fresh = (
+        startpath.lower().endswith('.mra') and
+        startpath_ts >= corename_ts - ARCADE_FRESHNESS
     )
 
     is_arcade = False
@@ -587,8 +606,16 @@ def _update_state():
         game_path = activegame
         print(f"🕹️ Arcade (Remote launch): {game_name}")
 
+    elif startpath_arcade_fresh:
+        # Arcade launched via OSD — detected by the .mra in STARTPATH,
+        # works regardless of the launch folder (_Arcade, _@Favorites, …).
+        is_arcade = True
+        game_name = _game_name_from_path(startpath)
+        game_path = startpath
+        print(f"🕹️ Arcade (OSD .mra launch): {game_name}")
+
     elif fullpath and 'arcade' in fullpath.lower() and not _is_known_non_arcade(corename):
-        # Arcade launched via OSD
+        # Arcade launched via OSD (legacy path-based detection, kept as fallback)
         is_arcade = True
         game_name = _game_name_from_path(currentpath)
         game_path = currentpath
