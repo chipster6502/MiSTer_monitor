@@ -5776,7 +5776,7 @@ String getScreenScraperSystemId(String coreName) {
   if (core == "Adventure Vision") return "78";
   if (core == "Adam") return "89";
   if (core == "PV-1000" || core == "Casio PV-1000") return "74";
-  if (core == "CD-i" || core == "Phillips CD-i") return "133";
+  if (core == "CD-i" || core == "Philips CD-i" || core == "Phillips CD-i") return "133";
   if (core == "Gamate" || core == "Bit Corporation Gamate") return "266";
   if (core == "Mega Duck") return "90";
   if (core == "Pocket Challenge V2") return "237";
