@@ -1669,9 +1669,28 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                         print(f"❌ ZIP not found via {source_name}: {zip_path} - trying next source")
                         continue
                 else:
-                    if os.path.exists(final_path):
+                    if os.path.isfile(final_path):
                         print(f"✅ ROM file found via {source_name}: {final_path}")
                         return final_path
+                    elif os.path.isdir(final_path):
+                        # Folder-per-game layout: the game lives in a folder named
+                        # after it. os.path.exists()
+                        # is also true for directories, so without this branch the
+                        # server would try to hash the folder itself (Errno 21).
+                        print(f"📁 {source_name} resolved to a directory — searching disc image inside")
+                        try:
+                            entries = sorted(os.listdir(final_path))
+                        except Exception as e:
+                            print(f"❌ Cannot list directory: {e}")
+                            entries = []
+                        for ext in ('.chd', '.cue', '.iso', '.pbp'):
+                            matches = [f for f in entries if f.lower().endswith(ext)]
+                            if matches:
+                                chosen = os.path.join(final_path, matches[0])
+                                print(f"✅ Disc image found in folder ({source_name}): {chosen}")
+                                return chosen
+                        print(f"❌ No disc image inside directory: {final_path}")
+                        print(f"❌ Direct file not found: {final_path}")
                     else:
                         print(f"❌ Direct file not found: {final_path}")
 
@@ -1720,12 +1739,14 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             print(f"✅ Already absolute: {resolved}")
             return resolved
         
-        # USB/external drives mount at /media/usbN, NOT under /media/fat.
-        # Resolve any leading ../ sequence pointing at usb0..usb7 correctly.
-        m = re.match(r'(?:\.\./)+(usb[0-7]/.*)$', path)
+        # Leading ../ sequences are relative to /media/fat, so '../usb0/...'
+        # means /media/usb0/... and '../fat/...' means /media/fat/... itself.
+        # Without this, the generic cleanup prepends /media/fat and produces
+        # /media/fat/fat/... (or /media/fat/usb0/...), which don't exist.
+        m = re.match(r'(?:\.\./)+((?:usb[0-7]|fat)/.*)$', path)
         if m:
             resolved = os.path.normpath('/media/' + m.group(1))
-            print(f"🔧 USB path resolved: {resolved}")
+            print(f"🔧 Relative /media path resolved: {resolved}")
             return resolved
         
         # Case 2: Starts with ../../../media/fat/ - remove the ../ and normalize
