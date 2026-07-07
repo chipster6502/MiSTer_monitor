@@ -5218,7 +5218,7 @@ String getScreenScraperSystemId(String coreName) {
   if (core == "Atari 5200") return "40";
   if (core == "Atari 7800") return "41";
   if (core == "Atari Lynx") return "28";
-  if (core == "Atari Jaguar") return "27";
+  if (core == "Atari Jaguar" || core == "Jaguar") return "27";
   if (core == "Atari ST/STE" || core == "Atari ST") return "42";
   if (core == "Atari 8bit") return "43";
   
@@ -5280,6 +5280,7 @@ String getScreenScraperSystemId(String coreName) {
   if (core == "PV-1000" || core == "Casio PV-1000") return "74";
   if (core == "CD-i" || core == "Philips CD-i" || core == "Phillips CD-i") return "133";
   if (core == "3DO" || core == "Panasonic 3DO") return "29";
+  if (core == "Super Cassette Vision" || core == "SCV") return "67";
   if (core == "Gamate" || core == "Bit Corporation Gamate") return "266";
   if (core == "Mega Duck") return "90";
   if (core == "Pocket Challenge V2") return "237";
@@ -5343,6 +5344,8 @@ String getScreenScraperSystemId(String coreName) {
   if (coreLower == "ngp") return "25";
   if (coreLower == "ngpc") return "82";
   if (coreLower == "gba2p") return "12";
+  if (coreLower == "scv") return "67";
+  if (coreLower == "jaguar") return "27";
   if (coreLower == "menu" || coreLower == "main") return "";
   
   Serial.printf("Core '%s' not mapped to ScreenScraper system\n", coreName.c_str());
