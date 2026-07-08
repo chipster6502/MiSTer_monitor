@@ -131,6 +131,8 @@ CORE_NAME_MAPPING = {
     'C128': 'Commodore 128',
     'VIC20': 'Commodore Vic-20',
     'Minimig': 'Commodore Amiga',
+    'CD32': 'Amiga CD32',
+    'AmigaCD32': 'Amiga CD32',
     'AO486': 'PC Dos',
     'PCXT': 'PC Dos',
     'PCjr': 'PC Dos',
@@ -589,6 +591,14 @@ def _update_state():
                     CORE_NAME_MAPPING_LOWER.get(corename.lower()) or
                     corename)
     friendly_name = CORE_NAME_MAPPING.get(friendly_name, friendly_name)
+
+    if friendly_name == corename and '-' in corename:
+        prefix = corename.split('-', 1)[0]
+        prefix_friendly = (CORE_NAME_MAPPING.get(prefix) or
+                           CORE_NAME_MAPPING_LOWER.get(prefix.lower()))
+        if prefix_friendly:
+            print(f"🔧 MGL prefix '{prefix}' resolved to core '{prefix_friendly}'")
+            friendly_name = prefix_friendly
 
     # --- Arcade detection ---
     ARCADE_FRESHNESS = 30  # seconds
