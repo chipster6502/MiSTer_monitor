@@ -18,6 +18,7 @@ import zipfile
 import io
 import socket
 from urllib.parse import urlparse
+import queue
 
 def _load_names_txt():
     """
@@ -253,12 +254,50 @@ _state = {
     'is_arcade':         False,    # True if current core is arcade
     'rom_details':       None,     # last ScreenScraper result (dict or None)
     'rom_details_stale': True,     # True = needs refresh on next request
+    'seq':               0,        # monotonic generation counter — bumps on every REAL identity change
+    'updated_at':        0.0,      # epoch of last committed change
+    'last_event':        'boot',   # 'boot' | 'load' | 'core' | 'menu' | 'sam'
 }
+
+# Raw CORENAME as seen at the last evaluation — a core change must always
+# bypass the navigation gate (stale coupled nav timestamps would otherwise
+# mask a core-only load).
+_last_evaluated_corename = None
 
 # Error tracking — exposed via /status/error_state and /status/all
 server_error_state        = ''    # last error message, empty string if none
 last_valid_core           = ''    # last corename that produced a valid state
 last_valid_core_timestamp = 0.0   # epoch time of last valid state update
+
+def _commit_state(core, game, game_path, is_arcade, event):
+    """
+    Atomically commits a derived state. Bumps 'seq' and invalidates the
+    rom-details cache ONLY when the identity actually changed, so a spurious
+    re-evaluation can no longer wipe a hash computed for the same game.
+    Returns True if the state changed.
+    """
+    with _state_lock:
+        changed = (_state['core']      != core or
+                   _state['game']      != game or
+                   _state['game_path'] != game_path or
+                   _state['is_arcade'] != is_arcade)
+        if changed:
+            _state['core']              = core
+            _state['system_name']       = core
+            _state['game']              = game
+            _state['game_path']         = game_path
+            _state['is_arcade']         = is_arcade
+            _state['rom_details']       = None
+            _state['rom_details_stale'] = True
+            _state['seq']              += 1
+            _state['updated_at']        = time.time()
+            _state['last_event']        = event
+        seq_now = _state['seq']
+    if changed:
+        print(f"✅ State committed (seq={seq_now}, {event}): core='{core}' game='{game}' arcade={is_arcade}")
+    else:
+        print(f"♻️ Evaluation confirmed current state (seq={seq_now}) — rom cache preserved")
+    return changed
 
 # ---------------------------------------------------------------------------
 # Background watcher thread — monitors /tmp/ files via inotifywait
@@ -546,44 +585,43 @@ def _update_state():
     currentpath = _read_file('/tmp/CURRENTPATH')
     fullpath    = _read_file('/tmp/FULLPATH')
 
-    # --- Navigation vs real load ---
-    # MiSTer writes FILESELECT and CURRENTPATH at the exact same nanosecond
-    # during OSD navigation. After a real load, only FILESELECT is updated.
-    fs_ns  = _get_mtime_ns('/tmp/FILESELECT')
-    cp_ns  = _get_mtime_ns('/tmp/CURRENTPATH')
-    is_navigation = (fs_ns == cp_ns)
+    # --- Navigation vs real load (tolerant gate) ---
+    # Empirical MiSTer behaviour: during OSD navigation FILESELECT and
+    # CURRENTPATH are written back-to-back (sub-millisecond apart); on a real
+    # load only FILESELECT is touched.
+    # A tolerance window separates the two cases robustly: coupled writes are
+    # microseconds apart, a human cursor-move followed by Enter is >= ~100 ms.
+    global _last_evaluated_corename
 
-    if is_navigation:
-        # User is browsing OSD — keep current state unchanged
-        print("🔀 OSD navigation detected — state unchanged")
+    fs_ns = _get_mtime_ns('/tmp/FILESELECT')
+    cp_ns = _get_mtime_ns('/tmp/CURRENTPATH')
+    ag_ns = _get_mtime_ns('/tmp/ACTIVEGAME')
+
+    _NAV_COUPLING_MS = 50.0
+    delta_ms = abs(fs_ns - cp_ns) / 1e6
+
+    core_changed      = (corename != _last_evaluated_corename)
+    activegame_recent = (time.time_ns() - ag_ns) <= 3_000_000_000  # explicit launch (Remote/Zaparoo)
+
+    if delta_ms <= _NAV_COUPLING_MS and not core_changed and not activegame_recent:
+        print(f"🔀 OSD navigation detected (Δ={delta_ms:.2f} ms) — state unchanged")
         return
+
+    _last_evaluated_corename = corename
 
     # --- SAM detection (takes priority if active and current) ---
     if _sam_is_current():
         sam_active, sam_core_raw, sam_core_friendly, sam_game, sam_path = _sam_get_current()
         if sam_active and sam_core_raw:
             print(f"🎮 SAM active — core='{sam_core_friendly}' game='{sam_game}'")
-            with _state_lock:
-                _state['core']              = sam_core_friendly  # friendly — for display and image lookup
-                _state['system_name']       = sam_core_friendly
-                _state['game']              = sam_game
-                _state['game_path']         = sam_path
-                _state['is_arcade']         = False
-                _state['rom_details']       = None
-                _state['rom_details_stale'] = True
+            _commit_state(sam_core_friendly, sam_game, sam_path,
+                          is_arcade=False, event='sam')
             return
 
     # --- Menu ---
     if not corename or corename.upper() == 'MENU':
         print("📋 MENU detected")
-        with _state_lock:
-            _state['core']              = 'Menu'
-            _state['system_name']       = 'Menu'
-            _state['game']              = ''
-            _state['game_path']         = ''
-            _state['is_arcade']         = False
-            _state['rom_details']       = None
-            _state['rom_details_stale'] = True
+        _commit_state('Menu', '', '', is_arcade=False, event='menu')
         return
 
     # --- Resolve friendly core name ---
@@ -698,24 +736,18 @@ def _update_state():
         
         print(f"🎮 Non-arcade: core={corename} game={game_name}")
 
-    with _state_lock:
-        _state['core']        = 'Arcade' if is_arcade else friendly_name  # friendly — for display and image lookup
-        _state['system_name'] = 'Arcade' if is_arcade else friendly_name
-        _state['game']              = game_name
-        _state['game_path']         = game_path
-        _state['is_arcade']         = is_arcade
-        _state['rom_details']       = None
-        _state['rom_details_stale'] = True
+    _commit_state('Arcade' if is_arcade else friendly_name,
+                  game_name, game_path, is_arcade,
+                  event='load' if game_name else 'core')
 
-    print(f"✅ State updated: core='{_state['core']}' game='{game_name}' arcade={is_arcade}")
+_SETTLE_SECONDS      = 0.4   # quiet time after the last event before evaluating
+_SAFETY_POLL_SECONDS = 15.0  # idle re-check; heals watcher restarts / lost events
 
-_last_event_time = 0.0
-_DEBOUNCE_SECONDS = 0.3
+_event_queue = queue.Queue()
 
 def _watcher_thread():
     """
-    Runs inotifywait in monitor mode and reacts to filesystem events.
-    Calls _update_state() whenever a relevant file changes.
+    Runs inotifywait in monitor mode and feeds raw events into _event_queue.
     Restarts automatically if inotifywait dies unexpectedly.
     """
     print("👁️ Watcher thread started")
@@ -733,29 +765,47 @@ def _watcher_thread():
                 if not line:
                     continue
                 print(f"📂 inotify event: {line}")
-
-                # CORENAME changes always trigger _update_state immediately
-                # Other events are debounced to avoid noise during navigation
-                is_corename = '/tmp/CORENAME' in line
-                
-                # Debounce: ignore events that arrive too close together
-                now = time.time()
-                global _last_event_time
-                if not is_corename and (now - _last_event_time < _DEBOUNCE_SECONDS):
-                    print(f"⏱️ Debounced")
-                    _last_event_time = now
-                    continue
-                _last_event_time = now
-                
-                _update_state()
+                _event_queue.put(line)
             proc.wait()
-            err = (proc.stderr.read() or '').strip()  # ← NUEVO
+            err = (proc.stderr.read() or '').strip()
             if err or proc.returncode not in (0, None):
                 print(f"⚠️ inotifywait exited (code={proc.returncode}): {err or 'no stderr'}")
         except Exception as e:
             print(f"⚠️ Watcher thread error: {e}")
         print("🔄 Watcher thread restarting...")
         time.sleep(1)
+
+def _evaluator_thread():
+    """
+    Consumes events and calls _update_state() exactly once per settled burst.
+    The last event of a burst (the real game load) can never be lost.
+    A low-frequency safety poll re-checks FILESELECT while idle, so a missed
+    inotify event (watcher restart, rare edge) can never freeze the state
+    permanently — the design guarantees eventual convergence.
+    """
+    print("🧠 Evaluator thread started")
+    pending = False
+    last_evaluated_fs_ns = 0
+    while True:
+        timeout = _SETTLE_SECONDS if pending else _SAFETY_POLL_SECONDS
+        try:
+            _event_queue.get(timeout=timeout)
+            pending = True          # burst open/extended — wait for quiet
+            continue
+        except queue.Empty:
+            pass                    # timeout: burst settled, or idle tick
+
+        if pending:
+            pending = False
+            _update_state()
+            last_evaluated_fs_ns = _get_mtime_ns('/tmp/FILESELECT')
+        else:
+            # Idle safety net: FILESELECT moved but was never evaluated
+            fs_ns = _get_mtime_ns('/tmp/FILESELECT')
+            if fs_ns > last_evaluated_fs_ns:
+                print("🛟 Safety poll: unevaluated FILESELECT change — evaluating")
+                _update_state()
+                last_evaluated_fs_ns = fs_ns
 
 # --- MiSTer Monitor UDP discovery responder -------------------------------
 DISCOVERY_PORT    = 51234
@@ -791,9 +841,9 @@ def _start_discovery_responder():
     threading.Thread(target=_run, daemon=True).start()
 
 def _start_watcher():
-    """Starts the background watcher thread as a daemon."""
-    t = threading.Thread(target=_watcher_thread, daemon=True)
-    t.start()
+    """Starts the watcher (inotify producer) and evaluator (consumer) daemons."""
+    threading.Thread(target=_watcher_thread, daemon=True).start()
+    threading.Thread(target=_evaluator_thread, daemon=True).start()
 
 # Session tracking — module-level so they persist across handler instances
 _session_start   = time.time()
