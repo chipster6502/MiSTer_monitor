@@ -914,6 +914,17 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 'last_valid_timestamp': last_valid_core_timestamp,
                 'timestamp': int(time.time())
             })
+        elif path == '/status/snapshot':
+            # Atomic identity snapshot. Optional ?seq=N: if the caller already
+            # has the current generation, reply with a tiny body so the ESP32
+            # skips re-parsing on the (common) no-change poll.
+            from urllib.parse import parse_qs
+            known_seq = parse_qs(parsed_path.query).get('seq', [None])[0]
+            snap = self.get_state_snapshot()
+            if known_seq is not None and known_seq == str(snap['seq']):
+                self.send_json_response({'seq': snap['seq'], 'unchanged': True})
+            else:
+                self.send_json_response(snap)
         elif path == '/status/all':
             status = {
                 'core': self.get_current_core(),
@@ -927,7 +938,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 'error_state': server_error_state,          # NEW
                 'has_error': bool(server_error_state),      # NEW
                 'last_valid_core': last_valid_core,         # NEW
-                'timestamp': int(time.time())
+                'timestamp': int(time.time()),
+                'snapshot': self.get_state_snapshot(),   # atomic identity block
             }
             self.send_json_response(status)
         else:
@@ -939,6 +951,29 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         """Returns the currently active core friendly name from centralized state."""
         with _state_lock:
             return _state['core']
+        
+    def get_state_snapshot(self):
+        """
+        Single-lock atomic snapshot of the core/game identity. This is what
+        the firmware polls: one request, one lock acquisition, one coherent
+        state. rom_details is the CACHED value only — never computed here
+        (computation stays on /status/rom/details, which can take minutes
+        for large CHDs).
+        """
+        with _state_lock:
+            return {
+                'seq':               _state['seq'],
+                'core':              _state['core'],
+                'system_name':       _state['system_name'],
+                'game':              _state['game'],
+                'game_path':         _state['game_path'],
+                'is_arcade':         _state['is_arcade'],
+                'rom_details_stale': _state['rom_details_stale'],
+                'rom_details':       _state['rom_details'],
+                'last_event':        _state['last_event'],
+                'updated_at':        _state['updated_at'],
+                'timestamp':         int(time.time()),
+            }
         
     def resolve_zip_path(self, zip_path):
         """
@@ -1398,8 +1433,9 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         print(f"[{time.strftime('%H:%M:%S')}] Getting ROM details...")
 
         with _state_lock:
-            stale   = _state['rom_details_stale']
-            cached  = _state['rom_details']
+            stale        = _state['rom_details_stale']
+            cached       = _state['rom_details']
+            seq_at_start = _state['seq']
 
         if not stale and cached is not None:
             print("📋 Using cached ROM details")
@@ -1435,9 +1471,13 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                     result = self.get_rom_details_from_file(rom_path)
                 result["detection_method"] = getattr(self, '_last_detection_method', 'unknown')
 
+            result['seq'] = seq_at_start
             with _state_lock:
-                _state['rom_details']       = result
-                _state['rom_details_stale'] = False
+                if _state['seq'] == seq_at_start:
+                    _state['rom_details']       = result
+                    _state['rom_details_stale'] = False
+                else:
+                    print("⚠️ State changed during ROM hashing — result NOT cached (belongs to a previous game)")
 
             return result
     
@@ -1449,6 +1489,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         """
         print("🔄 === FORCED ROM DETAILS (bypass timestamp check) ===")
         try:
+            with _state_lock:
+                seq_at_start = _state['seq']
             corename = ""
             try:
                 with open('/tmp/CORENAME', 'r') as f:
@@ -1478,10 +1520,16 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 result = self.get_rom_details_from_file(rom_path)
 
             result["detection_method"] = "forced"
-            # Update cache so subsequent normal calls benefit from this result
+            result['seq'] = seq_at_start
+            # Update cache so subsequent normal calls benefit — but only if the
+            # active game hasn't changed since we started hashing (a slow CHD
+            # hash could otherwise attach this result to a different game).
             with _state_lock:
-                _state['rom_details']       = result
-                _state['rom_details_stale'] = False
+                if _state['seq'] == seq_at_start:
+                    _state['rom_details']       = result
+                    _state['rom_details_stale'] = False
+                else:
+                    print("⚠️ State changed during forced ROM hashing — result NOT cached (belongs to a previous game)")
             return result
 
         except Exception as e:
