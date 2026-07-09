@@ -187,7 +187,7 @@ unsigned long gameInfoSynCycledTime = 0;  // when the text finished scrolling
 bool gameInfoSynPaused   = true;          // pausing at top or bottom
 bool gameInfoSynCycled   = false;         // a full scroll cycle has completed
 const unsigned long GAMEINFO_SYN_STEP_MS  = 1200;  // one line per 1.2 s
-const unsigned long GAMEINFO_SYN_PAUSE_MS = 2500;  // hold at top and bottom
+const unsigned long GAMEINFO_SYN_PAUSE_MS = 4000;  // hold at top and bottom
 // Tail spent frozen on the LAST lines before leaving the panel. Added to the
 // 2.5 s bottom hold, that is ~7.5 s of reading time on the final screenful.
 const unsigned long GAMEINFO_SYN_EXIT_MS  = 5000;  // tail after the last line
