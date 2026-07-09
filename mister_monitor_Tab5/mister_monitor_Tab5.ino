@@ -3683,9 +3683,12 @@ void showMenuImageWithCoreOverlay(String coreName) {
   
   // === Line 2: GAME (only when a game is loaded) ===
   if (hasGame) {
-    // Game value sits at x=120, size 3 (18 px/char): 47 chars end at x=966,
-    // leaving 74 px of air before the button (x>=1040). Full width otherwise.
-    int visibleChars = showInfoButton ? 47 : GAME_FOOTER_VISIBLE_CHARS_FULL;
+    // Game value sits at x=120, size 3 (18 px/char).
+    //   With the button:    47 chars end at x=966, 74 px of air before it
+    //                       (x>=1040); the hint keeps its own row below.
+    //   Without the button: the hint moves up onto this row, right-aligned,
+    //                       so the name yields to 40 chars (120..840).
+    int visibleChars = showInfoButton ? 47 : 40;
     if (imageFooterScroll.fullText != currentGame ||
         imageFooterScroll.maxChars != visibleChars) {
       initScrollText(&imageFooterScroll, currentGame, visibleChars);
@@ -3706,10 +3709,20 @@ void showMenuImageWithCoreOverlay(String coreName) {
     M5.Display.print(displayGame);
   }
   
-  // === Hint (bottom-right, size 2; shifted left when the button is shown) ===
+  // === Hint =================================================================
+  // With the GAME INFO button: unchanged — size 2 on its own row at y=695,
+  // shifted left to x=600 so it clears the button.
+  // Without it: the row at y=668 has room, so the hint sits there at size 3,
+  // right-aligned (21 chars x 18 px = 378 px, 20 px margin -> x=882). With no
+  // game at all that row is empty, so it is centred instead (x=451).
     M5.Display.setTextColor(THEME_CYAN);
-    M5.Display.setTextSize(2);
-    M5.Display.setCursor(showInfoButton ? 600 : 870, 695);
+    if (showInfoButton) {
+      M5.Display.setTextSize(2);
+      M5.Display.setCursor(600, 695);
+    } else {
+      M5.Display.setTextSize(3);
+      M5.Display.setCursor(hasGame ? 882 : 451, 668);
+    }
     M5.Display.print("Touch to show monitor");
 
   if (showInfoButton) drawGameInfoIcon();
