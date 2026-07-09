@@ -812,10 +812,11 @@ void addGameImageFooter(String gameName) {
   Lcd.setCursor(10, 279);
   Lcd.print("GAME:");
 
-  // With the button: 29 chars from x=64 end at x=325, clear of it (x>=330).
-  // Without it (game not in ScreenScraper) the name reclaims the full width.
+  // With the button: 27 chars from x=64 end at x=307, a 43 px gap before it
+  // (x>=350). Without it (game not in ScreenScraper) the name reclaims the
+  // full width.
   const bool showInfoButton = gameInfoAvailable();
-  const int visibleChars = showInfoButton ? 29 : GAME_FOOTER_VISIBLE_CHARS_FULL;
+  const int visibleChars = showInfoButton ? 27 : GAME_FOOTER_VISIBLE_CHARS_FULL;
   if (imageFooterScroll.fullText != gameName ||
       imageFooterScroll.maxChars != visibleChars) {
     initScrollText(&imageFooterScroll, gameName, visibleChars);
@@ -883,11 +884,12 @@ bool gameInfoAvailable() {
 //
 // Filled in THEME_CYAN, the same colour as the "GAME:" label beside it, so the
 // footer reads as one visual family. Black text gives maximum contrast on cyan.
-// Body 330..470 x 276..313; the whole third (x>=320, y>=270) is the hit target,
-// which is why the footer's game name and hint text are kept clear of x=325.
+// Body 350..470 x 276..313 (10 px right margin); the whole third (x>=320,
+// y>=270) remains the hit target, so the button is narrower than its hitbox.
+// The footer's game name stops at x=307, leaving a 43 px breathing gap.
 // -----------------------------------------------------------------------------
 void drawGameInfoIcon(bool pressed) {
-  const int BX = 330, BY = 276, BW = 140, BH = 38;
+  const int BX = 350, BY = 276, BW = 120, BH = 38;
 
   // Pressed state flashes the fill white, mirroring buttonPressFeedback()'s
   // white-label flash on PRV / SCAN / NXT.
@@ -916,7 +918,7 @@ void drawCoreImageFooter() {
     Lcd.print("GAME:");
 
     const bool showInfoButton = gameInfoAvailable();
-    const int visibleChars = showInfoButton ? 29 : GAME_FOOTER_VISIBLE_CHARS_FULL;
+    const int visibleChars = showInfoButton ? 27 : GAME_FOOTER_VISIBLE_CHARS_FULL;
     if (imageFooterScroll.fullText != currentGame ||
         imageFooterScroll.maxChars != visibleChars) {
       initScrollText(&imageFooterScroll, currentGame, visibleChars);
