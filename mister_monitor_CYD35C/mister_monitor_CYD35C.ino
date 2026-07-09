@@ -55,6 +55,8 @@ String _ss_dev_pass_str;
 String _ss_user_str;
 String _ss_pass_str;
 String _boxart_region_str       = "wor";
+String _info_lang_str           = "en";   // [gameinfo] info_lang
+int    _info_synopsis_max       = 900;    // [gameinfo] info_synopsis_max
 String _core_images_path_str    = "/cores";
 String _default_core_image_str  = "/cores/menu.jpg";
 // Last HTTP status code returned by any ScreenScraper endpoint. Written by
@@ -156,7 +158,7 @@ bool connected = false;
 bool wasConnected = false;
 bool sdCardAvailable = false;
 int currentPage = 0;
-const int totalPages = 5;  // Back to 5 pages
+const int totalPages = 6;  // 5 system pages + GAME INFO
 unsigned long lastUpdate = 0;
 unsigned long lastPageChange = 0;
 unsigned long animTimer = 0;
@@ -166,6 +168,30 @@ bool needsRedraw = true;
 // Screensaver variables
 unsigned long lastButtonPress = 0;
 const unsigned long SCREENSAVER_TIMEOUT = 30000;  // 30 seconds of inactivity
+
+// GAME INFO panel timing:
+//  - subpage 1/2 (fields) is shown for 30 s, then flips to the synopsis
+//  - subpage 2/2 (synopsis) lasts exactly as long as its scroll needs, plus a
+//    short tail, and then the panel exits back to the game/core image
+//  - a panel with no synopsis falls back to a plain 1-min timeout
+int  gameInfoSubPage = 0;                 // 0 = fields (1/2), 1 = synopsis (2/2)
+unsigned long gameInfoSubPageChange = 0;  // last subpage change (auto-flip timer)
+bool gameInfoForceExit = false;           // synopsis finished -> leave the panel
+const unsigned long GAMEINFO_SCREEN_TIMEOUT  = 60000;   // 1 min fallback
+const unsigned long GAMEINFO_SUBPAGE_TIMEOUT = 30000;   // 30 s on the fields page
+
+// Synopsis vertical scroll (subpage 2/2)
+int  gameInfoSynScroll   = 0;             // index of the top visible line
+unsigned long gameInfoSynScrollTime = 0;  // last scroll step / pause start
+unsigned long gameInfoSynCycledTime = 0;  // when the text finished scrolling
+bool gameInfoSynPaused   = true;          // pausing at top or bottom
+bool gameInfoSynCycled   = false;         // a full scroll cycle has completed
+const unsigned long GAMEINFO_SYN_STEP_MS  = 1200;  // one line per 1.2 s
+const unsigned long GAMEINFO_SYN_PAUSE_MS = 2500;  // hold at top and bottom
+// Tail spent frozen on the LAST lines before leaving the panel. Added to the
+// 2.5 s bottom hold, that is ~7.5 s of reading time on the final screenful.
+const unsigned long GAMEINFO_SYN_EXIT_MS  = 5000;  // tail after the last line
+const unsigned long GAMEINFO_SYN_FIT_MS   = 15000; // dwell when it needs no scroll
 
 // Variables for automatic download
 bool downloadInProgress = false;
@@ -346,6 +372,20 @@ static int g_jpegOffsetY = 0;
 // ========== TOUCH BUTTON STRUCTURE ==========
 ScrollTextState gameFooterScroll  = {"", 8, 0, 0, 0, false, false, false};
 ScrollTextState imageFooterScroll = {"", 25, 0, 0, 0, false, false, false};
+
+// GAME INFO panel title: size 2 = 12 px/char. The "1/2>>" indicator occupies
+// x 404..464 of that row, leaving 360 px -> 30 visible chars for the title.
+ScrollTextState gameInfoTitleScroll = {"", 30, 0, 0, 0, false, false, false};
+
+// GAME INFO grid (subpage 1/2): every value gets its own horizontal scroll, so
+// a long genre / developer / publisher is read in full instead of clipped.
+// The row's y is decided at draw time by the vertical centring, and recorded
+// here so the loop's scroll refresher can repaint that exact row.
+const int GI_VAL_X     = 110;  // value column origin
+const int GI_VAL_CHARS = 30;   // 360 px at 12 px/char (size 2)
+ScrollTextState gameInfoRowScroll[6] = {};
+int  gameInfoRowY[6]     = {0};
+bool gameInfoRowShown[6] = {false};
 ScrollTextState mainHUDCoreScroll = {"", 14, 0, 0, 0, false, false, false};
 
 // Function declarations
@@ -438,6 +478,22 @@ String buildCorrectMediaJeuUrl(String gameId, String systemId, String mediaType,
 void initScrollText(ScrollTextState* state, String text, int maxDisplayChars);
 String getScrolledText(ScrollTextState* state);
 
+// --- GAME INFO panel (metadata) ---
+String getMetaPathFromImagePath(const String &imagePath);
+bool saveGameMeta(const String &metaPath, const GameMeta &m);
+bool loadGameMeta(const String &metaPath, GameMeta &m);
+String jsonUnescapeAndFold(const String &in);
+bool fetchGameMetadataJSON(String gameId, String coreName, RomDetails romDetails, GameMeta &out);
+int  wrapTextToLines(const String &text, int maxChars, String *out, int maxOut);
+void drawWrappedText(int x, int y, int w, int lineH, int maxLines, const String &text);
+void displayGameInfo();
+void drawGameInfoIcon(bool pressed = false);
+bool gameInfoAvailable();
+void drawGameInfoSynopsis();
+bool gameInfoSynNeedsScroll();
+void resetGameInfoSynScroll();
+void tickGameInfoSynScroll();
+
 // ========== SCREEN RENDERING OPTIMIZATION ==========
 bool backgroundLoaded = false;  // For frame02.jpg (interface screens)
 bool bootFrameLoaded = false;   // For frame01.jpg (boot/connection screens)
@@ -450,6 +506,13 @@ String currentCoreForCrc = "";         // Core of the current game
 unsigned long lastCrcRecurrentTime = 0; // Last recurrent CRC attempt
 bool crcRecurrentActive = false;       // Whether the recurrent search is active
 int crcRecurrentAttempts = 0;          // Recurring attempt counter
+
+// ========== GAME METADATA (GAME INFO panel) ==========
+GameMeta currentMeta;                  // metadata for the game on screen
+String   metaFetchAttemptedFor = "";   // one lazy fetch attempt per game
+bool     metaFetchInProgress   = false; // guard: cleared on EVERY return path
+                                        // (same discipline as downloadInProgress)
+
 bool lastRomHasCrc           = false;  // true when current game's ROM has a valid CRC
 bool lastGameImageOK         = false;  // true when a game-specific image is displayed
                                         // (either cached or freshly downloaded)
@@ -749,7 +812,10 @@ void addGameImageFooter(String gameName) {
   Lcd.setCursor(10, 279);
   Lcd.print("GAME:");
 
-  const int visibleChars = GAME_FOOTER_VISIBLE_CHARS_FULL;
+  // With the button: 29 chars from x=64 end at x=325, clear of it (x>=330).
+  // Without it (game not in ScreenScraper) the name reclaims the full width.
+  const bool showInfoButton = gameInfoAvailable();
+  const int visibleChars = showInfoButton ? 29 : GAME_FOOTER_VISIBLE_CHARS_FULL;
   if (imageFooterScroll.fullText != gameName ||
       imageFooterScroll.maxChars != visibleChars) {
     initScrollText(&imageFooterScroll, gameName, visibleChars);
@@ -763,10 +829,77 @@ void addGameImageFooter(String gameName) {
   Lcd.setCursor(64, 279);
   Lcd.print(displayGame);
 
-  // "Touch screen for MiSTer monitor" = 31 chars x 9 px (1.5x) = 279 px -> centered
+  // Shortened to 24 chars (x 10..226) so it never runs under the button.
   Lcd.setTextColor(THEME_GREEN, THEME_BLACK);
-  Lcd.setCursor(100, 301);
-  Lcd.print("Touch screen for MiSTer monitor");
+  Lcd.setCursor(10, 301);
+  Lcd.print("Touch screen for monitor");
+
+  // GAME INFO button in the right third of the footer — only when the game
+  // can actually produce a panel.
+  if (showInfoButton) drawGameInfoIcon();
+}
+
+// -----------------------------------------------------------------------------
+// gameInfoAvailable() — can this game show a GAME INFO panel at all?
+//
+// The button is hidden whenever the answer is a definite no, so it never leads
+// to an empty panel. Four states, most certain first:
+//   1. metadata already in RAM for this game            -> yes
+//   2. a lazy fetch was already attempted and failed    -> no  (not in the DB)
+//   3. a .meta sidecar sits next to the artwork on SD   -> yes (cached earlier)
+//   4. never tried: offer it only if the game is identifiable — a CRC is what
+//      the jeuInfos query is built from, and lastGameSearchExhausted already
+//      means "system is in ScreenScraper, this game is not".
+//
+// The SD probe is memoised per game: the footer redraws on every screen change
+// and this must not turn into a directory scan each time.
+// -----------------------------------------------------------------------------
+bool gameInfoAvailable() {
+  if (currentGame.length() == 0) return false;
+
+  if (currentMeta.loaded && currentMeta.forGame == currentGame) return true;
+  if (metaFetchAttemptedFor == currentGame) return false;
+
+  static String metaProbeFor     = "\x01";   // sentinel: never a real game name
+  static bool   metaProbeSidecar = false;
+  if (metaProbeFor != currentGame) {
+    metaProbeFor = currentGame;
+    metaProbeSidecar = false;
+    String imgPath;
+    if (sdCardAvailable && findGameImageExact(currentCore, currentGame, imgPath)) {
+      metaProbeSidecar = SD.exists(getMetaPathFromImagePath(imgPath));
+    }
+  }
+  if (metaProbeSidecar) return true;
+
+  if (lastGameSearchExhausted) return false;   // known absent from ScreenScraper
+  return lastRomHasCrc;                        // no CRC -> nothing to query with
+}
+
+// -----------------------------------------------------------------------------
+// drawGameInfoIcon() — "GAME INFO" button in the RIGHT THIRD of the footer band
+// of a fullscreen game/core image. Tapping anywhere in that third opens the
+// GAME INFO panel (see the image-mode touch handler).
+//
+// Filled in THEME_CYAN, the same colour as the "GAME:" label beside it, so the
+// footer reads as one visual family. Black text gives maximum contrast on cyan.
+// Body 330..470 x 276..313; the whole third (x>=320, y>=270) is the hit target,
+// which is why the footer's game name and hint text are kept clear of x=325.
+// -----------------------------------------------------------------------------
+void drawGameInfoIcon(bool pressed) {
+  const int BX = 330, BY = 276, BW = 140, BH = 38;
+
+  // Pressed state flashes the fill white, mirroring buttonPressFeedback()'s
+  // white-label flash on PRV / SCAN / NXT.
+  uint16_t bg = pressed ? THEME_WHITE : THEME_CYAN;
+  Lcd.fillRect(BX, BY, BW, BH, bg);
+
+  // "GAME INFO": 9 chars at size 2 = 108 px wide, 16 px tall — centred in the box
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(THEME_BLACK, bg);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(BX + (BW - 108) / 2, BY + (BH - 16) / 2);
+  Lcd.print("GAME INFO");
 }
 
 void drawCoreImageFooter() {
@@ -782,7 +915,8 @@ void drawCoreImageFooter() {
     Lcd.setCursor(10, 279);
     Lcd.print("GAME:");
 
-    const int visibleChars = GAME_FOOTER_VISIBLE_CHARS_FULL;
+    const bool showInfoButton = gameInfoAvailable();
+    const int visibleChars = showInfoButton ? 29 : GAME_FOOTER_VISIBLE_CHARS_FULL;
     if (imageFooterScroll.fullText != currentGame ||
         imageFooterScroll.maxChars != visibleChars) {
       initScrollText(&imageFooterScroll, currentGame, visibleChars);
@@ -797,8 +931,14 @@ void drawCoreImageFooter() {
     Lcd.print(displayGame);
 
     Lcd.setTextColor(THEME_GREEN, THEME_BLACK);
-    Lcd.setCursor(100, 301);
-    Lcd.print("Touch screen for MiSTer monitor");
+    Lcd.setCursor(10, 301);
+    Lcd.print("Touch screen for monitor");
+
+    // A game is loaded, so the GAME INFO panel may be reachable from here too:
+    // the 30 s rotation alternates game image <-> core image, and the touch
+    // handler accepts the button hitbox on both. Draw it under exactly the
+    // same condition the handler tests, so it is never an invisible button.
+    if (showInfoButton) drawGameInfoIcon();
 
   } else {
     // Centered single line when no game is loaded
@@ -834,25 +974,29 @@ void drawFooter() {
                (int)((millis() / 1000)  % 60));
   }
 
-  // Middle: GAME or CORE with scroll
-  const int FOOTER_MID_X = 120;
-  const int FOOTER_VIS   = 24;   // visible chars: 24 × 9 px (1.5x) = 216 px
+  // Middle: GAME or CORE with scroll.
+  // Suppressed on the GAME INFO page (5): the game name is already the panel's
+  // scrolling title, and repeating it in the footer is noise.
+  if (currentPage != 5) {
+    const int FOOTER_MID_X = 120;
+    const int FOOTER_VIS   = 24;   // visible chars: 24 × 9 px (1.5x) = 216 px
 
-  bool   hasGame = (currentGame.length() > 0);
-  String label  = hasGame ? "G:" : "C:";
-  String source = hasGame ? currentGame : currentCore;
+    bool   hasGame = (currentGame.length() > 0);
+    String label  = hasGame ? "G:" : "C:";
+    String source = hasGame ? currentGame : currentCore;
 
-  if (gameFooterScroll.fullText != source ||
-      gameFooterScroll.maxChars != FOOTER_VIS) {
-    initScrollText(&gameFooterScroll, source, FOOTER_VIS);
+    if (gameFooterScroll.fullText != source ||
+        gameFooterScroll.maxChars != FOOTER_VIS) {
+      initScrollText(&gameFooterScroll, source, FOOTER_VIS);
+    }
+    String displayName = getScrolledText(&gameFooterScroll);
+    while ((int)displayName.length() < FOOTER_VIS) displayName += ' ';
+
+    Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+    Lcd.setCursor(FOOTER_MID_X, 279);
+    Lcd.print(label);
+    Lcd.print(displayName);
   }
-  String displayName = getScrolledText(&gameFooterScroll);
-  while ((int)displayName.length() < FOOTER_VIS) displayName += ' ';
-
-  Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
-  Lcd.setCursor(FOOTER_MID_X, 279);
-  Lcd.print(label);
-  Lcd.print(displayName);
 
   // Right: SD/image cache indicator
   if (sdCardAvailable) {
@@ -1765,8 +1909,39 @@ void handleTouch() {
     // Step 5: Check each button in sequence
     // Using if-else ensures only one button can be activated per touch
     
+    // GAME INFO subpage toggle (page 5 only).
+    // The "1/2>>" indicator at 404..464 x 50..66 is the visual affordance, but
+    // the hit target is EVERYTHING above the footer: y 0..269, full width. That
+    // covers the header band, the game title row and the indicator itself.
+    // Page 5 has no other interactive element up there, and using no X bound
+    // also makes it immune to a mirrored touch X axis. The footer (y>=270)
+    // still belongs to PRV/SCAN/NXT.
+    // Gated on a synopsis existing, because that is exactly when the indicator
+    // is drawn; without it there is no second subpage to toggle to.
+    if (currentPage == 5 && currentMeta.loaded &&
+        currentMeta.synopsis.length() > 0 &&
+        physicalY < 270) {
+      Serial.println("  -> GAME INFO subpage toggle");
+
+      // Feedback: repaint the indicator in white, beep, hold — same contract
+      // as buttonPressFeedback(). The full redraw below restores the cyan.
+      Lcd.setTextWrap(false);
+      Lcd.setTextColor(THEME_WHITE, THEME_BLACK);
+      Lcd.setTextSize(2);
+      Lcd.setCursor(404, 50);
+      Lcd.print(gameInfoSubPage == 0 ? "1/2>>" : "<<2/2");
+      playNextButtonSound();
+      delay(200);
+
+      gameInfoSubPage ^= 1;
+      gameInfoSubPageChange = millis();
+      resetGameInfoSynScroll();
+      needsRedraw = true;
+      lastButtonPress = millis();
+    }
+
     // Check PREV button
-    if (btnPrev.contains(physicalX, physicalY)) {
+    else if (btnPrev.contains(physicalX, physicalY)) {
       Serial.println("  -> PREV button pressed");
       
       // Visual and audio feedback
@@ -2031,6 +2206,10 @@ void setup() {
   _ss_user_str            = appConfig.ssUser;
   _ss_pass_str            = appConfig.ssPass;
   _boxart_region_str      = appConfig.boxartRegion;
+  _info_lang_str          = appConfig.infoLang;
+  _info_synopsis_max      = appConfig.infoSynopsisMax;
+  if (_info_synopsis_max < 200)  _info_synopsis_max = 200;
+  if (_info_synopsis_max > 2000) _info_synopsis_max = 2000;
   _core_images_path_str   = appConfig.coreImagesPath;
   _default_core_image_str = appConfig.defaultCoreImage;
 
@@ -2193,6 +2372,31 @@ void loop() {
     int tx = touch.x;
     int ty = touch.y;
     
+  // === GAME INFO button: right third of the footer band ===
+    // Matches btnNext's x range (320..480) in the HUD, and the footer band
+    // starts at y=270. Tested with the SAME predicate that decides whether the
+    // button is drawn: when it is hidden this falls through to the default
+    // "exit to monitor".
+    if (currentGame.length() > 0 && tx >= 320 && ty >= 270 && gameInfoAvailable()) {
+      Serial.println("GAME INFO button pressed - opening panel");
+
+      // Same feedback contract as buttonPressFeedback(): flash white, beep,
+      // hold 200 ms. No restore needed — the panel replaces this screen.
+      drawGameInfoIcon(true);
+      playNextButtonSound();
+      delay(200);
+
+      currentPage           = 5;
+      gameInfoSubPage       = 0;
+      gameInfoSubPageChange = millis();
+      resetGameInfoSynScroll();
+      showingCoreImage      = false;
+      backgroundLoaded      = false;
+      needsRedraw           = true;
+      lastButtonPress       = millis();
+      return;
+    }
+
   // === Default: exit to monitor ===
     Serial.println("Touch detected - exiting core image to interface");
     // Full-width banner flush against the TOP edge of the screen
@@ -2352,7 +2556,20 @@ void loop() {
   // === NORMAL INTERFACE CODE ===
   
   // Check timeout to activate screensaver
-  if (!showingCoreImage && sdCardAvailable && (millis() - lastButtonPress > SCREENSAVER_TIMEOUT)
+  // The GAME INFO panel governs its own exit when it has a synopsis to show:
+  // it leaves as soon as the text has finished scrolling, however long that
+  // takes. The 1-min timeout is only a fallback for panels that never reach
+  // that state (no metadata, or metadata without a synopsis). Both funnel into
+  // the same return-to-image path below rather than duplicating it.
+  bool gameInfoSelfExits = (currentPage == 5 && currentMeta.loaded &&
+                            currentMeta.synopsis.length() > 0);
+  unsigned long screensaverTimeout =
+      (currentPage == 5) ? GAMEINFO_SCREEN_TIMEOUT : SCREENSAVER_TIMEOUT;
+  bool timeToLeave =
+      (!gameInfoSelfExits && millis() - lastButtonPress > screensaverTimeout) ||
+      (currentPage == 5 && gameInfoForceExit);
+  gameInfoForceExit = false;                 // one-shot: never latches
+  if (!showingCoreImage && sdCardAvailable && timeToLeave
       && (currentCore != coreDownloadFailedFor || currentGame.length() > 0 || FORCE_CORE_REDOWNLOAD)) {
     Serial.println("=== SCREENSAVER ACTIVATION ANALYSIS ===");
     Serial.printf("Current core: '%s'\n", currentCore.c_str());
@@ -2532,6 +2749,46 @@ if (oldGame != currentGame && sdCardAvailable) {
     lastUpdate = millis();
   }
   
+  // === GAME INFO subpage handling ===========================================
+  // Lifecycle of the panel when left alone:
+  //   subpage 1/2 (fields)   -> 30 s, then flip to the synopsis
+  //   subpage 2/2 (synopsis) -> exactly as long as its scroll takes, plus a
+  //                             2 s tail, then exit back to the game image
+  // A synopsis short enough to need no scrolling dwells for GAMEINFO_SYN_FIT_MS.
+  // Nothing here touches lastButtonPress, so the 1-min fallback timeout still
+  // rescues the panel when there is no metadata (and hence no synopsis) at all.
+  {
+    static int giLastPage = -1;
+    if (currentPage == 5 && !showingCoreImage) {
+      if (giLastPage != 5) {
+        gameInfoSubPage = 0;
+        gameInfoSubPageChange = millis();
+        resetGameInfoSynScroll();
+      } else if (currentMeta.loaded && currentMeta.synopsis.length() > 0) {
+        if (gameInfoSubPage == 0) {
+          if (millis() - gameInfoSubPageChange > GAMEINFO_SUBPAGE_TIMEOUT) {
+            gameInfoSubPage = 1;
+            gameInfoSubPageChange = millis();
+            resetGameInfoSynScroll();
+            needsRedraw = true;
+          }
+        } else {
+          tickGameInfoSynScroll();
+          if (gameInfoSynCycled) {
+            unsigned long dwell = gameInfoSynNeedsScroll() ? GAMEINFO_SYN_EXIT_MS
+                                                           : GAMEINFO_SYN_FIT_MS;
+            if (millis() - gameInfoSynCycledTime >= dwell) {
+              Serial.println("GAME INFO: synopsis finished — returning to image");
+              gameInfoForceExit = true;
+            }
+          }
+        }
+      }
+    }
+    // Leaving the panel (or any page) for image mode forces a clean re-entry.
+    giLastPage = showingCoreImage ? -1 : currentPage;
+  }
+
   // Only redraw when necessary
   if (needsRedraw) {
     updateDisplay();
@@ -2540,7 +2797,8 @@ if (oldGame != currentGame && sdCardAvailable) {
   
   static unsigned long lastFooterScrollUpdate = 0;
   if (millis() - lastFooterScrollUpdate > 100) { // Update every 100ms
-    if (!showingCoreImage && gameFooterScroll.needsScroll) {
+    // Page 5 (GAME INFO) draws no game name in the footer, so nothing to scroll.
+    if (!showingCoreImage && currentPage != 5 && gameFooterScroll.needsScroll) {
       String textToShow = (currentGame.length() > 0) ? currentGame : currentCore;
 
       if (gameFooterScroll.fullText == textToShow) {
@@ -2587,6 +2845,45 @@ if (oldGame != currentGame && sdCardAvailable) {
     }
     lastMainHUDCoreUpdate = millis();
   }
+
+  // Scroll the game title on the GAME INFO page (5). Repaints only the title
+  // row, at exactly the same cursor/size/colours displayGameInfo() uses, so
+  // it stays in sync across subpage flips without a full redraw.
+  static unsigned long lastGameInfoTitleUpdate = 0;
+  if (currentPage == 5 && !showingCoreImage &&
+      millis() - lastGameInfoTitleUpdate > 100) {
+    if (gameInfoTitleScroll.needsScroll) {
+      String displayTitle = getScrolledText(&gameInfoTitleScroll);
+      while ((int)displayTitle.length() < gameInfoTitleScroll.maxChars) {
+        displayTitle += ' ';
+      }
+      Lcd.setTextWrap(false);
+      Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+      Lcd.setTextSize(2);
+      Lcd.setCursor(10, 50);
+      Lcd.print(displayTitle);
+    }
+    lastGameInfoTitleUpdate = millis();
+  }
+
+  // Scroll any over-long grid value (genre, developer, publisher...) on the
+  // fields subpage. Each row repaints only its value column, at the y that
+  // displayGameInfo() recorded when it centred the block.
+  static unsigned long lastGameInfoRowUpdate = 0;
+  if (currentPage == 5 && !showingCoreImage && gameInfoSubPage == 0 &&
+      millis() - lastGameInfoRowUpdate > 100) {
+    Lcd.setTextWrap(false);
+    Lcd.setTextColor(THEME_WHITE, THEME_BLACK);
+    Lcd.setTextSize(2);
+    for (int r = 0; r < 6; r++) {
+      if (!gameInfoRowShown[r] || !gameInfoRowScroll[r].needsScroll) continue;
+      String v = getScrolledText(&gameInfoRowScroll[r]);
+      while ((int)v.length() < gameInfoRowScroll[r].maxChars) v += ' ';
+      Lcd.setCursor(GI_VAL_X, gameInfoRowY[r]);
+      Lcd.print(v);
+    }
+    lastGameInfoRowUpdate = millis();
+  }
   
   // Subtle animations only for specific elements
   if (millis() - animTimer > 1000) {
@@ -2599,7 +2896,11 @@ if (oldGame != currentGame && sdCardAvailable) {
     animTimer = millis();
   }
   
-  delay(needsRedraw || showingCoreImage ? 10 : 100);
+  // Poll fast on the GAME INFO page too: its title/grid scroll refreshers make
+  // each iteration longer, and at a 100 ms cadence a quick tap on the subpage
+  // indicator can fall entirely between two touch samples. The refreshers keep
+  // their own 100 ms timers, so this only raises the touch sampling rate.
+  delay(needsRedraw || showingCoreImage || currentPage == 5 ? 10 : 100);
 }
 
 void initSDCard() {
@@ -4032,6 +4333,7 @@ void updateDisplay() {
     case 2: displayStorageArray();    break;
     case 3: displayNetworkTerminal(); break;
     case 4: displayDeviceScanner();   break;
+    case 5: displayGameInfo();        break;
   }
 
   drawFooter();
@@ -4428,6 +4730,914 @@ void drawPortArray(int x, int y, int usbCount, int serialCount) {
   }
 }
 
+// =============================================================================
+// ============================ GAME INFO PANEL ================================
+// =============================================================================
+// Metadata (synopsis, year, publisher, developer, genre, players, rating) for
+// the game in play, extracted from ScreenScraper's jeuInfos.php and cached on
+// the microSD as a .meta sidecar next to the artwork.
+//
+// Design notes (see docs/propuesta-game-info-panel.md):
+//  - ONE extra jeuInfos call per NEW game, then cached forever on SD.
+//  - The response is read through a bounded SLIDING WINDOW so the huge
+//    multi-language synopsis[] never accumulates in heap (window <= ~6 KB).
+//  - Matching is whitespace-tolerant: the live API returns `"key": value`
+//    with a space after the colon (verified against real captures).
+//  - Extraction is ORDER-INDEPENDENT: each field is captured whenever its
+//    marker shows up, so field reordering on the API side cannot break it.
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Sidecar metadata path: same folder + base name as the artwork, ext .meta
+// "/cores/S/Game (USA).jpg" -> "/cores/S/Game (USA).meta"
+// -----------------------------------------------------------------------------
+String getMetaPathFromImagePath(const String &imagePath) {
+  int dot = imagePath.lastIndexOf('.');
+  if (dot <= 0) return imagePath + ".meta";
+  return imagePath.substring(0, dot) + ".meta";
+}
+
+bool saveGameMeta(const String &metaPath, const GameMeta &m) {
+  File f = SD.open(metaPath, FILE_WRITE);
+  if (!f) {
+    Serial.printf("META: cannot open %s for write\n", metaPath.c_str());
+    return false;
+  }
+  // synopsis goes LAST; values are single-line (whitespace already collapsed)
+  f.printf("v=1\nlang=%s\n", _info_lang_str.c_str());
+  f.printf("year=%s\n",      m.year.c_str());
+  f.printf("developer=%s\n", m.developer.c_str());
+  f.printf("publisher=%s\n", m.publisher.c_str());
+  f.printf("players=%s\n",   m.players.c_str());
+  f.printf("rating=%s\n",    m.rating.c_str());
+  f.printf("genre=%s\n",     m.genre.c_str());
+  f.printf("synopsis=%s\n",  m.synopsis.c_str());
+  f.close();
+  Serial.printf("META: saved %s\n", metaPath.c_str());
+  return true;
+}
+
+bool loadGameMeta(const String &metaPath, GameMeta &m) {
+  if (!SD.exists(metaPath)) return false;
+  File f = SD.open(metaPath, FILE_READ);
+  if (!f) return false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    int eq = line.indexOf('=');           // split on FIRST '=' only
+    if (eq < 1) continue;
+    String key = line.substring(0, eq);
+    String val = line.substring(eq + 1);
+    if      (key == "year")      m.year      = val;
+    else if (key == "developer") m.developer = jsonUnescapeAndFold(val);
+    else if (key == "publisher") m.publisher = jsonUnescapeAndFold(val);
+    else if (key == "players")   m.players   = val;
+    else if (key == "rating")    m.rating    = val;
+    else if (key == "genre")     m.genre     = jsonUnescapeAndFold(val);
+    else if (key == "synopsis")  m.synopsis  = jsonUnescapeAndFold(val);
+    // Free-text fields are run through the decoder on load as well: it is
+    // idempotent on already-clean text, and it repairs sidecars written by
+    // earlier firmware that stored raw HTML entities such as &quot;.
+  }
+  f.close();
+  m.loaded = true;
+  Serial.printf("META: loaded %s\n", metaPath.c_str());
+  return true;
+}
+
+// -----------------------------------------------------------------------------
+// JSON scanning helpers — whitespace-tolerant (the live ScreenScraper API
+// returns `"key": "value"` with spaces after colons; verified on captures).
+// All of them operate on a partial window and return -1 / "" when the
+// pattern is not COMPLETELY inside the window yet, so callers simply retry
+// on the next chunk.
+// -----------------------------------------------------------------------------
+static inline bool metaIsWs(char c) {
+  return (c == ' ' || c == '\t' || c == '\r' || c == '\n');
+}
+
+// Index of `"key"` whose string value equals `value` (tolerating whitespace
+// around ':'), or -1.
+static int findKeyStringValue(const String &win, const char *key,
+                              const char *value, int from = 0) {
+  String kq = String("\"") + key + "\"";
+  String vq = String("\"") + value + "\"";
+  int p = win.indexOf(kq, from);
+  while (p >= 0) {
+    int i = p + kq.length();
+    while (i < (int)win.length() && metaIsWs(win[i])) i++;
+    if (i < (int)win.length() && win[i] == ':') {
+      i++;
+      while (i < (int)win.length() && metaIsWs(win[i])) i++;
+      if ((int)win.length() - i >= (int)vq.length() &&
+          win.substring(i, i + vq.length()) == vq) return p;
+    }
+    p = win.indexOf(kq, p + 1);
+  }
+  return -1;
+}
+
+// Index of the '[' that opens the array value of `"key"`, or -1.
+static int findKeyArrayStart(const String &win, const char *key, int from = 0) {
+  String kq = String("\"") + key + "\"";
+  int p = win.indexOf(kq, from);
+  while (p >= 0) {
+    int i = p + kq.length();
+    while (i < (int)win.length() && metaIsWs(win[i])) i++;
+    if (i < (int)win.length() && win[i] == ':') {
+      i++;
+      while (i < (int)win.length() && metaIsWs(win[i])) i++;
+      if (i < (int)win.length() && win[i] == '[') return i;
+    }
+    p = win.indexOf(kq, p + 1);
+  }
+  return -1;
+}
+
+// Index just past the opening quote of the FIRST `"text": "` at/after `from`,
+// or -1 when not fully in the window yet.
+static int findTextValueStart(const String &win, int from) {
+  int t = win.indexOf("\"text\"", from);
+  if (t < 0) return -1;
+  int i = t + 6;
+  while (i < (int)win.length() && metaIsWs(win[i])) i++;
+  if (i >= (int)win.length() || win[i] != ':') return -1;
+  i++;
+  while (i < (int)win.length() && metaIsWs(win[i])) i++;
+  if (i >= (int)win.length() || win[i] != '"') return -1;
+  return i + 1;
+}
+
+// Raw (still-escaped) value of the first `"text"` following `"marker"`.
+// "" until the closing unescaped quote is inside the window.
+static String extractTextAfterMarker(const String &win, const char *marker) {
+  int m = win.indexOf(String("\"") + marker + "\"");
+  if (m < 0) return "";
+  int q1 = findTextValueStart(win, m);
+  if (q1 < 0) return "";
+  int i = q1;
+  while (i < (int)win.length()) {
+    if (win[i] == '\\') { i += 2; continue; }
+    if (win[i] == '"') return win.substring(q1, i);
+    i++;
+  }
+  return "";
+}
+
+// -----------------------------------------------------------------------------
+// foldLatin1() / jsonUnescapeAndFold()
+// - Resolves JSON escapes: \" \\ \/ \n \r \t \uXXXX
+// - Folds common UTF-8 Latin characters to plain ASCII so the stock GLCD
+//   font can render synopsis text (a-acute -> a, n-tilde -> n, ...).
+// - Collapses whitespace runs to a single space.
+// -----------------------------------------------------------------------------
+static char foldLatin1(uint16_t cp) {
+  switch (cp) {
+    case 0xE1: case 0xE0: case 0xE2: case 0xE3: case 0xE4: case 0xE5: return 'a';
+    case 0xC1: case 0xC0: case 0xC2: case 0xC3: case 0xC4: case 0xC5: return 'A';
+    case 0xE9: case 0xE8: case 0xEA: case 0xEB: return 'e';
+    case 0xC9: case 0xC8: case 0xCA: case 0xCB: return 'E';
+    case 0xED: case 0xEC: case 0xEE: case 0xEF: return 'i';
+    case 0xCD: case 0xCC: case 0xCE: case 0xCF: return 'I';
+    case 0xF3: case 0xF2: case 0xF4: case 0xF5: case 0xF6: return 'o';
+    case 0xD3: case 0xD2: case 0xD4: case 0xD5: case 0xD6: return 'O';
+    case 0xFA: case 0xF9: case 0xFB: case 0xFC: return 'u';
+    case 0xDA: case 0xD9: case 0xDB: case 0xDC: return 'U';
+    case 0xF1: return 'n';  case 0xD1: return 'N';   // n-tilde
+    case 0xE7: return 'c';  case 0xC7: return 'C';   // c-cedilla
+    case 0xDF: return 's';                            // sharp s
+    case 0x2019: case 0x2018: return '\'';            // curly quotes
+    case 0x201C: case 0x201D: return '"';
+    case 0x2013: case 0x2014: return '-';             // en/em dash
+    case 0x2026: return '.';                          // ellipsis (approx)
+    case 0x00A0: return ' ';                          // nbsp
+    case 0x00A1: case 0x00BF: return 0;               // inverted !/? -> drop
+    default: return (cp < 0x80) ? (char)cp : '?';
+  }
+}
+
+// -----------------------------------------------------------------------------
+// decodeHtmlEntity() — resolve one HTML entity starting at in[i] (which is '&').
+// On success writes the Unicode code point to `cp` and returns the index just
+// past the ';'. On failure returns -1 and the caller emits a literal '&'.
+// ScreenScraper synopses are HTML fragments, so they carry &quot; &amp; &eacute;
+// and friends on top of the JSON escaping.
+// -----------------------------------------------------------------------------
+static int decodeHtmlEntity(const String &in, int i, uint16_t &cp) {
+  int semi = in.indexOf(';', i + 1);
+  if (semi < 0 || semi - i > 10) return -1;          // not an entity
+  String name = in.substring(i + 1, semi);
+  if (name.length() == 0) return -1;
+
+  if (name[0] == '#') {                              // numeric: &#233; or &#xE9;
+    long v = (name.length() > 1 && (name[1] == 'x' || name[1] == 'X'))
+               ? strtol(name.c_str() + 2, nullptr, 16)
+               : strtol(name.c_str() + 1, nullptr, 10);
+    if (v <= 0 || v > 0xFFFF) return -1;
+    cp = (uint16_t)v;
+    return semi + 1;
+  }
+
+  struct Ent { const char *n; uint16_t cp; };
+  static const Ent TABLE[] = {
+    {"quot", 0x22}, {"apos", 0x27}, {"amp", 0x26}, {"lt", 0x3C}, {"gt", 0x3E},
+    {"nbsp", 0xA0}, {"iexcl", 0xA1}, {"iquest", 0xBF}, {"laquo", 0xAB},
+    {"raquo", 0xBB}, {"deg", 0xB0}, {"middot", 0xB7}, {"times", 0xD7},
+    {"copy", 0xA9}, {"reg", 0xAE}, {"trade", 0x2122},
+    {"lsquo", 0x2018}, {"rsquo", 0x2019}, {"ldquo", 0x201C}, {"rdquo", 0x201D},
+    {"ndash", 0x2013}, {"mdash", 0x2014}, {"hellip", 0x2026},
+    {"agrave", 0xE0}, {"aacute", 0xE1}, {"acirc", 0xE2}, {"auml", 0xE4},
+    {"ccedil", 0xE7}, {"egrave", 0xE8}, {"eacute", 0xE9}, {"ecirc", 0xEA},
+    {"euml", 0xEB}, {"igrave", 0xEC}, {"iacute", 0xED}, {"icirc", 0xEE},
+    {"ntilde", 0xF1}, {"ograve", 0xF2}, {"oacute", 0xF3}, {"ocirc", 0xF4},
+    {"ouml", 0xF6}, {"ugrave", 0xF9}, {"uacute", 0xFA}, {"ucirc", 0xFB},
+    {"uuml", 0xFC}, {"szlig", 0xDF},
+  };
+  for (unsigned k = 0; k < sizeof(TABLE) / sizeof(TABLE[0]); k++) {
+    if (name == TABLE[k].n) { cp = TABLE[k].cp; return semi + 1; }
+  }
+  return -1;
+}
+
+String jsonUnescapeAndFold(const String &in) {
+  String out;
+  out.reserve(in.length());
+  for (int i = 0; i < (int)in.length(); i++) {
+    unsigned char c = (unsigned char)in[i];
+    if (c == '\\' && i + 1 < (int)in.length()) {
+      char n = in[i + 1];
+      if      (n == 'n' || n == 'r' || n == 't') { out += ' '; i++; }
+      else if (n == '"' || n == '\\' || n == '/') { out += n;  i++; }
+      else if (n == 'u' && i + 5 < (int)in.length()) {
+        char hex[5];
+        in.substring(i + 2, i + 6).toCharArray(hex, 5);
+        uint16_t cp = (uint16_t)strtol(hex, nullptr, 16);
+        char fc = foldLatin1(cp);
+        if (fc) out += fc;
+        i += 5;
+      }
+      else { i++; }                                  // unknown escape: drop
+    }
+    else if (c == '&') {                             // HTML entity, e.g. &quot;
+      uint16_t cp = 0;
+      int next = decodeHtmlEntity(in, i, cp);
+      if (next > 0) {
+        char fc = foldLatin1(cp);
+        if (fc) out += fc;
+        i = next - 1;                                // loop's i++ lands on next
+      } else {
+        out += '&';                                  // a literal ampersand
+      }
+    }
+    else if (c < 0x80) out += (char)c;
+    else if ((c & 0xE0) == 0xC0 && i + 1 < (int)in.length()) {   // 2-byte UTF-8
+      uint16_t cp = ((c & 0x1F) << 6) | ((unsigned char)in[i + 1] & 0x3F);
+      char fc = foldLatin1(cp);
+      if (fc) out += fc;
+      i++;
+    }
+    else if ((c & 0xF0) == 0xE0 && i + 2 < (int)in.length()) {   // 3-byte UTF-8
+      uint16_t cp = ((c & 0x0F) << 12) |
+                    (((unsigned char)in[i + 1] & 0x3F) << 6) |
+                    ((unsigned char)in[i + 2] & 0x3F);
+      char fc = foldLatin1(cp);
+      if (fc) out += fc;
+      i += 2;
+    }
+    else out += '?';                                 // 4-byte or malformed
+  }
+  // Collapse whitespace runs
+  String clean;
+  clean.reserve(out.length());
+  bool prevSpace = false;
+  for (int i = 0; i < (int)out.length(); i++) {
+    char c = out[i];
+    if (c == ' ' || c == '\t') { if (!prevSpace) clean += ' '; prevSpace = true; }
+    else { clean += c; prevSpace = false; }
+  }
+  clean.trim();
+  return clean;
+}
+
+// -----------------------------------------------------------------------------
+// fetchGameMetadataJSON()
+//
+// One extra jeuInfos.php call per NEW game (then cached on SD forever).
+// gameId: ScreenScraper numeric game id when known ("" -> identify by ROM
+// hashes, exactly like searchWithJeuInfosPreciseJSON does).
+// Returns true if at least one field was captured (partial data is fine).
+//
+// Algorithm validated end-to-end against real API captures (meta_by_crc.json
+// and meta_by_gameid.json): typical read 4-8 KB of a 30-40 KB body, peak
+// window under 5 KB, early stop at "medias".
+// Flag discipline: metaFetchInProgress is cleared on EVERY return path.
+// -----------------------------------------------------------------------------
+bool fetchGameMetadataJSON(String gameId, String coreName,
+                           RomDetails romDetails, GameMeta &out) {
+  if (metaFetchInProgress) return false;
+  metaFetchInProgress = true;
+
+  if (ESP.getFreeHeap() < 100000) {
+    Serial.printf("META: insufficient heap (%d)\n", ESP.getFreeHeap());
+    metaFetchInProgress = false;
+    return false;
+  }
+
+  String url = "https://api.screenscraper.fr/api2/jeuInfos.php";
+  url += "?devid=" + String(SCREENSCRAPER_DEV_USER);
+  url += "&devpassword=" + String(SCREENSCRAPER_DEV_PASS);
+  url += "&softname=" + String(SCREENSCRAPER_SOFTWARE);
+  url += "&output=json";
+  url += "&ssid=" + urlEncode(String(SCREENSCRAPER_USER));
+  url += "&sspassword=" + urlEncode(String(SCREENSCRAPER_PASS));
+  if (gameId.length() > 0) {
+    url += "&gameid=" + gameId;
+  } else {
+    String systemId = getScreenScraperSystemId(coreName);
+    if (systemId.length() == 0) {
+      Serial.printf("META: core '%s' not mapped, skipping\n", coreName.c_str());
+      metaFetchInProgress = false;
+      return false;
+    }
+    url += "&systemeid=" + systemId;
+    url += "&romtype=rom";
+    url += "&romnom=" + urlEncode(romDetails.filename);
+    url += "&crc=" + romDetails.crc32;
+    url += "&romtaille=" + String(romDetails.filesize);
+    url += "&md5=" + romDetails.md5;
+    url += "&sha1=";
+  }
+  Serial.printf("META fetch URL: %s\n", redactScreenScraperUrl(url).c_str());
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(30000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+  http.addHeader("Accept", "application/json");
+
+  int httpCode = http.GET();
+  g_lastSSHttpCode = httpCode;
+  if (httpCode != 200) {
+    Serial.printf("META: HTTP %d\n", httpCode);
+    http.end();
+    metaFetchInProgress = false;
+    return false;
+  }
+
+  WiFiClient *stream = http.getStreamPtr();
+
+  // ---- sliding window state --------------------------------------------------
+  const size_t WIN_MAX   = 6144;   // window cap
+  const size_t TAIL_KEEP = 512;    // overlap kept when trimming
+  const size_t HARD_CAP  = 80000;  // absolute bytes read from the wire
+  String win;
+  win.reserve(WIN_MAX + 600);
+  size_t totalRead = 0;
+  unsigned long lastDataMs = millis();
+
+  bool gotPub = false, gotDev = false, gotPlayers = false, gotRating = false;
+  bool gotDates = false, gotGenres = false;
+
+  // synopsis: 0 = searching language, 1 = copying text, 2 = done
+  int  synState = 0;
+  bool synEsc = false, synTakingEN = false, inSynopsisBlock = false;
+  String synRaw, synRawEN;
+  synRaw.reserve(_info_synopsis_max + 8);
+
+  String datesBlock, genresBlock;
+  bool inDates = false, inGenres = false;
+  int  depth = 0;
+
+  // Capture one bracketed array block (bounded, bracket-depth tracked).
+  auto captureBlock = [&](const char *key, bool &inFlag, String &blk, bool &done) {
+    if (done) return;
+    if (!inFlag) {
+      int b = findKeyArrayStart(win, key);
+      if (b < 0) return;
+      inFlag = true;
+      depth = 0;
+      win.remove(0, b);                 // window now starts at '['
+    }
+    int i = 0;
+    while (i < (int)win.length()) {
+      char c = win[i];
+      i++;
+      if (c == '[') depth++;
+      if (c == ']') {
+        depth--;
+        if (depth == 0) { blk += c; done = true; inFlag = false; break; }
+      }
+      if ((int)blk.length() < 1500) blk += c;
+    }
+    win.remove(0, i);
+  };
+
+  char tmp[513];
+
+  while (totalRead < HARD_CAP) {
+    if (!http.connected() && stream->available() == 0) break;
+    if (ESP.getFreeHeap() < 60000) { Serial.println("META: low heap, stop"); break; }
+    if (millis() - lastDataMs > 8000) { Serial.println("META: read stall, stop"); break; }
+
+    int avail = stream->available();
+    if (avail <= 0) {
+      Board.update();
+      screenshotServer.handleClient();
+      delay(20);
+      continue;
+    }
+    int n = stream->readBytes(tmp, (avail > 512) ? 512 : avail);
+    if (n <= 0) continue;
+    tmp[n] = 0;
+    lastDataMs = millis();
+    totalRead += n;
+    win += tmp;
+
+    // ---- simple fields (early prefix of response.jeu) ------------------------
+    if (!gotPub) {
+      String v = extractTextAfterMarker(win, "editeur");
+      if (v.length()) { out.publisher = jsonUnescapeAndFold(v); gotPub = true; }
+    }
+    if (!gotDev) {
+      String v = extractTextAfterMarker(win, "developpeur");
+      if (v.length()) { out.developer = jsonUnescapeAndFold(v); gotDev = true; }
+    }
+    if (!gotPlayers) {
+      String v = extractTextAfterMarker(win, "joueurs");
+      if (v.length()) { out.players = jsonUnescapeAndFold(v); gotPlayers = true; }
+    }
+    if (!gotRating) {
+      String v = extractTextAfterMarker(win, "note");
+      if (v.length()) { out.rating = jsonUnescapeAndFold(v) + "/20"; gotRating = true; }
+    }
+
+    // ---- synopsis: preferred language, fallback English ----------------------
+    if (synState == 0) {
+      if (!inSynopsisBlock && findKeyArrayStart(win, "synopsis") >= 0)
+        inSynopsisBlock = true;
+      if (inSynopsisBlock) {
+        int lp = findKeyStringValue(win, "langue", _info_lang_str.c_str());
+        int le = findKeyStringValue(win, "langue", "en");
+        int use = (lp >= 0) ? lp
+                            : ((le >= 0 && synRawEN.length() == 0) ? le : -1);
+        if (use >= 0) {
+          synTakingEN = (lp < 0);
+          int q1 = findTextValueStart(win, use);
+          if (q1 >= 0) {
+            win.remove(0, q1);          // consume up to the opening quote
+            synState = 1;
+          }
+        }
+        // Synopsis region ended without a match -> give up on synopsis
+        if (synState == 0 && (findKeyArrayStart(win, "classifications") >= 0 ||
+                              findKeyArrayStart(win, "dates")  >= 0 ||
+                              findKeyArrayStart(win, "genres") >= 0 ||
+                              findKeyArrayStart(win, "medias") >= 0)) {
+          synState = 2;
+        }
+      }
+    }
+    if (synState == 1) {
+      // consume the whole window into the destination (window never grows)
+      String &dst = synTakingEN ? synRawEN : synRaw;
+      int i = 0;
+      while (i < (int)win.length()) {
+        char c = win[i];
+        i++;
+        if (synEsc) {
+          if ((int)dst.length() < _info_synopsis_max) { dst += '\\'; dst += c; }
+          synEsc = false;
+          continue;
+        }
+        if (c == '\\') { synEsc = true; continue; }
+        if (c == '"') {                 // synopsis text finished
+          synState = (synTakingEN && _info_lang_str != "en") ? 0 : 2;
+          break;
+        }
+        if ((int)dst.length() < _info_synopsis_max) dst += c;
+      }
+      win.remove(0, i);
+      if (synState == 1) continue;      // still copying: read next chunk
+    }
+
+    // ---- dates[] and genres[] mini-blocks (never while copying synopsis) -----
+    if (synState == 2 || !inSynopsisBlock) {
+      captureBlock("dates",  inDates,  datesBlock,  gotDates);
+      captureBlock("genres", inGenres, genresBlock, gotGenres);
+    }
+
+    // ---- stop / trim ----------------------------------------------------------
+    if (findKeyArrayStart(win, "medias") >= 0) break;   // all fields are behind us
+    if (gotPub && gotDev && gotPlayers && gotRating &&
+        synState == 2 && gotDates && gotGenres) break;
+    if (!inDates && !inGenres && synState != 1 && (size_t)win.length() > WIN_MAX)
+      win.remove(0, win.length() - TAIL_KEEP);
+  }
+  http.end();
+
+  // ---- post-process -----------------------------------------------------------
+  if (synRaw.length() == 0 && synRawEN.length() > 0) synRaw = synRawEN;
+  if (synRaw.length() > 0) {
+    out.synopsis = jsonUnescapeAndFold(synRaw);
+    if ((int)out.synopsis.length() >= _info_synopsis_max - 4) out.synopsis += "...";
+  }
+
+  // Year: region priority pref -> wor -> us -> eu -> jp (mirrors the artwork
+  // region ordering); take the first 4 chars ("1990-07-02" -> "1990").
+  if (datesBlock.length() > 0) {
+    const char *ORDER[5];
+    ORDER[0] = _boxart_region_str.c_str();
+    ORDER[1] = "wor"; ORDER[2] = "us"; ORDER[3] = "eu"; ORDER[4] = "jp";
+    for (int r = 0; r < 5 && out.year.length() == 0; r++) {
+      int p = findKeyStringValue(datesBlock, "region", ORDER[r]);
+      if (p < 0) continue;
+      String v = extractTextAfterMarker(datesBlock.substring(p), "region");
+      if (v.length() >= 4) out.year = v.substring(0, 4);
+    }
+    if (out.year.length() == 0) {       // any region at all
+      String v = extractTextAfterMarker(datesBlock, "region");
+      if (v.length() >= 4) out.year = v.substring(0, 4);
+    }
+  }
+
+  // Genre: up to two genre names in the preferred language, fallback English.
+  if (genresBlock.length() > 0) {
+    int from = 0, taken = 0;
+    while (taken < 2) {
+      int p = findKeyStringValue(genresBlock, "langue", _info_lang_str.c_str(), from);
+      if (p < 0 && taken == 0)
+        p = findKeyStringValue(genresBlock, "langue", "en", from);
+      if (p < 0) break;
+      String v = extractTextAfterMarker(genresBlock.substring(p), "langue");
+      if (v.length()) {
+        String g = jsonUnescapeAndFold(v);
+        if (out.genre.indexOf(g) < 0) {  // avoid duplicates across genres
+          if (out.genre.length()) out.genre += " / ";
+          out.genre += g;
+          taken++;
+        }
+      }
+      from = p + 10;
+    }
+  }
+
+  bool any = out.year.length() || out.developer.length() || out.publisher.length() ||
+             out.genre.length() || out.synopsis.length() || out.players.length();
+  out.loaded = any;
+  Serial.printf("META fetch done: read=%u heap=%d | y=%s dev='%s' pub='%s' pl=%s rt=%s gen='%s' syn=%d ch\n",
+                (unsigned)totalRead, ESP.getFreeHeap(),
+                out.year.c_str(), out.developer.c_str(), out.publisher.c_str(),
+                out.players.c_str(), out.rating.c_str(), out.genre.c_str(),
+                out.synopsis.length());
+  metaFetchInProgress = false;
+  return any;
+}
+
+// -----------------------------------------------------------------------------
+// wrapTextToLines() — greedy word wrap by character count.
+// ScaledDisplay does not expose textWidth(); the default GLCD font is a fixed
+// 6 px per character per size unit, so wrapping by character count is exact.
+// Words longer than a full line are hard-split (URLs, long romanised titles).
+// Returns the number of lines written to `out` (never more than maxOut).
+// -----------------------------------------------------------------------------
+int wrapTextToLines(const String &text, int maxChars, String *out, int maxOut) {
+  if (maxChars < 4 || maxOut < 1) return 0;
+  int n = 0;
+  String cur = "";
+  int from = 0;
+  while (from <= (int)text.length() && n < maxOut) {
+    int sp = text.indexOf(' ', from);
+    String word = (sp < 0) ? text.substring(from) : text.substring(from, sp);
+
+    // Hard-split any word that cannot fit on a line by itself
+    while ((int)word.length() > maxChars && n < maxOut) {
+      if (cur.length()) { out[n++] = cur; cur = ""; if (n >= maxOut) break; }
+      out[n++] = word.substring(0, maxChars);
+      word = word.substring(maxChars);
+    }
+    if (n >= maxOut) return n;
+
+    String cand = cur.length() ? cur + " " + word : word;
+    if ((int)cand.length() <= maxChars) {
+      cur = cand;
+    } else {
+      out[n++] = cur;
+      cur = word;
+    }
+    if (sp < 0) break;
+    from = sp + 1;
+  }
+  if (n < maxOut && cur.length()) out[n++] = cur;
+  return n;
+}
+
+// -----------------------------------------------------------------------------
+// drawWrappedText() — draw up to maxLines wrapped lines inside width w,
+// appending "..." to the last line when the text does not fit.
+// -----------------------------------------------------------------------------
+void drawWrappedText(int x, int y, int w, int lineH, int maxLines, const String &text) {
+  int maxChars = w / 6;                  // 6 px/char, default font, size 1
+  if (maxChars < 8 || maxLines < 1) return;
+
+  // One extra slot tells us whether the text overflowed the visible lines.
+  const int CAP = 64;
+  if (maxLines > CAP - 1) maxLines = CAP - 1;
+  static String lines[CAP];
+  int n = wrapTextToLines(text, maxChars, lines, maxLines + 1);
+
+  int shown = (n > maxLines) ? maxLines : n;
+  for (int i = 0; i < shown; i++) {
+    String l = lines[i];
+    if (i == shown - 1 && n > maxLines) {
+      if ((int)l.length() > maxChars - 4) l = l.substring(0, maxChars - 4);
+      l += " ...";
+    }
+    Lcd.setCursor(x, y + i * lineH);
+    Lcd.print(l);
+  }
+  for (int i = 0; i < CAP; i++) lines[i] = "";   // release heap
+}
+
+// =============================================================================
+// Synopsis subpage (2/2) — vertical line scroll
+// =============================================================================
+// At textSize(2) — the same size as the metadata grid — the GLCD font gives a
+// 12 px advance and a 16 px cap height, so 456 px is 38 chars/line and the
+// content band (y 96..264) fits 8 lines: ~304 visible characters against a
+// stored synopsis of up to 2000. The text is therefore wrapped ONCE into a
+// cached line array and an 8-line window scrolls down it, pausing at both ends.
+// -----------------------------------------------------------------------------
+// Line cache ceiling. info_synopsis_max clamps at 2000 chars; at 38 chars per
+// line that is ~53 lines before word breaks, so 100 leaves real headroom.
+#define GAMEINFO_SYN_MAX_LINES 100
+static String gameInfoSynLines[GAMEINFO_SYN_MAX_LINES];
+static int    gameInfoSynLineCount = 0;
+static String gameInfoSynCachedFor = "";
+
+static const int SYN_X      = 10;
+static const int SYN_TOP    = 96;
+static const int SYN_LINEH  = 20;   // 16 px glyph at size 2 + 4 px leading
+static const int SYN_VIS    = 8;    // visible lines: (264 - 96) / 20
+static const int SYN_CHARS  = 38;   // 456 px / (6 px * size 2)
+
+// Wrap the current synopsis into the line cache (idempotent).
+static void buildGameInfoSynLines() {
+  if (gameInfoSynCachedFor == currentMeta.synopsis) return;
+  for (int i = 0; i < GAMEINFO_SYN_MAX_LINES; i++) gameInfoSynLines[i] = "";
+  gameInfoSynLineCount = wrapTextToLines(currentMeta.synopsis, SYN_CHARS,
+                                         gameInfoSynLines, GAMEINFO_SYN_MAX_LINES);
+  gameInfoSynCachedFor = currentMeta.synopsis;
+  Serial.printf("META: synopsis wrapped into %d lines\n", gameInfoSynLineCount);
+}
+
+// True when the synopsis is taller than the visible window.
+bool gameInfoSynNeedsScroll() {
+  buildGameInfoSynLines();
+  return gameInfoSynLineCount > SYN_VIS;
+}
+
+// Rewind to the top and pause there (called on every subpage/page entry).
+void resetGameInfoSynScroll() {
+  gameInfoSynScroll     = 0;
+  gameInfoSynScrollTime = millis();
+  gameInfoSynCycledTime = 0;
+  gameInfoSynPaused     = true;
+  gameInfoSynCycled     = false;
+  gameInfoForceExit     = false;
+}
+
+// -----------------------------------------------------------------------------
+// drawGameInfoSynopsis() — paint the visible window.
+// Every one of the SYN_VIS rows is printed padded to SYN_CHARS with an explicit
+// background colour, so a scroll step overwrites the previous frame exactly and
+// no fillRect (hence no flicker) is needed.
+// -----------------------------------------------------------------------------
+void drawGameInfoSynopsis() {
+  buildGameInfoSynLines();
+
+  int maxTop = gameInfoSynLineCount - SYN_VIS;
+  if (maxTop < 0) maxTop = 0;
+  if (gameInfoSynScroll > maxTop) gameInfoSynScroll = maxTop;
+
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(THEME_WHITE, THEME_BLACK);
+  Lcd.setTextSize(2);
+  for (int i = 0; i < SYN_VIS; i++) {
+    int li = gameInfoSynScroll + i;
+    String l = (li < gameInfoSynLineCount) ? gameInfoSynLines[li] : String("");
+    while ((int)l.length() < SYN_CHARS) l += ' ';
+    Lcd.setCursor(SYN_X, SYN_TOP + i * SYN_LINEH);
+    Lcd.print(l);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// tickGameInfoSynScroll() — advance one line per GAMEINFO_SYN_STEP_MS, holding
+// GAMEINFO_SYN_PAUSE_MS at the top and at the bottom.
+//
+// When the bottom hold expires the window FREEZES on the last lines and
+// gameInfoSynCycled is set (stamping gameInfoSynCycledTime). It deliberately
+// does not rewind: the loop then waits GAMEINFO_SYN_EXIT_MS more before leaving
+// the panel, and that extra time must be spent looking at the END of the text,
+// which is what the reader is still finishing.
+// -----------------------------------------------------------------------------
+void tickGameInfoSynScroll() {
+  if (gameInfoSynCycled) return;            // finished: frozen at the bottom
+
+  int maxTop = gameInfoSynLineCount - SYN_VIS;
+  if (maxTop < 1) {                         // fits entirely: nothing to scroll
+    gameInfoSynCycled     = true;
+    gameInfoSynCycledTime = millis();
+    return;
+  }
+
+  unsigned long now = millis();
+
+  if (gameInfoSynPaused) {
+    if (now - gameInfoSynScrollTime < GAMEINFO_SYN_PAUSE_MS) return;
+    if (gameInfoSynScroll >= maxTop) {      // the bottom hold just finished
+      gameInfoSynCycled     = true;         // stay on the last lines
+      gameInfoSynCycledTime = now;
+      return;
+    }
+    gameInfoSynPaused     = false;          // the top hold just finished
+    gameInfoSynScrollTime = now;
+    return;
+  }
+
+  if (now - gameInfoSynScrollTime >= GAMEINFO_SYN_STEP_MS) {
+    gameInfoSynScroll++;
+    gameInfoSynScrollTime = now;
+    if (gameInfoSynScroll >= maxTop) {      // reached the end: hold there
+      gameInfoSynScroll = maxTop;
+      gameInfoSynPaused = true;
+    }
+    drawGameInfoSynopsis();
+  }
+}
+
+// -----------------------------------------------------------------------------
+// displayGameInfo() — page 5 (GAME INFO / NOW PLAYING)
+//
+// Self-healing metadata resolution on every draw:
+//  1. game changed -> reset + try the .meta sidecar next to the artwork
+//  2. no sidecar -> ONE lazy fetch attempt per game (needs a valid CRC and
+//     no download in progress), then the sidecar is written for next time
+// updateDisplay() already draws header and footer; this only paints the
+// content area (y 44..269), like every other page on this board.
+// -----------------------------------------------------------------------------
+void displayGameInfo() {
+  // ========== CLEAR CONTENT AREA ONLY ==========
+  Lcd.fillRect(0, 44, 480, 226, THEME_BLACK);
+
+  bool haveGame = (currentGame.length() > 0);
+
+  // ---- 1. game changed: reset and try the sidecar -----------------------------
+  if (haveGame && currentMeta.forGame != currentGame) {
+    currentMeta = GameMeta();
+    currentMeta.forGame = currentGame;
+    String imgPath;
+    if (findGameImageExact(currentCore, currentGame, imgPath)) {
+      loadGameMeta(getMetaPathFromImagePath(imgPath), currentMeta);
+    }
+  }
+
+  // ---- 2. no sidecar: one lazy fetch attempt per game -------------------------
+  if (haveGame && !currentMeta.loaded &&
+      metaFetchAttemptedFor != currentGame &&
+      !downloadInProgress && !metaFetchInProgress) {
+    RomDetails rd = getCurrentRomDetails();
+    if (rd.available && rd.hashCalculated && rd.crc32.length() > 0) {
+      metaFetchAttemptedFor = currentGame;
+      Lcd.setTextColor(THEME_CYAN);
+      Lcd.setTextSize(1.5);
+      Lcd.setCursor(10, 84);
+      Lcd.print("FETCHING GAME INFO...");
+      GameMeta m;
+      if (fetchGameMetadataJSON("", currentCore, rd, m)) {   // "" = identify by CRC
+        m.forGame = currentGame;
+        currentMeta = m;
+        String imgPath2;
+        if (findGameImageExact(currentCore, currentGame, imgPath2)) {
+          saveGameMeta(getMetaPathFromImagePath(imgPath2), m);
+        }
+      }
+      Lcd.fillRect(0, 44, 480, 226, THEME_BLACK);            // redraw clean
+    }
+  }
+
+  // ---- header: game title (scrolls horizontally when too long) ----------------
+  // Scroll state is (re)initialised only when the underlying text changes, so
+  // the scroll position survives redraws (subpage flips, animation ticks).
+  // The visible window is padded to maxChars so the painted pixel width is
+  // constant, which is what makes setTextColor(fg, bg) flicker-free here.
+  String title = haveGame ? currentGame : String("NO GAME LOADED");
+  const int titleChars = 30;   // 360 px; the indicator sits at x 404..464
+  if (gameInfoTitleScroll.fullText != title ||
+      gameInfoTitleScroll.maxChars != titleChars) {
+    initScrollText(&gameInfoTitleScroll, title, titleChars);
+  }
+  String titleShown = getScrolledText(&gameInfoTitleScroll);
+  while ((int)titleShown.length() < titleChars) titleShown += ' ';
+
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(10, 50);
+  Lcd.print(titleShown);
+  Lcd.drawFastHLine(10, 72, 460, THEME_CYAN);
+
+  if (!haveGame || !currentMeta.loaded) {
+    gameInfoSubPage = 0;                 // no second subpage without metadata
+    Lcd.setTextColor(THEME_GRAY);
+    Lcd.setTextSize(1.5);
+    Lcd.setCursor(10, 84);
+    Lcd.print(haveGame ? "NO METADATA AVAILABLE" : "LOAD A GAME ON THE MISTER");
+    if (haveGame) {
+      Lcd.setCursor(10, 104);
+      Lcd.print("(game not identified on ScreenScraper)");
+    }
+    return;
+  }
+
+  // Only offer a synopsis subpage when there actually is a synopsis.
+  bool hasSynopsis = (currentMeta.synopsis.length() > 0);
+  if (gameInfoSubPage == 1 && !hasSynopsis) gameInfoSubPage = 0;
+
+  // ---- subpage indicator / toggle (top-right of the title row, tappable) ------
+  // 5 chars at size 2 = 60 px at x 404..464. No frame: the arrows carry the
+  // affordance. Hit target in the touch handler: the whole area above y=270.
+  if (hasSynopsis) {
+    Lcd.setTextColor(THEME_CYAN, THEME_BLACK);
+    Lcd.setTextSize(2);
+    Lcd.setCursor(404, 50);
+    Lcd.print(gameInfoSubPage == 0 ? "1/2>>" : "<<2/2");
+  }
+
+  if (gameInfoSubPage == 0) {
+    // ---- SUBPAGE 1/2: metadata fields -----------------------------------------
+    // size 2: glyph advance 12 px, height 16 px. Label column 10..94
+    // ("PLAYERS" = 7 x 12 px), value column from x=110 with 30 chars of room.
+    // Rows with an empty value are skipped, so the block height depends on the
+    // game: count the visible rows first, then centre them vertically in the
+    // band between the title rule (y=72) and the footer band (y=270).
+    struct MetaRow { const char *label; String *val; };
+    MetaRow rows[] = {
+      { "YEAR",    &currentMeta.year      },
+      { "DEV",     &currentMeta.developer },
+      { "PUB",     &currentMeta.publisher },
+      { "GENRE",   &currentMeta.genre     },
+      { "PLAYERS", &currentMeta.players   },
+      { "RATING",  &currentMeta.rating    },
+    };
+    const int BAND_TOP = 80, BAND_BOT = 264;   // usable content band
+    const int ROW_STEP = 26, ROW_H = 16;       // row pitch, glyph height at 2
+
+    int visible = 0;
+    for (int r = 0; r < 6; r++) if (rows[r].val->length() > 0) visible++;
+
+    // Block height = n pitches minus the trailing gap below the last row.
+    int blockH = visible * ROW_STEP - (ROW_STEP - ROW_H);
+    int y = BAND_TOP + ((BAND_BOT - BAND_TOP) - blockH) / 2;
+    if (y < BAND_TOP) y = BAND_TOP;
+
+    Lcd.setTextWrap(false);
+    for (int r = 0; r < 6; r++) {
+      gameInfoRowShown[r] = (rows[r].val->length() > 0);
+      if (!gameInfoRowShown[r]) continue;
+
+      Lcd.setTextColor(THEME_CYAN, THEME_BLACK);
+      Lcd.setTextSize(2);
+      Lcd.setCursor(10, y);
+      Lcd.print(rows[r].label);
+
+      // Value: scrolls horizontally when longer than the column. Padding to a
+      // constant width keeps the painted pixel width stable, which is what
+      // makes setTextColor(fg, bg) flicker-free on every scroll step.
+      if (gameInfoRowScroll[r].fullText != *rows[r].val ||
+          gameInfoRowScroll[r].maxChars != GI_VAL_CHARS) {
+        initScrollText(&gameInfoRowScroll[r], *rows[r].val, GI_VAL_CHARS);
+      }
+      String v = getScrolledText(&gameInfoRowScroll[r]);
+      while ((int)v.length() < GI_VAL_CHARS) v += ' ';
+
+      Lcd.setTextColor(THEME_WHITE, THEME_BLACK);
+      Lcd.setCursor(GI_VAL_X, y);
+      Lcd.print(v);
+
+      gameInfoRowY[r] = y;
+      y += ROW_STEP;
+    }
+  } else {
+    // ---- SUBPAGE 2/2: synopsis (wrapped, vertical auto-scroll) ----------------
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.setTextSize(1.5);
+    Lcd.setCursor(10, 78);
+    Lcd.print("SYNOPSIS");
+    drawGameInfoSynopsis();
+  }
+}
+
 String getPageTitle() {
   switch(currentPage) {
     case 0: return "MAIN HUD";
@@ -4435,6 +5645,7 @@ String getPageTitle() {
     case 2: return "STORAGE";
     case 3: return "NETWORK";
     case 4: return "DEVICES";
+    case 5: return "GAME INFO";
     default: return "SYSTEM";
   }
 }
@@ -4446,6 +5657,7 @@ String getPageSubtitle() {
     case 2: return "DISK ARRAY";
     case 3: return "TERMINAL";
     case 4: return "SCANNER";
+    case 5: return "NOW PLAYING";
     default: return "ONLINE";
   }
 }
@@ -6510,6 +7722,22 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
       
       if (success) {
         Serial.printf("JSON-BASED DOWNLOAD SUCCESS!\n");
+
+        // --- GAME INFO panel: metadata prefetch. Same operation, warm
+        // connection, gameId already resolved. A failed metadata fetch
+        // NEVER affects the artwork result.
+        {
+          String metaPath = getMetaPathFromImagePath(savePath);
+          if (!SD.exists(metaPath)) {
+            showDownloadProgress(92, "Fetching game info...");
+            GameMeta meta;
+            if (fetchGameMetadataJSON(gameInfo.gameId, coreName, romDetails, meta)) {
+              saveGameMeta(metaPath, meta);
+              if (gameName == currentGame) { meta.forGame = gameName; currentMeta = meta; }
+            }
+          }
+        }
+
         showDownloadProgress(100, "JSON download complete!");
         delay(1500);
         downloadInProgress = false;
@@ -6566,6 +7794,20 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
           
           if (success) {
             Serial.printf("RETRY-BASED DOWNLOAD SUCCESS!\n");
+
+            // --- GAME INFO panel: metadata prefetch (see first-attempt hook)
+            {
+              String metaPath = getMetaPathFromImagePath(savePath);
+              if (!SD.exists(metaPath)) {
+                showDownloadProgress(92, "Fetching game info...");
+                GameMeta meta;
+                if (fetchGameMetadataJSON(gameInfoRetry.gameId, coreName, romDetails, meta)) {
+                  saveGameMeta(metaPath, meta);
+                  if (gameName == currentGame) { meta.forGame = gameName; currentMeta = meta; }
+                }
+              }
+            }
+
             showDownloadProgress(100, "Retry download complete!");
             delay(1500);
             downloadInProgress = false;
