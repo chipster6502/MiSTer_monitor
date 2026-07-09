@@ -38,6 +38,10 @@ struct AppConfig {
   int    ssRetries    = 2;
   bool   ssUseHttps   = false;
 
+  // --- Game info panel ---------------------------------------------------------
+  String infoLang        = "en";   // synopsis/genre language: en es pt fr de it
+  int    infoSynopsisMax = 900;    // stored synopsis cap (chars, clamped 200-2000)
+
   // --- Image paths -----------------------------------------------------------
   String coreImagesPath    = "/cores";
   String defaultCoreImage  = "/cores/menu.jpg";
@@ -170,6 +174,9 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "timeout")                { cfg.ssTimeout = val.toInt(); }
     else if (key == "retries")                { cfg.ssRetries = val.toInt(); }
     else if (key == "use_https")              { cfg.ssUseHttps = parseBool(val); }
+    // [gameinfo]
+    else if (key == "info_lang")              { cfg.infoLang = val; }
+    else if (key == "info_synopsis_max")      { cfg.infoSynopsisMax = val.toInt(); }
     // [images]
     else if (key == "base_path")              { cfg.coreImagesPath = val; }
     else if (key == "default_image")          { cfg.defaultCoreImage = val; }

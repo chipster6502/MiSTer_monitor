@@ -25,6 +25,21 @@ struct RomDetails {
   unsigned long timestamp;
 };
 
+// GAME INFO panel — metadata for the currently loaded game, extracted from
+// the same ScreenScraper jeuInfos.php response used for artwork and cached
+// on the microSD as a .meta sidecar next to the game image.
+struct GameMeta {
+  bool   loaded = false;   // fields below are valid
+  String forGame;          // game name this metadata belongs to
+  String year;             // "1990"
+  String developer;        // developpeur.text
+  String publisher;        // editeur.text
+  String players;          // joueurs.text, e.g. "1-2"
+  String rating;           // note.text + "/20"
+  String genre;            // up to two genre names, "A / B"
+  String synopsis;         // ASCII-folded, whitespace-collapsed, capped
+};
+
 
 struct ScrollTextState {
   String fullText;
