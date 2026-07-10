@@ -3521,9 +3521,12 @@ void showBootSequence() {
   Lcd.setCursor(150, 85);
   Lcd.print("INITIALIZE");
 
-  // Boot lines with typing effect
+  // Boot lines with typing effect.
+  // size 1.5 (9 px/char): the longest line is 38 chars = 342 px, ending at
+  // x=362 on the 480 px panel. size 2 would overflow (x=476) and its 24 px
+  // line pitch would also run into the progress bar at y=250.
   Lcd.setTextColor(THEME_CYAN);
-  Lcd.setTextSize(1);
+  Lcd.setTextSize(1.5);
   String bootLines[] = {
     "> Loading MiSTer interface...",
     "> Initializing SD card system...",
@@ -3533,7 +3536,7 @@ void showBootSequence() {
   };
 
   for (int i = 0; i < 5; i++) {
-    Lcd.setCursor(20, 140 + i * 18);
+    Lcd.setCursor(20, 140 + i * 22);   // 12 px glyph + 10 px leading
     for (int j = 0; j < (int)bootLines[i].length(); j++) {
       Lcd.print(bootLines[i].charAt(j));
       delay(20);
@@ -3541,7 +3544,9 @@ void showBootSequence() {
     delay(100);
   }
 
-  const int barX = 60, barY = 250, barW = 360, barH = 16;   // wider bar
+  // Bar sits midway between the last boot line (ends at y=240) and the bottom
+  // of the 320 px panel: 32 px of air above and below.
+  const int barX = 60, barY = 272, barW = 360, barH = 16;   // wider bar
   Lcd.drawRect(barX, barY, barW, barH, THEME_WHITE);
   Lcd.fillRect(barX + 1, barY + 1, barW - 2, barH - 2, THEME_BLACK);
 
