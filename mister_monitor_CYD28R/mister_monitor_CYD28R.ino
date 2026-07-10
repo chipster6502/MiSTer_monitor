@@ -195,6 +195,15 @@ const unsigned long GAMEINFO_SYN_FIT_MS   = 15000; // dwell when it needs no scr
 
 // Variables for automatic download
 bool downloadInProgress = false;
+
+// Scope guard: guarantees downloadInProgress is cleared on EVERY exit path
+// (present and future) of a download function. Eliminates the "flag leak"
+// class of bug where one failed download permanently blocked all later
+// downloads until a power cycle.
+struct DownloadFlagGuard {
+  DownloadFlagGuard()  { downloadInProgress = true; }
+  ~DownloadFlagGuard() { downloadInProgress = false; }
+};
 String lastSearchedGame = "";      // Cache to avoid repeated searches
 
 // JPEG decoder object
@@ -411,6 +420,7 @@ void showReconnectBanner();
 void updateMiSTerData();
 void getCurrentCore();
 void getCurrentGame();
+bool getStateSnapshot();
 void getSystemData();
 void getStorageData();
 void getUSBData();
@@ -505,6 +515,9 @@ bool backgroundLoaded = false;  // For frame02.jpg (interface screens)
 bool bootFrameLoaded = false;   // For frame01.jpg (boot/connection screens)
 
 GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails);
+bool isNameSearchSystem(const String& systemId);
+GameInfo searchWithJeuRechercheJSON(String coreName, String cleanName);
+bool tryNameSearchFallback(String coreName, String gameName, RomDetails romDetails);
 bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName);
 
 String currentGameForCrc = "";         // Current game that needs a CRC
@@ -1111,6 +1124,11 @@ static bool _parseRomDetailsJson(String& response, RomDetails& details, const ch
   details.fileTooLarge   = extractBoolValue(response, "file_too_large");
   Serial.printf("  %sFile too large: %s\n", prefix, details.fileTooLarge ? "YES" : "NO");
 
+  details.searchName     = extractStringValue(response, "search_name");
+  details.nameSearchHint = extractBoolValue(response, "name_search_hint");
+  Serial.printf("  %sSearch name: '%s' (hint: %s)\n", prefix,
+                details.searchName.c_str(), details.nameSearchHint ? "YES" : "NO");
+
   details.error          = extractStringValue(response, "error");
   if (details.error.length() > 0) {
     Serial.printf("  %sError: '%s'\n", prefix, details.error.c_str());
@@ -1139,7 +1157,7 @@ static bool _parseRomDetailsJson(String& response, RomDetails& details, const ch
 }
 
 RomDetails getCurrentRomDetails() {
-  RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0};
+  RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0, "", false};
 
   Serial.printf("=== GETTING ROM DETAILS ===\n");
   Serial.printf("Free heap before request: %d bytes\n", ESP.getFreeHeap());
@@ -1244,7 +1262,7 @@ RomDetails getCurrentRomDetails() {
 RomDetails getCurrentRomDetailsForced() {
   // Calls /status/rom/details?force=1 — the server bypasses timestamp checks
   // and reads CURRENTPATH/ACTIVEGAME directly to compute CRC.
-  RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0};
+  RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0, "", false};
 
   Serial.printf("=== FORCED ROM DETAILS (bypass timestamp) ===\n");
   Serial.printf("Free heap before request: %d bytes\n", ESP.getFreeHeap());
@@ -1544,6 +1562,55 @@ String ssHudMessage(int httpCode) {
   return String(label) + " (" + String(httpCode) + ")";
 }
 
+// One-shot full-screen notice. Two constraints shape it:
+//  - Screens redraw on every rotation tick, so a blocking notice must fire
+//    only once per key — otherwise an unsupported core would nag forever.
+//  - It must paint its OWN background: it can fire from states where no
+//    downloading screen was ever drawn (an MGL launch delivers core+game in
+//    one step), and a bare HUD strip would stamp over the previous screen.
+void ssNotifyOnce(const String& key, const char* message, const String& detail) {
+  static String lastNotifiedKey = "\x01";   // sentinel: never a real key
+  if (lastNotifiedKey == key) return;
+  lastNotifiedKey = key;
+
+  Lcd.fillScreen(THEME_BLACK);
+
+  // Header: same idiom as showDownloadingScreen
+  drawMiSTerLogo(10, 5);
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(120, 8);
+  Lcd.print("SCREENSCRAPER");
+  Lcd.setCursor(120, 20);
+  Lcd.print("ARTWORK STATUS");
+
+  drawPanel(10, 50, 300, 80, THEME_BLUE);
+
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(20, 60);
+  Lcd.print(message);
+
+  if (detail.length() > 0) {
+    String d = detail.length() > 40 ? detail.substring(0, 40) + "..." : detail;
+    Lcd.setTextColor(THEME_YELLOW);
+    Lcd.setCursor(20, 85);
+    Lcd.print(d);
+  }
+
+  Lcd.setTextColor(THEME_GREEN);
+  Lcd.setCursor(20, 110);
+  Lcd.print("Showing default image instead...");
+
+  delay(3000);
+}
+
+// The core itself has no ScreenScraper system id: no artwork is possible for
+// it OR for any of its games. Distinct from "game not in the database".
+void ssNotifyUnsupportedCore(const String& coreName) {
+  ssNotifyOnce("core:" + coreName, "CORE NOT IN SS DATABASE", coreName);
+}
+
 String getCoreSavePath(String searchCore) {
   String savePath;
   
@@ -1592,7 +1659,7 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
     return false;
   }
   
-  downloadInProgress = true;
+  DownloadFlagGuard dlGuard;
   g_lastSSHttpCode = 0;
   bool success = false;
   
@@ -1607,7 +1674,6 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
   coreNameLower.toLowerCase();
   if (coreNameLower == "menu" || coreNameLower == "main") {
     Serial.println("Skipping download for MENU core");
-    downloadInProgress = false;
     return false;
   }
   
@@ -1632,7 +1698,6 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
       
       // If a forced download is not performed and the specific image already exists, use the existing one.
       if (!forceDownload) {
-        downloadInProgress = false;
         return true;
       }
     }
@@ -1646,7 +1711,7 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
   
   if (systemId.length() == 0) {
     Serial.printf("System '%s' not supported by ScreenScraper\n", coreName.c_str());
-    downloadInProgress = false;
+    ssNotifyUnsupportedCore(coreName);
     return false;
   }
   
@@ -1681,7 +1746,6 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
     Serial.printf("Existing image found: %s\n", savePath.c_str());
     if (!forceDownload) {
       Serial.println("Image exists and force download disabled - skipping download");
-      downloadInProgress = false;
       return true; // Consider it a success if it already exists
     } else {
       Serial.println("FORCE DOWNLOAD enabled - will redownload with new priority");
@@ -1731,7 +1795,6 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
     }
   }
   
-  downloadInProgress = false;
   Serial.printf("Free heap after download: %d bytes\n", ESP.getFreeHeap());
   Serial.println("=== CORE IMAGE DOWNLOAD COMPLETE ===\n");
   
@@ -2321,8 +2384,10 @@ void setup() {
   connectWithAnimation();
 
   // Get current core and game BEFORE showing interface
-  getCurrentCore();
-  getCurrentGame();
+  if (!getStateSnapshot()) {
+    getCurrentCore();
+    getCurrentGame();
+  }
   
   // If SD available, show appropriate image
   if (sdCardAvailable) {
@@ -2483,8 +2548,10 @@ void loop() {
       String oldCore = currentCore;
       String oldGame = currentGame;
       Serial.println("Checking core/game change while showing image...");
-      getCurrentCore();
-      getCurrentGame();
+      if (!getStateSnapshot()) {
+        getCurrentCore();
+        getCurrentGame();
+      }
       
       // Check if game changed first (higher priority)
       if (oldGame != currentGame && sdCardAvailable) {
@@ -2648,8 +2715,10 @@ void loop() {
     String oldGame = currentGame;
     
     // Get fresh data from MiSTer
-    getCurrentCore();
-    getCurrentGame();
+    if (!getStateSnapshot()) {
+      getCurrentCore();
+      getCurrentGame();
+    }
     
     if (oldCore != currentCore) {
       Serial.printf("Core changed during screensaver check: '%s' -> '%s'\n", oldCore.c_str(), currentCore.c_str());
@@ -4127,13 +4196,91 @@ void showReconnectBanner() {
 
 void updateMiSTerData() {
   Serial.println("=== Updating MiSTer data ===");
-  getCurrentCore();
-  getCurrentGame();
+  if (!getStateSnapshot()) {   // atomic path (server >= 2.6)
+    getCurrentCore();          // legacy fallback (server <= 2.5.x)
+    getCurrentGame();
+  }
   getSystemData();
   getStorageData();
   getUSBData();
   getNetworkAndSession();
   Serial.println("=== Update complete ===");
+}
+
+// Atomic state fetch: ONE request returns core+game from a single server-side
+// lock acquisition (/status/snapshot, server >= 2.6). Eliminates the split-brain
+// where core and game were read in two separate requests that a core switch
+// could land between (the "searching Doom on the C64 core" bug).
+// Returns false on any HTTP/parse problem so the caller can fall back to the
+// legacy two-request path, whose error handling remains authoritative.
+bool getStateSnapshot() {
+  HTTPClient http;
+  String url = String("http://") + misterIP + ":8081/status/snapshot";
+
+  http.begin(url);
+  http.setTimeout(8000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+
+  int code = http.GET();
+  if (code != 200) {
+    http.end();
+    Serial.printf("Snapshot unavailable (HTTP %d) - using legacy path\n", code);
+    return false;
+  }
+
+  String response = http.getString();
+  http.end();
+
+  String newCore = extractStringValue(response, "core");
+  String newGame = extractStringValue(response, "game");
+  newCore.trim();
+  newGame.trim();
+
+  if (newCore.length() == 0) {
+    // /status/snapshot always carries "core"; an empty value means a
+    // malformed body, not a Menu state. Let the legacy path decide.
+    Serial.println("Snapshot missing 'core' - using legacy path");
+    return false;
+  }
+
+  // ---- CORE side effects (ported from getCurrentCore's 200-handler) ----
+  previousCore = currentCore;
+  currentCore  = newCore;
+
+  if (currentCore == "Menu" || currentCore == "MENU") {
+    Serial.println("Server reports Menu state - checking debug endpoint");
+    checkMisterDebugState();
+  }
+
+  if (!isErrorCore(currentCore)) {
+    lastValidCore = currentCore;
+  }
+
+  if (previousCore != currentCore && previousCore != "") {
+    coreChanged = true;
+    Serial.printf("Core changed: '%s' -> '%s'\n", previousCore.c_str(), currentCore.c_str());
+  }
+
+  connected = true;
+  Serial.printf("Core: '%s' (snapshot)\n", currentCore.c_str());
+  checkServerErrorState();
+
+  // ---- GAME side effects (ported from getCurrentGame's 200-handler) ----
+  previousGame = currentGame;
+  currentGame  = newGame;
+
+  if (previousGame != currentGame && currentGame.length() > 0) {
+    gameChanged = true;
+    Serial.printf("Game changed: '%s' -> '%s'\n", previousGame.c_str(), currentGame.c_str());
+    // core+game come from ONE atomic server read: coherent by construction
+    startCrcRecurrentForGame(currentGame, currentCore);
+  } else if (currentGame.length() == 0 && previousGame.length() > 0) {
+    gameChanged = true;
+    Serial.println("Game unloaded, returning to core image");
+    stopCrcRecurrent();
+  }
+
+  return true;
 }
 
 void getCurrentCore() {
@@ -4383,16 +4530,6 @@ void processCrcRecurrent() {
   
   // if a previous attempt already confirmed the game isn't in
   // ScreenScraper's DB, also stop.
-  if (lastGameSearchExhausted) {
-    Serial.printf("Search already exhausted for '%s' — stopping CRC recurrent\n",
-                  currentGameForCrc.c_str());
-    stopCrcRecurrent();
-    return;
-  }
-  
-  // If a previous attempt confirmed that ScreenScraper has the system but not
-  // the game (search exhausted), there is no point in retrying every 10 seconds.
-  // Stop the recurrent.
   if (lastGameSearchExhausted) {
     Serial.printf("Search already exhausted for '%s' — stopping CRC recurrent\n",
                   currentGameForCrc.c_str());
@@ -7475,7 +7612,14 @@ void showGameImageScreenCorrected(String coreName, String gameName) {
   
   // AUTO-DOWNLOAD with SAFE STREAMING
   if (shouldDownload && ENABLE_AUTO_DOWNLOAD && WiFi.status() == WL_CONNECTED && !downloadInProgress) {
-    if (lastSearchedGame != gameName || FORCE_GAME_REDOWNLOAD) {
+    // Two different "don't retry" reasons, deliberately kept apart:
+    //   lastSearchedGame       — this game was already fetched successfully.
+    //   lastGameSearchExhausted — ScreenScraper answered cleanly: not in the DB.
+    // A TRANSIENT failure (network down, SS busy) sets neither, so it retries.
+    // This screen calls the download directly, bypassing processCrcRecurrent's
+    // own exhaustion gate — without the check below, every redraw of a
+    // not-in-DB game would relaunch the full search.
+    if ((lastSearchedGame != gameName && !lastGameSearchExhausted) || FORCE_GAME_REDOWNLOAD) {
       Serial.println("Attempting STREAMING-SAFE ScreenScraper download...");
       
       // Final memory check before download
@@ -7507,12 +7651,21 @@ void showGameImageScreenCorrected(String coreName, String gameName) {
           return;
         }
       }
-        // Do NOT update cache if download failed
-        Serial.println("STREAMING-SAFE download failed - NOT updating cache to allow retry");
-      if (!FORCE_GAME_REDOWNLOAD) {
-        lastSearchedGame = gameName; // Only update cache if not forcing downloads
-      }
-      Serial.println("STREAMING-SAFE download failed");
+      // Do NOT update lastSearchedGame on failure: retry pacing is owned by
+      // the CRC-recurrent layer (10 s cadence, 30-attempt cap, exhaustion
+      // flag). Updating the cache here silently blocked every retry until a
+      // forced scan — the exact contradiction seen in the field logs.
+      Serial.println("STREAMING-SAFE download failed - NOT updating cache to allow retry");
+    } else if (getScreenScraperSystemId(coreName).length() == 0) {
+      // lastGameSearchExhausted is overloaded: startCrcRecurrentForGame() also
+      // sets it when the CORE has no ScreenScraper system. Report that cause
+      // separately — the game may well exist in the DB; we simply cannot ask.
+      Serial.printf("Core '%s' has no ScreenScraper system - artwork impossible\n",
+                    coreName.c_str());
+      ssNotifyUnsupportedCore(coreName);
+    } else if (lastGameSearchExhausted) {
+      Serial.printf("Game '%s' known absent from ScreenScraper - not retrying\n", gameName.c_str());
+      ssNotifyOnce(coreName + "|" + gameName, "GAME NOT IN SS DATABASE", gameName);
     } else {
       Serial.printf("Game '%s' already searched recently, skipping\n", gameName.c_str());
     }
@@ -8068,13 +8221,205 @@ GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
   return result;
 }
 
+// Systems whose game containers may carry no ScreenScraper-matchable identity
+// (0MHz DOS packs build per-pack VHDs/CHDs). Text search is the fallback of
+// last resort there. Extend deliberately, one system at a time, after field
+// validation — the allowlist is what prevents a transient hash failure on a
+// CRC-capable system from degrading into a fuzzy search with wrong artwork.
+bool isNameSearchSystem(const String& systemId) {
+  return systemId == "135";   // DOS (0MHz packs)
+}
+
+// Text-search fallback for hash-less containers. Same response shape as
+// jeuInfos.php but the game object arrives inside a "jeux":[...] array.
+// We take the FIRST element (documented policy) by rebranding the array as a
+// single "jeu" object and reusing the proven jeuInfos indexOf parser.
+GameInfo searchWithJeuRechercheJSON(String coreName, String cleanName) {
+  GameInfo result;
+  result.found = false;
+
+  Serial.printf("=== JSON NAME SEARCH (jeuRecherche) ===\n");
+  Serial.printf("Core: %s | Query: '%s'\n", coreName.c_str(), cleanName.c_str());
+
+  if (ESP.getFreeHeap() < 100000) {
+    Serial.printf("CRITICAL: Insufficient memory for name search (%d bytes)\n",
+                  ESP.getFreeHeap());
+    return result;
+  }
+
+  String systemId = getScreenScraperSystemId(coreName);
+  if (systemId.length() == 0 || cleanName.length() == 0) {
+    Serial.println("Name search: missing system id or query");
+    return result;
+  }
+
+  String url = "https://api.screenscraper.fr/api2/jeuRecherche.php";
+  url += "?devid=" + String(SCREENSCRAPER_DEV_USER);
+  url += "&devpassword=" + String(SCREENSCRAPER_DEV_PASS);
+  url += "&softname=MiSTer-Monitor";
+  url += "&output=json";
+  url += "&ssid=" + urlEncode(String(SCREENSCRAPER_USER));
+  url += "&sspassword=" + urlEncode(String(SCREENSCRAPER_PASS));
+  url += "&systemeid=" + systemId;
+  url += "&recherche=" + urlEncode(cleanName);
+
+  Serial.printf("Name Search URL: %s\n", redactScreenScraperUrl(url).c_str());
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(30000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+  http.addHeader("Accept", "application/json");
+
+  int httpCode = http.GET();
+  Serial.printf("HTTP Response: %d\n", httpCode);
+  g_lastSSHttpCode = httpCode;
+
+  if (httpCode == 200) {
+    // Bounded prefix scan, same rationale as the jeuInfos streaming branch:
+    // jeux[0]'s id/noms/systeme sit in the first few KB, after the
+    // serveurs/ssuser preamble. Chunked transfer is harmless to substring
+    // scanning of short field patterns.
+    const size_t CAP_BYTES = 12000;
+    WiFiClient* stream = http.getStreamPtr();
+    String body;
+    body.reserve(CAP_BYTES + 256);
+
+    char tmp[513];
+    unsigned long lastDataMs = millis();
+
+    while (body.length() < CAP_BYTES) {
+      if (!http.connected() && stream->available() == 0) break;
+      if (ESP.getFreeHeap() < 60000) {
+        Serial.printf("Low memory during name-search scan, stopping early\n");
+        break;
+      }
+      int avail = stream->available();
+      if (avail > 0) {
+        int toRead = avail;
+        if (toRead > (int)sizeof(tmp) - 1) toRead = sizeof(tmp) - 1;
+        int n = stream->readBytes((uint8_t*)tmp, toRead);
+        if (n > 0) {
+          tmp[n] = '\0';
+          body += tmp;
+          lastDataMs = millis();
+        }
+      } else {
+        if (millis() - lastDataMs > 8000) {
+          Serial.printf("Stream stalled (no data 8s), stopping with %d bytes\n",
+                        body.length());
+          break;
+        }
+        delay(10);
+      }
+    }
+
+    Serial.printf("Name-search scan collected %d bytes, heap: %d\n",
+                  body.length(), ESP.getFreeHeap());
+
+    int jx = body.indexOf("\"jeux\"");
+    if (jx == -1) {
+      Serial.println("No 'jeux' array in response (no results or error body)");
+    } else {
+      int arrStart = body.indexOf('[', jx);
+      if (arrStart != -1) {
+        // Rebrand jeux[...] as a single "jeu" object. The indexOf parser
+        // stops at the FIRST id/systeme/noms it finds — i.e. jeux[0].
+        String rebranded = "\"jeu\":" + body.substring(arrStart + 1);
+        body = "";
+        result = extractGameInfoFromJeuInfos(rebranded, cleanName);
+
+        if (result.found && result.gameId.length() > 0) {
+          String detectedMediaType = "box-3D(wor)";
+          result.boxartUrl = buildCorrectMediaJeuUrl(
+              result.gameId, systemId, detectedMediaType, result.systemeId);
+          if (result.boxartUrl.length() == 0) {
+            Serial.println("Failed to build mediaJeu URL");
+            result.found = false;
+          }
+        } else {
+          Serial.println("jeuRecherche yielded no usable game id");
+        }
+      }
+    }
+  } else {
+    Serial.printf("Name search HTTP error: %d\n", httpCode);
+  }
+
+  http.end();
+  Serial.printf("=== NAME SEARCH %s ===\n", result.found ? "HIT" : "MISS");
+  return result;
+}
+
+// Shared tail of the name-search fallback: search by clean title, download
+// the artwork, prefetch GAME INFO metadata. Mirrors the CRC success path.
+// Runs inside downloadGameBoxartStreamingSafeJSON: the DownloadFlagGuard of
+// the caller keeps downloadInProgress set for the whole attempt.
+bool tryNameSearchFallback(String coreName, String gameName, RomDetails romDetails) {
+  String cleanName = romDetails.searchName.length() > 0 ? romDetails.searchName
+                                                        : gameName;
+  Serial.printf("Name-search fallback for '%s' (server hint: %s)\n",
+                cleanName.c_str(), romDetails.nameSearchHint ? "YES" : "NO");
+  showDownloadProgress(40, "Name search...");
+
+  // Snapshot the diagnostic code the CRC path produced. jeuRecherche answers
+  // "200 with zero results" for an unknown title, which would overwrite a far
+  // more informative 404 and turn the on-screen reason from
+  // "NOT IN SS DATABASE (404)" into a generic "Download failed".
+  int codeBeforeNameSearch = g_lastSSHttpCode;
+
+  GameInfo gameInfo = searchWithJeuRechercheJSON(coreName, cleanName);
+  if (!(gameInfo.found && gameInfo.boxartUrl.length() > 0)) {
+    Serial.println("Name search found no results");
+    // Restore the CRC path's diagnostic on a clean 200-but-empty miss. A real
+    // error from the name search (429, -1, ...) is newer and more relevant, so
+    // it is kept.
+    if (g_lastSSHttpCode == 200 && codeBeforeNameSearch != 0 &&
+        codeBeforeNameSearch != 200) {
+      g_lastSSHttpCode = codeBeforeNameSearch;
+      Serial.printf("Preserved CRC-path diagnostic code %d for the HUD\n",
+                    codeBeforeNameSearch);
+    }
+    return false;
+  }
+
+  // Ambiguity policy: first jeux[] element, chosen name always logged.
+  Serial.printf("NAME SEARCH CHOSE: '%s' (id %s)\n",
+                gameInfo.gameName.c_str(), gameInfo.gameId.c_str());
+
+  String exactFileName = getExactFileName(gameName);
+  String searchCore = coreName;
+  searchCore.toLowerCase();
+  String savePath = getSavePath(exactFileName, searchCore);
+
+  showDownloadProgress(60, "Downloading image...");
+  bool ok = downloadImageFromMediaJeu(gameInfo.boxartUrl, savePath);
+  Serial.printf("Name-search MediaJeu download: %s\n", ok ? "SUCCESS" : "FAILED");
+
+  if (ok) {
+    // GAME INFO panel: metadata prefetch, same hook as the CRC path.
+    String metaPath = getMetaPathFromImagePath(savePath);
+    if (!SD.exists(metaPath)) {
+      showDownloadProgress(92, "Fetching game info...");
+      GameMeta meta;
+      if (fetchGameMetadataJSON(gameInfo.gameId, coreName, romDetails, meta)) {
+        saveGameMeta(metaPath, meta);
+        if (gameName == currentGame) { meta.forGame = gameName; currentMeta = meta; }
+      }
+    }
+    showDownloadProgress(100, "Name search complete!");
+    delay(1500);
+  }
+  return ok;
+}
+
 bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
   if (downloadInProgress) {
     Serial.println("Download already in progress");
     return false;
   }
   
-  downloadInProgress = true;
+  DownloadFlagGuard dlGuard;
   g_lastSSHttpCode = 0;
   bool success = false;
 
@@ -8093,14 +8438,12 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
     Serial.printf("Core '%s' not mapped to any ScreenScraper system — skipping search\n",
                   coreName.c_str());
     lastGameSearchExhausted = true;
-    downloadInProgress = false;
     return false;
   }
   
   // Memory check
   if (ESP.getFreeHeap() < 100000) {
     Serial.printf("Insufficient memory: %d bytes\n", ESP.getFreeHeap());
-    downloadInProgress = false;
     showDownloadProgress(0, "Low memory");
     delay(2000);
     return false;
@@ -8169,7 +8512,6 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
 
         showDownloadProgress(100, "JSON download complete!");
         delay(1500);
-        downloadInProgress = false;
         Serial.println("=== JSON DOWNLOAD COMPLETE ===\n");
         return true;
       } else {
@@ -8239,7 +8581,6 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
 
             showDownloadProgress(100, "Retry download complete!");
             delay(1500);
-            downloadInProgress = false;
             Serial.println("=== RETRY DOWNLOAD COMPLETE ===\n");
             return true;
           } else {
@@ -8247,10 +8588,19 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
           }
         } else {
           Serial.println("Second CRC search also found no results");
-          // ScreenScraper returned a clean response twice with no game match.
-          // Mark search as exhausted.
-          lastGameSearchExhausted = true;
-          Serial.println("Marked search as exhausted");
+          // Second leg of the name-search fallback (F4): a valid-but-unindexed
+          // hash (e.g. pack-built CHDs) reaches this point with a CRC that
+          // ScreenScraper will never match. On allowlisted systems, try ONE
+          // text search before giving up.
+          if (isNameSearchSystem(systemId)) {
+            success = tryNameSearchFallback(coreName, gameName, romDetails);
+          }
+          if (!success) {
+            // ScreenScraper returned clean responses with no match (CRC twice,
+            // plus name where applicable). Mark search as exhausted.
+            lastGameSearchExhausted = true;
+            Serial.println("Marked search as exhausted");
+          }
         }
       }
     }
@@ -8258,6 +8608,18 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
     lastRomHasCrc = false;
     lastRomCrcChecked = true;
     Serial.println("ROM CRC not available for JSON search");
+
+    // Hash-less fallback (F4, first leg): no usable CRC on an allowlisted
+    // system. The allowlist is the guardian — on CRC-capable systems a
+    // transient hash failure keeps behaving exactly as before.
+    if (isNameSearchSystem(systemId)) {
+      success = tryNameSearchFallback(coreName, gameName, romDetails);
+      if (!success) {
+        // Clean miss on a name-search system: stop the 10 s hammering.
+        lastGameSearchExhausted = true;
+        Serial.println("Name search found nothing - marked search as exhausted");
+      }
+    }
   }
   
   if (!success) {
@@ -8270,7 +8632,6 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
     delay(6000);
   }
   
-  downloadInProgress = false;
   Serial.printf("Final result: %s\n", success ? "SUCCESS" : "FAILED");
   Serial.printf("Free heap at end: %d bytes\n", ESP.getFreeHeap());
   Serial.println("=== JSON DOWNLOAD COMPLETE ===\n");
