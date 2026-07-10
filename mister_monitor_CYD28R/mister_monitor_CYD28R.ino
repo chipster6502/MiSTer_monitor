@@ -536,6 +536,11 @@ bool lastRomCrcChecked       = false;  // true once something actually asked the
                                        // for ROM details; until then lastRomHasCrc is
                                        // merely "not known yet", not "no CRC"
 bool lastGameImageOK         = false;  // true when a game-specific image is displayed
+bool lastGameFoundNoMedia    = false;  // game IS catalogued in SS, but has zero artwork
+// Evidence from the last downloadImageFromMediaJeu run, to tell a definitive
+// "no artwork exists" (clean NOMEDIA answers) from transient transport hiccups:
+bool g_mediaSawNoMedia       = false;
+bool g_mediaSawValidJpeg     = false;
                                         // (either cached or freshly downloaded)
 bool lastGameSearchExhausted = false;  // true when ScreenScraper search with valid
                                         // CRC completed without finding an image
@@ -4446,6 +4451,7 @@ void startCrcRecurrentForGame(String gameName, String coreName) {
   lastRomHasCrc            = false;
   lastRomCrcChecked        = false;
   lastGameImageOK          = false;
+  lastGameFoundNoMedia     = false;
   
   // Short-circuit: if the core is not in ScreenScraper's DB, do not activate
   // the recurrent. ScreenScraper requires a system ID, and asking MiSTer for
@@ -7132,6 +7138,8 @@ bool isArcadeCore(String coreName) {
 // ULTRA OPTIMIZED VERSION - NO LARGE STACK ARRAYS
 bool downloadImageFromMediaJeu(String mediaUrl, String savePath) {
   Serial.printf("Downloading from mediaJeu.php: %s\n", redactScreenScraperUrl(mediaUrl).c_str());
+  g_mediaSawNoMedia   = false;
+  g_mediaSawValidJpeg = false;
   
   // CRITICAL: Check memory first
   int freeHeap = ESP.getFreeHeap();
@@ -7278,6 +7286,7 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
         uint8_t byte3 = completeResponse.charAt(2);
         
         if (byte1 == 0xFF && byte2 == 0xD8 && byte3 == 0xFF) {
+          g_mediaSawValidJpeg = true;
           // Valid JPEG - save to file
           if (completeResponse.length() > 100) { // Reasonable size check
             Serial.printf("   Valid JPEG detected, saving %s...\n", mediaName);
@@ -7313,6 +7322,7 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
           
           // Check if it's a ScreenScraper text response (from backup)
           if (completeResponse.indexOf("NOMEDIA") != -1) {
+            g_mediaSawNoMedia = true;
             Serial.printf("No %s media available in database\n", mediaName);
           } else if (completeResponse.indexOf("erreur") != -1) {
             Serial.printf("ScreenScraper error: %s\n", completeResponse.substring(0, 100).c_str());
@@ -7664,8 +7674,13 @@ void showGameImageScreenCorrected(String coreName, String gameName) {
                     coreName.c_str());
       ssNotifyUnsupportedCore(coreName);
     } else if (lastGameSearchExhausted) {
-      Serial.printf("Game '%s' known absent from ScreenScraper - not retrying\n", gameName.c_str());
-      ssNotifyOnce(coreName + "|" + gameName, "GAME NOT IN SS DATABASE", gameName);
+      if (lastGameFoundNoMedia) {
+        Serial.printf("Game '%s' catalogued but has no artwork - not retrying\n", gameName.c_str());
+        ssNotifyOnce(coreName + "|" + gameName, "GAME HAS NO ARTWORK IN SS", gameName);
+      } else {
+        Serial.printf("Game '%s' known absent from ScreenScraper - not retrying\n", gameName.c_str());
+        ssNotifyOnce(coreName + "|" + gameName, "GAME NOT IN SS DATABASE", gameName);
+      }
     } else {
       Serial.printf("Game '%s' already searched recently, skipping\n", gameName.c_str());
     }
@@ -7838,6 +7853,7 @@ bool downloadCoreImageStreamingSafe(String baseUrl, String savePath) {
             
             // Check if it's a ScreenScraper text response
             if (completeResponse.indexOf("NOMEDIA") != -1) {
+            g_mediaSawNoMedia = true;
               Serial.printf("No %s media available in database\n", mediaNames[i]);
             } else if (completeResponse.indexOf("erreur") != -1) {
               Serial.printf("ScreenScraper error: %s\n", completeResponse.substring(0, 100).c_str());
@@ -8422,6 +8438,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
   DownloadFlagGuard dlGuard;
   g_lastSSHttpCode = 0;
   bool success = false;
+  bool gameWasFound = false;   // a jeu was resolved (id present), media may still be missing
 
   // OPTIONAL: Detect if it is a recurring search
   bool isRecurrent = crcRecurrentActive && (gameName == currentGameForCrc);
@@ -8477,6 +8494,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
     
     if (gameInfo.found && gameInfo.boxartUrl.length() > 0) {
       Serial.printf("JSON SEARCH SUCCESS!\n");
+      gameWasFound = true;
       Serial.printf("   Using mediaJeu.php download method\n");
       
       String exactFileName = getExactFileName(gameName);
@@ -8550,6 +8568,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
         
         if (gameInfoRetry.found && gameInfoRetry.boxartUrl.length() > 0) {
           Serial.printf("SECOND ATTEMPT SUCCESS!\n");
+          gameWasFound = true;
           Serial.printf("   Using mediaJeu.php download method\n");
           
           String exactFileName = getExactFileName(gameName);
@@ -8624,7 +8643,16 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
   
   if (!success) {
     Serial.println("JSON method failed");
-    if (g_lastSSHttpCode != 0 && g_lastSSHttpCode != 200) {
+    // Game catalogued in ScreenScraper but with ZERO artwork of any configured
+    // type: every mediaJeu attempt answered a clean NOMEDIA. That is a
+    // definitive state — retrying every 10 s cannot change it and burns ~30
+    // requests of the user's daily quota per cycle. Mark exhausted and say so.
+    if (gameWasFound && g_mediaSawNoMedia && !g_mediaSawValidJpeg) {
+      lastGameSearchExhausted = true;
+      lastGameFoundNoMedia    = true;
+      Serial.println("Game exists in SS but has no artwork of any type - marked exhausted");
+      showDownloadProgress(0, "GAME HAS NO ARTWORK IN SS");
+    } else if (g_lastSSHttpCode != 0 && g_lastSSHttpCode != 200) {
       showDownloadProgress(0, ssHudMessage(g_lastSSHttpCode));
     } else {
       showDownloadProgress(0, "Download failed");
