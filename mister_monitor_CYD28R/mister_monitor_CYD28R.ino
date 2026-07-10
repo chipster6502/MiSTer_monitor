@@ -4260,6 +4260,9 @@ bool getStateSnapshot() {
     return false;
   }
 
+  bool coreDidChange = false;   // set below; used by the cross-core rekey
+  bool gameDidChange = false;
+
   // ---- CORE side effects (ported from getCurrentCore's 200-handler) ----
   previousCore = currentCore;
   currentCore  = newCore;
@@ -4275,6 +4278,7 @@ bool getStateSnapshot() {
 
   if (previousCore != currentCore && previousCore != "") {
     coreChanged = true;
+    coreDidChange = true;
     Serial.printf("Core changed: '%s' -> '%s'\n", previousCore.c_str(), currentCore.c_str());
   }
 
@@ -4288,13 +4292,30 @@ bool getStateSnapshot() {
 
   if (previousGame != currentGame && currentGame.length() > 0) {
     gameChanged = true;
+    gameDidChange = true;
     Serial.printf("Game changed: '%s' -> '%s'\n", previousGame.c_str(), currentGame.c_str());
     // core+game come from ONE atomic server read: coherent by construction
     startCrcRecurrentForGame(currentGame, currentCore);
   } else if (currentGame.length() == 0 && previousGame.length() > 0) {
     gameChanged = true;
+    gameDidChange = true;
     Serial.println("Game unloaded, returning to core image");
     stopCrcRecurrent();
+  }
+
+  // Cross-core launch transient: main-menu launches (MGL/MRA) announce the
+  // game 1-2 s BEFORE the new CORENAME lands, so one poll can pair the new
+  // game with the OLD core (field evidence: Aero Fighters' SNES CRC searched
+  // under the Amiga systemeid, 404 twice, exhausted flag poisoned). When the
+  // corrective core commit arrives the game string is unchanged, gameChanged
+  // never fires, and every per-game search flag built under the wrong system
+  // would survive. Re-key the search to the corrected pairing —
+  // startCrcRecurrentForGame resets exhausted/no-media/attempt state.
+  if (coreDidChange && !gameDidChange && currentGame.length() > 0) {
+    Serial.printf("Core corrected under same game - rekeying search: '%s' on '%s'\n",
+                  currentGame.c_str(), currentCore.c_str());
+    lastSearchedGame = "";           // a wrong-core success must not block the redo
+    startCrcRecurrentForGame(currentGame, currentCore);
   }
 
   return true;
