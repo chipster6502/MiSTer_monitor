@@ -6390,6 +6390,16 @@ void drawGameInfoSynopsis() {
 void tickGameInfoSynScroll() {
   if (gameInfoSynCycled) return;            // finished: frozen at the bottom
 
+  // The line cache MUST be current before maxTop is computed. handleTouch()
+  // runs earlier in the loop than this block, so a tap on the subpage toggle
+  // lands here in the same iteration — before any redraw has had the chance to
+  // build the lines. With a stale count (zero on the first game after boot)
+  // maxTop would come out negative, the scroll would be declared finished on
+  // the spot, and the panel would bounce back to the game image without ever
+  // scrolling. buildGameInfoSynLines() is idempotent, so this costs a string
+  // comparison on every other call.
+  buildGameInfoSynLines();
+
   int maxTop = gameInfoSynLineCount - SYN_VIS;
   if (maxTop < 1) {                         // fits entirely: nothing to scroll
     gameInfoSynCycled     = true;
