@@ -11,6 +11,7 @@
 
 // ===== ANTI-CRASH: Reset diagnostics, memory safety =====
 #include "esp_system.h"       // esp_reset_reason()
+#include "esp_heap_caps.h"    // heap_caps_malloc(), MALLOC_CAP_INTERNAL
 
 // Brownout register: available on ESP32/S2/S3, NOT on ESP32-P4.
 // __has_include lets the code compile on any chip variant without errors.
@@ -31,13 +32,20 @@
 // mapped for normal CPU load/store without specific sdkconfig
 // settings that the M5Tab Arduino board package does not set.
 //
-// The M5Tab internal heap has ~510 KB free at boot, which
-// is more than enough for all JPEG buffers (50-300 KB each).
-// We therefore use plain malloc() and leave the PSRAM
-// available implicitly for Arduino/WiFi/IDF internals.
+// Plain malloc() is NOT a safe workaround: Espressif's own
+// ESP-IDF docs for the P4 state that "make RAM allocatable
+// using malloc() as well" is the DEFAULT for CONFIG_SPIRAM_USE
+// whenever PSRAM is present, so malloc() can silently hand out
+// the same 0x500xxxxx addresses for large-enough requests.
+//
+// We therefore request MALLOC_CAP_INTERNAL explicitly, which
+// forces the allocation onto internal SRAM regardless of the
+// SPIRAM_USE default. The M5Tab internal heap has ~510 KB free
+// at boot, which is more than enough for all JPEG buffers
+// (50-300 KB each).
 // -------------------------------------------------------
 inline uint8_t* psramMalloc(size_t size) {
-  uint8_t* ptr = (uint8_t*)malloc(size);
+  uint8_t* ptr = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   if (!ptr) {
     Serial.printf("[MEM] malloc FAILED for %u bytes! Free heap: %u\n",
                   size, ESP.getFreeHeap());
@@ -8147,7 +8155,7 @@ bool downloadCoreImageStreamingSafe(String baseUrl, String savePath) {
   int mediaCount = 20;
   
   for (int i = 0; i < mediaCount; i++) {
-    Serial.printf("Trying media type %d: %s\n", i + 1, mediaNames[i]);
+    Serial.printf("Trying media type %d: %s\n", i + 1, mediaNames[i].c_str());
     
     // Build complete URL with media type and resize parameters
     String currentUrl = baseUrl + "&media=" + mediaTypes[i];
@@ -8222,7 +8230,7 @@ bool downloadCoreImageStreamingSafe(String baseUrl, String savePath) {
                     verifyFile.close();
                     
                     if (savedSize == completeResponse.length()) {
-                      Serial.printf("SUCCESS: Downloaded %s (%d bytes)\n", mediaNames[i], savedSize);
+                      Serial.printf("SUCCESS: Downloaded %s (%d bytes)\n", mediaNames[i].c_str(), savedSize);
                       Serial.printf("Saved to: %s\n", savePath.c_str());
                       http.end();
                       return true;
@@ -8242,7 +8250,7 @@ bool downloadCoreImageStreamingSafe(String baseUrl, String savePath) {
             
             // Check if it's a ScreenScraper text response
             if (completeResponse.indexOf("NOMEDIA") != -1) {
-              Serial.printf("No %s media available in database\n", mediaNames[i]);
+              Serial.printf("No %s media available in database\n", mediaNames[i].c_str());
             } else if (completeResponse.indexOf("erreur") != -1) {
               Serial.printf("ScreenScraper error: %s\n", completeResponse.substring(0, 100).c_str());
             } else if (completeResponse.length() < 100) {
@@ -8258,7 +8266,7 @@ bool downloadCoreImageStreamingSafe(String baseUrl, String savePath) {
         Serial.println("Empty response");
       }
     } else {
-      Serial.printf("HTTP %d for %s\n", httpCode, mediaNames[i]);
+      Serial.printf("HTTP %d for %s\n", httpCode, mediaNames[i].c_str());
       
       String errorResponse = http.getString();
       if (errorResponse.length() > 0 && errorResponse.length() < 500) {
