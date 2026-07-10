@@ -3976,8 +3976,12 @@ void connectWithAnimation() {
 
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    // Radar animation centered in middle of screen
-    drawRadarScan(160, 120, 60, attempts * 12);
+    // Radar animation. Centre raised from y=120 to y=105: at radius 60 the old
+    // circle reached y=180, the exact first row of the fillRect that clears the
+    // result area, so its outer ring was clipped and "CONNECTED" sat flush
+    // against it. Now the radar spans y 45..165 — 14 px below the header, 15 px
+    // above the text.
+    drawRadarScan(160, 105, 60, attempts * 12);
 
     Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
     Lcd.setTextSize(1);
