@@ -565,6 +565,53 @@ _KNOWN_ROM_EXTS = {
     '.pdp', '.rim',
 }
 
+# Containers whose CRC is never indexed by ScreenScraper (0MHz DOS packs
+# build per-pack VHDs, so their CRCs exist in no database — and the guest OS
+# rewrites them, so the CRC is unstable anyway). Extensible.
+_NO_HASH_EXTS = {'.vhd'}
+
+def _clean_search_name(name):
+    """
+    Derives a ScreenScraper text-search query from a game/file name:
+    strips extension, bracketed tags and ALL parenthesised groups, then
+    collapses separators.
+      'Prince of Persia (1990)(Broderbund).vhd' -> 'Prince of Persia'
+      'Doom_[0MHz].mgl'                         -> 'Doom'
+    Recall beats precision here: jeuRecherche matches best on bare titles.
+    Validated against the real 0mhz-dos item listing on archive.org.
+    """
+    base = os.path.splitext(os.path.basename(name or ''))[0]
+    base = re.sub(r'\[[^\]]*\]', '', base)     # [tags]
+    base = re.sub(r'\([^)]*\)', '', base)      # (Year)(Publisher)(Region)
+    base = base.lstrip('~ ')                   # 0MHz marks broken setups with a leading '~'
+    base = base.replace('_', ' ')
+    base = re.sub(r'\s{2,}', ' ', base).strip(' -.')
+    return base
+
+def _enrich_rom_result(result):
+    """
+    Adds name-search metadata to a rom-details result (success OR failure):
+      search_name      — clean title for jeuRecherche.php
+      name_search_hint — True when the CRC route cannot work: no ROM was
+                         resolvable, no CRC was computed, or the container
+                         extension is known to be unindexed (.vhd).
+    The firmware combines this hint with its own per-system allowlist, so a
+    TRANSIENT hash failure (USB race) on a CRC-capable system never silently
+    degrades into a fuzzy name search with wrong-region artwork risk.
+    """
+    with _state_lock:
+        game_for_name = _state['game']
+        path_for_name = _state['game_path']
+
+    ext = os.path.splitext(result.get('path') or path_for_name or '')[1].lower()
+    result['search_name']      = _clean_search_name(result.get('filename') or game_for_name)
+    result['name_search_hint'] = bool(
+        (not result.get('available')) or
+        (not result.get('crc32')) or
+        (ext in _NO_HASH_EXTS)
+    )
+    return result
+
 def _game_name_from_path(path):
     """
     Extracts game name from a file path.
@@ -1471,6 +1518,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                     result = self.get_rom_details_from_file(rom_path)
                 result["detection_method"] = getattr(self, '_last_detection_method', 'unknown')
 
+            _enrich_rom_result(result)
             result['seq'] = seq_at_start
             with _state_lock:
                 if _state['seq'] == seq_at_start:
@@ -1505,12 +1553,12 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 rom_path = self._get_non_arcade_rom_path()
 
             if not rom_path:
-                return {
+                return _enrich_rom_result({
                     "filename": "", "size": 0, "crc32": "", "md5": "", "sha1": "",
                     "path": "", "available": False,
                     "error": "Forced scan: no ROM path found via CURRENTPATH/ACTIVEGAME",
                     "detection_method": "forced_none", "timestamp": int(time.time())
-                }
+                })
 
             print(f"🔄 Forced path resolved: {rom_path}")
             is_zip, zip_path, internal_path = self.is_zip_path(rom_path)
@@ -1520,6 +1568,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 result = self.get_rom_details_from_file(rom_path)
 
             result["detection_method"] = "forced"
+            _enrich_rom_result(result)
             result['seq'] = seq_at_start
             # Update cache so subsequent normal calls benefit — but only if the
             # active game hasn't changed since we started hashing (a slow CHD
@@ -1535,12 +1584,12 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         except Exception as e:
             import traceback
             traceback.print_exc()
-            return {
+            return _enrich_rom_result({
                 "filename": "", "size": 0, "crc32": "", "md5": "", "sha1": "",
                 "path": "", "available": False,
                 "error": f"Forced scan error: {str(e)}",
                 "detection_method": "forced_error", "timestamp": int(time.time())
-            }
+            })
 
     def _get_enhanced_rom_path(self):
         """
@@ -2079,7 +2128,15 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             # path pointing at something huge.
             MAX_SIZE_FOR_HASH = 1024 * 1024 * 1024  # 1GB
             
-            if file_size <= MAX_SIZE_FOR_HASH:
+            # Mutable containers (.vhd) are never worth hashing: ScreenScraper
+            # does not index them AND the guest OS rewrites them (save files),
+            # so their CRC is unstable by nature. Skip the minutes of
+            # CRC+MD5+SHA1 on the ARM entirely — same outcome as file_too_large.
+            skip_hash = os.path.splitext(filename)[1].lower() in _NO_HASH_EXTS
+
+            if skip_hash:
+                print(f"Hash skipped for {filename}: extension in _NO_HASH_EXTS (unindexable, mutable container)")
+            elif file_size <= MAX_SIZE_FOR_HASH:
                 try:
                     _wait_for_rom_load_to_settle()   # don't hash mid-load
 
