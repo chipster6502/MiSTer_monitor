@@ -533,6 +533,9 @@ bool     metaFetchInProgress   = false; // guard: cleared on EVERY return path
                                         // (same discipline as downloadInProgress)
 
 bool lastRomHasCrc           = false;  // true when current game's ROM has a valid CRC
+bool lastRomCrcChecked       = false;  // true once something actually asked the server
+                                       // for ROM details; until then lastRomHasCrc is
+                                       // merely "not known yet", not "no CRC"
 bool lastGameImageOK         = false;  // true when a game-specific image is displayed
                                         // (either cached or freshly downloaded)
 bool lastGameSearchExhausted = false;  // true when ScreenScraper search with valid
@@ -1018,7 +1021,17 @@ bool gameInfoAvailable() {
   if (metaProbeSidecar) return true;
 
   if (lastGameSearchExhausted) return false;   // known absent from ScreenScraper
-  return lastRomHasCrc;                        // no CRC -> nothing to query with
+
+  // Reaching here means the core IS mapped to a ScreenScraper system and the
+  // search is not exhausted. The only open question is whether the ROM can be
+  // identified by CRC — and lastRomHasCrc only answers it once something has
+  // actually fetched the ROM details. It never does when the artwork was
+  // already cached: the download returns early and the CRC recurrent stops as
+  // soon as an image exists. Offer the panel in that unknown state; its lazy
+  // fetch settles the question and hides the button on the next redraw if the
+  // ROM turns out to have no CRC.
+  if (lastRomCrcChecked) return lastRomHasCrc;
+  return true;
 }
 
 // -----------------------------------------------------------------------------
@@ -2237,6 +2250,7 @@ void handleTouch() {
           Serial.println("Game active — forcing ROM details + image rescan");
           RomDetails fresh = getCurrentRomDetailsForced();
           lastRomHasCrc = fresh.available && fresh.hashCalculated && fresh.crc32.length() > 0;
+          lastRomCrcChecked = true;
           Serial.printf("After SCAN rescan: CRC available = %s\n",
                         lastRomHasCrc ? "YES" : "NO");
 
@@ -4706,6 +4720,7 @@ void startCrcRecurrentForGame(String gameName, String coreName) {
   currentGameForCrc = gameName;
   currentCoreForCrc = coreName;
   lastRomHasCrc            = false;
+  lastRomCrcChecked        = false;
   lastGameImageOK          = false;
   
   // Short-circuit: if the core is not in ScreenScraper's DB, do not activate
@@ -6451,6 +6466,12 @@ void displayGameInfo() {
       metaFetchAttemptedFor != currentGame &&
       !downloadInProgress && !metaFetchInProgress) {
     RomDetails rd = getCurrentRomDetails();
+
+    // This is the only place that queries ROM details for a game whose artwork
+    // came from the SD cache, so record the verdict for gameInfoAvailable().
+    lastRomHasCrc     = rd.available && rd.hashCalculated && rd.crc32.length() > 0;
+    lastRomCrcChecked = true;
+
     if (rd.available && rd.hashCalculated && rd.crc32.length() > 0) {
       metaFetchAttemptedFor = currentGame;
       Lcd.setTextColor(THEME_CYAN);
@@ -8645,6 +8666,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
   
   if (romDetails.available && romDetails.hashCalculated && romDetails.crc32.length() > 0) {
     lastRomHasCrc = true;
+    lastRomCrcChecked = true;
     Serial.println("ROM data available - using JSON search");
     showDownloadProgress(20, "JSON CRC search...");
     
@@ -8780,6 +8802,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
     }
   } else {
     lastRomHasCrc = false;
+    lastRomCrcChecked = true;
     Serial.println("ROM CRC not available for JSON search");
   }
   
