@@ -1785,15 +1785,18 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         print(f"📄 FULLPATH source:  '{fullpath}'")
 
         # When CURRENTPATH has no directory component, combine it with FULLPATH.
-        # This is the standard MiSTer pattern for games inside ZIP collections:
-        #   FULLPATH  = "games/Apple-II/Collection.zip/"  (directory context with ZIP)
-        #   CURRENTPATH = "221B Baker Street.do"           (just the filename)
-        # → combined = "games/Apple-II/Collection.zip/221B Baker Street.do"
         if currentpath and not os.path.dirname(currentpath) and fullpath:
             fullpath_dir = fullpath.rstrip('/')
-            combined = fullpath_dir + '/' + currentpath
-            print(f"🔗 CURRENTPATH has no directory - combining with FULLPATH: '{combined}'")
-            currentpath = combined
+            if os.path.basename(fullpath_dir) == currentpath:
+                # MGL/CHD launches: FULLPATH already carries the
+                # complete file path INCLUDING the filename — joining would
+                # duplicate it ('.../game.chd/game.chd'). Use it as-is.
+                print(f"🔗 FULLPATH already ends with CURRENTPATH - using it as-is: '{fullpath_dir}'")
+                currentpath = fullpath_dir
+            else:
+                combined = fullpath_dir + '/' + currentpath
+                print(f"🔗 CURRENTPATH has no directory - combining with FULLPATH: '{combined}'")
+                currentpath = combined
 
         # Determine preferred order by timestamp (same logic as get_current_game)
         activegame_is_newer = activegame_timestamp > currentpath_timestamp
