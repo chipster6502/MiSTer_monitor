@@ -2289,11 +2289,13 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
     # ========== HTTP RESPONSE HELPERS ==========
     
     def send_text_response(self, data):
+        body = str(data).encode('utf-8')
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
+        self.send_header('Content-Length', str(len(body)))
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
-        self.wfile.write(str(data).encode('utf-8'))
+        self.wfile.write(body)
 
     def send_index_page(self):
         """Friendly landing page for humans hitting the server root.
@@ -2325,25 +2327,31 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             f'<ul>{rows}</ul>'
             '</body></html>'
         )
+        body = html.encode('utf-8')
         self.send_response(200)
         self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
-        self.wfile.write(html.encode('utf-8'))
+        self.wfile.write(body)
     
     def send_json_response(self, data):
+        body = json.dumps(data).encode('utf-8')
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode('utf-8'))
+        self.wfile.write(body)
     
     def send_error_response(self, code, message):
+        body = message.encode('utf-8')
         self.send_response(code)
         self.send_header('Content-type', 'text/plain')
+        self.send_header('Content-Length', str(len(body)))
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
-        self.wfile.write(message.encode('utf-8'))
+        self.wfile.write(body)
 
 if __name__ == '__main__':
     try:
