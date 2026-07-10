@@ -456,6 +456,7 @@ bool findGameImageExact(String coreName, String gameName, String &imagePath);
 bool displayCoreImageCentered(String imagePath);
 void showDownloadingScreen(String coreName, String gameName);
 void showDownloadProgress(int progress, String text);
+void showDownloadProgressColored(int progress, String text, uint16_t barColor);
 
 void addGameImageFooter(String gameName);
 void drawCoreImageFooter();
@@ -541,6 +542,7 @@ bool lastGameFoundNoMedia    = false;  // game IS catalogued in SS, but has zero
 // "no artwork exists" (clean NOMEDIA answers) from transient transport hiccups:
 bool g_mediaSawNoMedia       = false;
 bool g_mediaSawValidJpeg     = false;
+int  g_mediaAttemptCount     = 0;      // attempts in the current media run (drives the HUD)
                                         // (either cached or freshly downloaded)
 bool lastGameSearchExhausted = false;  // true when ScreenScraper search with valid
                                         // CRC completed without finding an image
@@ -809,7 +811,18 @@ void showDownloadingScreen(String coreName, String gameName) {
   Lcd.print("Please wait - downloading from ScreenScraper.fr");
 }
 
+// Stoplight gradient: reserved for progress that genuinely converges on
+// success (bytes being fetched). GREEN must mean "about to succeed".
 void showDownloadProgress(int progress, String text) {
+  uint16_t barColor = (progress < 30) ? THEME_YELLOW :
+                      (progress < 70) ? THEME_CYAN   : THEME_GREEN;
+  showDownloadProgressColored(progress, text, barColor);
+}
+
+// Explicit-colour variant. The media-type sweep uses it with a fixed colour:
+// its bar measures how much of the SEARCH SPACE has been swept, not proximity
+// to success — a green bar at 90% while every type answers NOMEDIA is a lie.
+void showDownloadProgressColored(int progress, String text, uint16_t barColor) {
   // Clear progress strip
   Lcd.fillRect(10, 140, 300, 60, THEME_BLACK);
 
@@ -817,11 +830,9 @@ void showDownloadProgress(int progress, String text) {
   Lcd.drawRect(20, 150, 280, 20, THEME_WHITE);
   Lcd.fillRect(21, 151, 278, 18, THEME_BLACK);
 
-  // Bar fill with stoplight gradient
+  // Bar fill
   if (progress > 0) {
     int fillWidth = (progress * 276) / 100;
-    uint16_t barColor = (progress < 30) ? THEME_YELLOW :
-                        (progress < 70) ? THEME_CYAN   : THEME_GREEN;
     Lcd.fillRect(22, 152, fillWidth, 16, barColor);
   }
 
@@ -1666,6 +1677,7 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
   
   DownloadFlagGuard dlGuard;
   g_lastSSHttpCode = 0;
+  g_mediaAttemptCount = 0;
   bool success = false;
   
   Serial.printf("\n=== ENHANCED CORE IMAGE DOWNLOAD ===\n");
@@ -7140,6 +7152,7 @@ bool downloadImageFromMediaJeu(String mediaUrl, String savePath) {
   Serial.printf("Downloading from mediaJeu.php: %s\n", redactScreenScraperUrl(mediaUrl).c_str());
   g_mediaSawNoMedia   = false;
   g_mediaSawValidJpeg = false;
+  g_mediaAttemptCount = 0;
   
   // CRITICAL: Check memory first
   int freeHeap = ESP.getFreeHeap();
@@ -7261,6 +7274,17 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
   currentUrl += "&outputformat=jpg&crc=&md5=&sha1=";
   
   Serial.printf("Trying: %s\n", mediaName);
+
+  // Live HUD: show WHICH media type is being tried and inch the bar forward.
+  // A no-artwork game walks ~30 types; a frozen "Downloading image..." at 50%
+  // looked like a hang for the whole scan.
+  g_mediaAttemptCount++;
+  int mediaProgress = 50 + g_mediaAttemptCount;
+  if (mediaProgress > 90) mediaProgress = 90;
+  // Fixed CYAN: this bar tracks search-space coverage, not likelihood of
+  // success. Only the actual byte transfer earns the stoplight gradient.
+  showDownloadProgressColored(mediaProgress, String("Trying ") + mediaName + "...",
+                              THEME_CYAN);
   Serial.printf("   URL: %s\n", redactScreenScraperUrl(currentUrl).c_str());
   
   HTTPClient http;
@@ -8437,6 +8461,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
   
   DownloadFlagGuard dlGuard;
   g_lastSSHttpCode = 0;
+  g_mediaAttemptCount = 0;
   bool success = false;
   bool gameWasFound = false;   // a jeu was resolved (id present), media may still be missing
 
