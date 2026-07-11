@@ -33,6 +33,7 @@ struct RomDetails {
 struct GameMeta {
   bool   loaded = false;   // fields below are valid
   String forGame;          // game name this metadata belongs to
+  String lang;             // ScreenScraper language this sidecar was fetched in
   String year;             // "1990"
   String developer;        // developpeur.text
   String publisher;        // editeur.text
