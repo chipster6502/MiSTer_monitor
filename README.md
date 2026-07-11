@@ -30,15 +30,24 @@ console and computer games via the MiSTer Remote web application.*
 
 ## Features
 
-- Real-time game and core artwork display via ScreenScraper API
-- Automatic game and system detection from OSD, MiSTer Remote web app and Super Attract Mode (SAM)
-- Reliable game load detection using nanosecond-precision filesystem timestamps when loading cores and games through the on-screen menu (OSD)
-- Automatic Arcade subsystem detection
-- Manual SCAN game button on the image screen for cases where the CRC could not be detected automatically
-- Automatic MiSTer discovery on the network via UDP broadcast (no static IP needed), with automatic reconnection if the MiSTer is not ready at boot
-- System monitor (CPU, memory, uptime, storage, network, and connected USB devices panels)
-- Touch-based navigation
-- Screenshot capture of the display, downloadable over the local network via HTTP (Tab5 and 2.8" CYD boards; not available on 3.5"/ST7796 panels)
+- **Real-time artwork** — game and core images fetched on demand from ScreenScraper as you play, no pre-scraping.
+- **Game Info panel** — "Now Playing" metadata (year, developer, publisher, genre, players, rating, synopsis), cached on the SD card.
+- **Reliable load detection** — an event-driven server state machine tells real game loads from OSD navigation and delivers them to the display atomically.
+- **Detection from multiple sources** — recognises games loaded from the OSD, the MiSTer Remote web app, and Super Attract Mode (SAM); auto-discovers the MiSTer on the LAN.
+- **System monitor** — CPU, memory, uptime, storage, network, and USB device panels, with touch navigation.
+
+<details>
+<summary><b>More detail</b></summary>
+
+- **Name-based artwork search** for systems whose containers carry no ScreenScraper-indexed hash (e.g. DOS/0MHz packs), used automatically when the CRC route can't resolve.
+- **Clear on-screen status** when artwork is unavailable, distinguishing a core absent from ScreenScraper, a game not in the database, and a game catalogued with no artwork.
+- **Configurable synopsis** — scroll speed and manual/auto mode adjustable in `config.ini`; the synopsis re-fetches automatically when you change the preferred language.
+- **Automatic Arcade subsystem detection** for correct per-system artwork.
+- **Manual SCAN button** on the image screen for the rare case where the CRC couldn't be detected automatically.
+- **Automatic MiSTer discovery** via UDP broadcast (no static IP needed), with reconnection if the MiSTer isn't ready at boot.
+- **Screenshot capture** of the display over HTTP on the local network (Tab5 and 2.8" CYD boards; not on 3.5"/ST7796 panels, which have no SPI readback).
+
+</details>
 
 ## Supported Hardware
 
@@ -105,22 +114,30 @@ by [uli_2035](https://www.printables.com/@uli_2035_28350), licensed under
 
 ## Architecture
 
-The system has two components that work together:
+Two components work together:
 
-- **`mister_status_server.py`** — HTTP server on port 8081 running on
-  the MiSTer. Watches `/tmp/` state files in real time using `inotify`,
-  maintains an in-memory state, and exposes core, game, system and
-  network data as JSON/text endpoints. Distinguishes actual game loads
-  from OSD navigation by comparing `FILESELECT` and `CURRENTPATH`
-  filesystem timestamps at nanosecond precision — no external helper
-  scripts are needed.
-- **display sketch** — Discovers the MiSTer automatically on the local
-  network via UDP broadcast at boot, polls the server every few seconds,
-  downloads artwork from ScreenScraper, and renders the HUD interface. On
-  the Tab5 and 2.8" CYD boards it also runs its own HTTP server on port
-  8080 for screenshot capture, accessible from any device on the local
-  network at `http://<Display-IP>:8080` (the 3.5"/ST7796 panels have no
-  SPI readback, so capture is disabled there).
+- **`mister_status_server.py`** — a Python HTTP server on the MiSTer that
+  tracks what core and game are running and exposes them as JSON.
+- **display sketch** — the ESP32 firmware that polls the server, fetches
+  artwork from ScreenScraper, and renders the HUD on the screen.
+
+<details>
+<summary><b>More detail</b></summary>
+
+- **`mister_status_server.py`** (port 8081) watches `/tmp/` state files
+  with `inotify` and runs an event-driven state machine: it debounces
+  bursts, tells real game loads from OSD navigation, and tags each
+  committed change with a sequence number. The display reads core and game
+  together from one atomic `/status/snapshot`, so it never shows a mixed
+  state, and the server also supplies a cleaned search name for containers
+  with no ScreenScraper-indexed hash. No external helper scripts are needed.
+- **display sketch** auto-discovers the MiSTer via UDP broadcast, downloads
+  artwork by hash (or by name when the hash can't resolve), and — on the
+  Tab5 and 2.8" CYD boards — serves screenshots on port 8080 at
+  `http://<Display-IP>:8080` (disabled on 3.5"/ST7796 panels, which have no
+  SPI readback).
+
+</details>
 
 ## M5Stack Tab5 Screenshots (1280x720)
 
@@ -159,7 +176,7 @@ The system has two components that work together:
 ### Data and content enrichment
 
 - **RetroAchievements integration** — Show unlocked achievements and progress, building on [odelot/Main_MiSTer](https://github.com/odelot/Main_MiSTer).
-- **Enriched game metadata screen** — "Now Playing" view with synopsis, year, publisher, developer, genre.
+- ~~**Enriched game metadata screen** — "Now Playing" view with synopsis, year, publisher, developer, genre.~~ *(shipped: Game Info panel)*
 - **Game Manuals access** — Show manuals for the system or running game from the ⁠Game Manuals Databases by *Moondandy*.
 - **Regional cover comparison** — Show EU/US/JP versions of the same game's artwork.
 - **Multilanguage descriptions** — Info in the user's preferred language via ScreenScraper.
