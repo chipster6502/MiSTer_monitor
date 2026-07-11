@@ -212,6 +212,12 @@ const unsigned long GAMEINFO_SYN_FIT_MS   = 15000; // dwell when it needs no scr
 // Variables for automatic download
 bool downloadInProgress = false;
 
+// When false, the download progress HUD (bar + status line) is suppressed.
+// The interactive path (user just loaded a game) turns it on; the background
+// CRC-recurrent retry leaves it off, so its bar never stamps over whatever
+// image the user is currently looking at. showDownloadProgress checks it.
+bool downloadHudEnabled = false;
+
 // Scope guard: guarantees downloadInProgress is cleared on EVERY exit path
 // (present and future) of a download function. Eliminates the "flag leak"
 // class of bug where one failed download permanently blocked all later
@@ -904,6 +910,7 @@ void showDownloadingScreen(String coreName, String gameName) {
 // Stoplight gradient: reserved for progress that genuinely converges on
 // success (bytes being fetched). GREEN must mean "about to succeed".
 void showDownloadProgress(int progress, String text) {
+  if (!downloadHudEnabled) return;   // background retry: stay silent
   uint16_t barColor = (progress < 30) ? THEME_YELLOW :
                       (progress < 70) ? THEME_CYAN   : THEME_GREEN;
   showDownloadProgressColored(progress, text, barColor);
@@ -913,6 +920,7 @@ void showDownloadProgress(int progress, String text) {
 // its bar measures how much of the SEARCH SPACE has been swept, not proximity
 // to success — a green bar at 90% while every type answers NOMEDIA is a lie.
 void showDownloadProgressColored(int progress, String text, uint16_t barColor) {
+  if (!downloadHudEnabled) return;   // background retry: stay silent
   // ========== UPDATE PROGRESS BAR (PHYSICAL COORDINATES with OFFSET_Y=130) ==========
   const int PANEL_OFFSET_X = 90;
   const int PANEL_OFFSET_Y = 130;
@@ -8276,10 +8284,13 @@ void showGameImageScreenCorrected(String coreName, String gameName) {
         return;
       }
       
+      downloadHudEnabled = true;   // interactive load: user is watching, show progress
       showDownloadingScreen(coreName, gameName);
       
       // *** USE FUNCTION STREAMING-SAFE ***
-      if (downloadGameBoxartStreamingSafeJSON(coreName, gameName)) {
+      bool interactiveOk = downloadGameBoxartStreamingSafeJSON(coreName, gameName);
+      downloadHudEnabled = false;  // leave global state clean for the recurrent path
+      if (interactiveOk) {
         Serial.println("STREAMING-SAFE download successful! Displaying...");
         
         if (findGameImageExact(coreName, gameName, imagePath) && displayCoreImageCentered(imagePath)) {
