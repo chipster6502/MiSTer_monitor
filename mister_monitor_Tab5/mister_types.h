@@ -23,6 +23,8 @@ struct RomDetails {
   String error;
   String path;
   unsigned long timestamp;
+  String searchName;       // clean title from the server for name-based search (S6)
+  bool   nameSearchHint;   // server says the CRC route cannot work for this container
 };
 
 // GAME INFO panel — metadata for the currently loaded game, extracted from
