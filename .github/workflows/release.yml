@@ -89,29 +89,32 @@ jobs:
         with:
           files: dist/*.bin
           body: |
-            ## What's new in v2.5.0
+            ## What's new in v2.6.0
 
-            ### New display support
-            - **CYD 2.8" dual-USB (ST7789)** — the 2-USB variant of the ESP32-2432S028.
-            - **CYD 3.5" capacitive (ESP32-3248S035C)** — 480×320, GT911 touch.
-            - **CYD 3.5" resistive (ESP32-3248S035R)** — 480×320, XPT2046 touch.
-
-            The web flasher now lists every board and helps you pick the right build.
+            A **Game Info panel**, more reliable artwork detection through a
+            reworked server state engine, and coverage for systems and launch
+            methods that previously showed no artwork. Drop-in update: existing
+            `config.ini` files keep working, and the new firmware falls back
+            gracefully with an older server.
 
             ### New features
-            - **Actionable connectivity states** — the connection screen now tells you exactly what's wrong: MiSTer not found, found but not responding, or a configured IP that doesn't answer.
-            - **Automatic offline recovery** — if the MiSTer isn't ready when the display boots, the display keeps looking and reconnects on its own, with an on-screen banner.
+            - **Game Info panel** — a new page with year, developer, publisher, genre, players, rating and a scrolling synopsis for the current game, cached on the SD card so it loads instantly and offline. On all five boards.
+            - **Name-based artwork search** — systems whose files carry no ScreenScraper-indexed hash now fall back to a name search, so they get artwork too.
+            - **Configurable synopsis** — scroll speed and manual/auto mode set in `config.ini` (`[gameinfo]`); the synopsis re-fetches when you change the preferred language.
+
+            ### Improvements
+            - **Reworked load detection** — an event-driven server state machine reliably tells a real game load from OSD navigation, fixing cases where the display could freeze on the wrong state until a manual scan. Core and game are delivered atomically, so they never disagree.
+            - **Clear "no artwork" status** — the screen explains why artwork is missing (core not in ScreenScraper, game not in the database, or game with no artwork) and stops retrying cases that can never succeed, saving quota.
+            - Wider ScreenScraper system coverage and corrected mappings.
 
             ### Fixes
-            - **Games from USB** — games loaded from USB storage are now detected and their artwork downloaded.
-            - **CHD games** — games in `.chd` format now get their artwork downloaded, including large files that were previously skipped.
-            - **config.ini fallback IP** is now correctly applied when UDP auto-discovery fails.
-            - **Better game detection** — all cores launched via SAM now map correctly to ScreenScraper.
-            - Assorted display fixes (SCAN counter redraw, loading overlay position, artwork/footer repaint).
+            - Correct handling of more launch layouts: arcade `.mra` from any folder, NEOGEO romsets, folder-per-game CD layouts, and MGL/CHD launches.
+            - Tab5 (ESP32-P4) stability fixes and several HUD layout fixes.
+            - On-screen ScreenScraper API error codes, with credentials redacted from logs.
 
             ### Notes
             - Screenshot capture over HTTP is available on the Tab5 and 2.8" CYD boards; the 3.5" (ST7796) panels don't support it (no SPI readback).
-
+            - Existing `config.ini` files work unchanged; new keys use sensible defaults. New firmware pairs with older servers via a legacy fallback path.
       - name: Build flasher site
         run: |
           mkdir -p site/flasher
