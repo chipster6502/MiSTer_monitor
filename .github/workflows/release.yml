@@ -24,7 +24,7 @@ jobs:
             https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
-          arduino-cli core install m5stack:esp32
+          arduino-cli core install m5stack:esp32@3.3.7
 
       - name: Install libraries
         run: |
