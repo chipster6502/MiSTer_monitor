@@ -40,7 +40,9 @@ struct AppConfig {
 
   // --- Game info panel ---------------------------------------------------------
   String infoLang        = "en";   // synopsis/genre language: en es pt fr de it
-  int    infoSynopsisMax = 900;    // stored synopsis cap (chars, clamped 200-2000)
+  int    infoSynopsisMax = 2000;   // synopsis memory cap (chars, clamped 200-2000)
+  int    infoScrollStepMs = 2000;  // synopsis auto-scroll: ms per line (clamped 200-8000)
+  bool   infoScrollAuto   = true;  // false = hold synopsis still, no auto-scroll
 
   // --- Image paths -----------------------------------------------------------
   String coreImagesPath    = "/cores";
@@ -177,6 +179,8 @@ inline void loadConfig(AppConfig& cfg) {
     // [gameinfo]
     else if (key == "info_lang")              { cfg.infoLang = val; }
     else if (key == "info_synopsis_max")      { cfg.infoSynopsisMax = val.toInt(); }
+    else if (key == "info_scroll_step_ms")    { cfg.infoScrollStepMs = val.toInt(); }
+    else if (key == "info_scroll_auto")       { cfg.infoScrollAuto = parseBool(val); }
     // [images]
     else if (key == "base_path")              { cfg.coreImagesPath = val; }
     else if (key == "default_image")          { cfg.defaultCoreImage = val; }
