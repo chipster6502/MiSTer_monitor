@@ -1,36 +1,36 @@
 #!/usr/bin/env python3
 # =============================================================================
-# ra_status.py — RetroAchievements status resolver for MiSTer Monitor (A4 min)
+# ra_status.py — RetroAchievements status resolver for MiSTer Monitor (A4 full)
 # =============================================================================
-# Minimal first version. Resolves the active ROM to a RetroAchievements game
-# and returns the user's progress, as a FLAT JSON dict the CYD firmware can
-# parse with its existing extractStringValue / extractIntValue / extractBoolValue
-# helpers (no nested objects — ArduinoJson is intentionally not in the firmware).
+# Full version. Adds on top of the minimal one:
+#   - hardcore breakdown (unlocked_hardcore / points_hardcore)
+#   - LastGameID fallback with TITLE CORROBORATION for unindexed dumps and
+#     CD systems (only trusted when RA's title matches the local search_name)
+#   - background unlock polling thread (event_counter + last_unlock_* fields)
 #
-# Design note (revised after hardware bring-up):
-#   This module does NOT read server state or resolve ROM paths itself. It asks
-#   the running handler for the data the server already computes:
-#     - handler.get_current_core()   -> friendly core name
-#     - handler.get_rom_details()    -> dict with resolved_zip_path / internal_path
-#   The server's path resolver already handles ZIP / CHD / USB / SAM / relative
-#   paths robustly; duplicating that here was the source of early bugs. We take
-#   the resolved path and apply RA's per-console hash rules on top (the server's
-#   own md5 is the RAW file hash, which is wrong for headered systems like NES).
+# Threading / coupling model:
+#   The polling thread never imports the server module (that pattern loaded a
+#   ghost second instance during bring-up). Instead the server injects a state
+#   getter at startup:
+#       from ra_status import start_ra_polling
+#       start_ra_polling(lambda: (_state, _state_lock))
+#   The getter is used ONLY to read _state['seq'] so the thread can detect
+#   game changes; everything else flows through the normal endpoint path.
 #
-# What this version does (and only this):
-#   1. loads ra_credentials.ini
-#   2. maps the friendly core name -> internal RA key -> consoleID(s)
-#   3. lazily downloads+caches each console's hash index (on demand, TTL 7d)
-#   4. computes the ROM's RA hash via ra_hash.compute_ra_hash on the resolved path
-#   5. resolves hash -> gameID against the cached index
-#   6. calls API_GetGameInfoAndUserProgress and aggregates progress
+# Flat-JSON contract: every field is a scalar (string/int/bool). The CYD
+# firmware parses with extractStringValue/extractIntValue/extractBoolValue —
+# no nested objects, ever.
 #
-# NOT in this version (deferred — see PENDING.md): LastGameID fallback, hardcore
-# breakdown, recent-unlock polling / event_counter.
+# UNVERIFIED field-name assumptions (flagged in PENDING.md):
+#   - API_GetUserRecentAchievements entries: AchievementID, Title, Points,
+#     Date, GameID, HardcoreMode, and the 'm' (minutes) request param.
+#     A real live unlock (odelot fork) is needed to confirm.
+#   - API_GetUserSummary: LastGameID field. Verifiable with curl.
 # =============================================================================
 
 import json
 import os
+import re
 import ssl
 import time
 import threading
@@ -45,9 +45,14 @@ _BASE_DIR   = "/media/fat/Scripts/.config/mister_monitor"
 _CRED_PATH  = os.path.join(_BASE_DIR, "ra_credentials.ini")
 _CACHE_DIR  = os.path.join(_BASE_DIR, "ra_cache")
 
-_INDEX_TTL_SECONDS = 7 * 24 * 3600
-_API_BASE          = "https://retroachievements.org/API"
-_HTTP_TIMEOUT      = 15
+_INDEX_TTL_SECONDS    = 7 * 24 * 3600   # console hash index refresh
+_PROGRESS_TTL_SECONDS = 30              # progress aggregate cache
+_NEGATIVE_TTL_SECONDS = 120             # retry window for unresolved dumps
+_POLL_INTERVAL_SECONDS = 60             # unlock polling cadence
+_RECENT_WINDOW_MINUTES = 15             # lookback for GetUserRecentAchievements
+
+_API_BASE     = "https://retroachievements.org/API"
+_HTTP_TIMEOUT = 15
 
 _CA_CANDIDATES = [
     "/etc/ssl/certs/ca-certificates.crt",
@@ -72,13 +77,6 @@ _SSL_CTX, _SSL_VERIFIED = _make_ssl_context()
 
 
 # --- Friendly core name -> internal RA key -----------------------------------
-# The server exposes the FRIENDLY name (post-CORE_NAME_MAPPING), e.g.
-# "Super Nintendo/Super Famicom", not "snes". We translate friendly -> key.
-# Keys must match CORE_TO_CONSOLE_IDS below and ra_hash.CORE_HASH_METHOD.
-# Matching is case-insensitive and tolerant of the exact friendly string.
-#
-# UNVERIFIED friendly strings are marked; confirm on hardware as cores are
-# tested (each is harmless if wrong — the core simply reports unsupported).
 
 FRIENDLY_TO_KEY = {
     "super nintendo/super famicom": "snes",
@@ -91,13 +89,11 @@ FRIENDLY_TO_KEY = {
     "nintendo 64":                  "n64",
     "turbografx-16/pc engine":      "tgfx16",
     "sega master system":           "sms",
-    "sega master system/game gear": "sms",   # (?) verify friendly string
+    "sega master system/game gear": "sms",       # (?) verify friendly string
     "atari 2600":                   "atari7800",  # RA 2600 runs via 7800 core
 }
 
-
-# --- Internal RA key -> consoleID(s) -----------------------------------------
-# Verified against API_GetConsoleIDs (g=1,a=1) on real hardware.
+# --- Internal RA key -> consoleID(s), verified via API_GetConsoleIDs ----------
 CORE_TO_CONSOLE_IDS = {
     'nes':          [7, 81],
     'snes':         [3],
@@ -111,18 +107,53 @@ CORE_TO_CONSOLE_IDS = {
     's32x':         [10],
 }
 
+# --- Module state --------------------------------------------------------------
+# _index_lock guards the per-console hash maps.
+# _ra_lock guards context, events and the progress/resolution caches.
+# The two locks are never nested.
+
 _index_maps = {}
 _index_lock = threading.Lock()
 
+_ra_lock = threading.Lock()
 
-def _friendly_to_key(core_friendly):
-    """Translate a friendly core name to an internal RA key, or '' if none."""
-    if not core_friendly:
-        return ""
-    return FRIENDLY_TO_KEY.get(core_friendly.strip().lower(), "")
+_ra_context = {          # what the polling thread believes is active
+    "seq": None,         # server _state['seq'] at last successful resolution
+    "game_id": 0,
+}
+
+_events = {              # unlock event state (popup source for the firmware)
+    "counter": 0,        # monotonic across games — firmware fires on change
+    "seen": set(),       # AchievementIDs already observed for baseline logic
+    "baseline_done": False,
+    "last_title": "",
+    "last_points": 0,
+    "last_hardcore": False,
+    "last_date": "",
+}
+
+_res_cache = {           # expensive hash+resolution, keyed by ROM identity
+    "key": None,         # (rom_path, internal_path)
+    "hash": "",
+    "note": "",
+    "gid": 0,
+    "cid": None,
+    "method": "",        # "index" | "lastgame"
+    "title": "",         # title from fallback progress (avoids refetch)
+    "ts": 0.0,
+}
+
+_progress_cache = {      # aggregated progress, short TTL
+    "gid": 0,
+    "ts": 0.0,
+    "data": None,
+}
+
+_state_getter  = None    # injected by start_ra_polling()
+_poll_started  = False
 
 
-# --- Credentials -------------------------------------------------------------
+# --- Credentials ---------------------------------------------------------------
 
 def _load_credentials():
     if not os.path.exists(_CRED_PATH):
@@ -156,7 +187,7 @@ def _mask(key):
     return key[:4] + "…" + key[-2:]
 
 
-# --- RA Web API calls --------------------------------------------------------
+# --- RA Web API calls ------------------------------------------------------------
 
 def _api_get(endpoint, params):
     url = "%s/%s?%s" % (_API_BASE, endpoint, urllib.parse.urlencode(params))
@@ -231,17 +262,96 @@ def _resolve_game_id(console_ids, ra_hash, user, key):
     return 0, None
 
 
-# --- Active ROM resolution (delegates to the server's own resolver) ----------
+# --- Progress aggregation ------------------------------------------------------
+
+def _fetch_progress_aggregate(gid, user, key):
+    """
+    Calls API_GetGameInfoAndUserProgress and reduces it to a flat aggregate.
+    Returns dict or None. Field names verified on hardware for Title,
+    NumAchievements, NumAwardedToUser, Achievements{Points,DateEarned,
+    DateEarnedHardcore}.
+    """
+    prog = _api_get("API_GetGameInfoAndUserProgress.php",
+                    {'g': gid, 'u': user, 'y': key})
+    if prog is None:
+        return None
+
+    def _int(v):
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    total    = _int(prog.get("NumAchievements"))
+    unlocked = _int(prog.get("NumAwardedToUser"))
+
+    points_total = points_earned = points_hc = 0
+    unlocked_hc = 0
+    ach = prog.get("Achievements", {})
+    if isinstance(ach, dict):
+        for a in ach.values():
+            p = _int(a.get("Points"))
+            points_total += p
+            earned_hc = bool(a.get("DateEarnedHardcore"))
+            earned    = earned_hc or bool(a.get("DateEarned"))
+            if earned:
+                points_earned += p
+            if earned_hc:
+                unlocked_hc += 1
+                points_hc += p
+
+    return {
+        "title": str(prog.get("Title", "") or ""),
+        "total": total,
+        "unlocked": unlocked,
+        "unlocked_hardcore": unlocked_hc,
+        "points_total": points_total,
+        "points_earned": points_earned,
+        "points_hardcore": points_hc,
+    }
+
+
+def _get_progress_cached(gid, user, key):
+    now = time.time()
+    with _ra_lock:
+        if (_progress_cache["gid"] == gid and _progress_cache["data"] is not None
+                and now - _progress_cache["ts"] < _PROGRESS_TTL_SECONDS):
+            return _progress_cache["data"]
+    data = _fetch_progress_aggregate(gid, user, key)
+    if data is not None:
+        with _ra_lock:
+            _progress_cache["gid"]  = gid
+            _progress_cache["ts"]   = now
+            _progress_cache["data"] = data
+    return data
+
+
+# --- Title corroboration (LastGameID fallback) --------------------------------
+
+def _norm_title(s):
+    return re.sub(r'[^a-z0-9]', '', (s or '').lower())
+
+
+def _titles_match(local_name, ra_title):
+    """
+    Conservative corroboration: normalized containment either way, with a
+    minimum length so trivial fragments can't match. 'Super Metroid' vs
+    'Super Metroid' -> exact; 'Final Fantasy VII (Disc 1)' vs
+    'Final Fantasy VII' -> containment.
+    """
+    a, b = _norm_title(local_name), _norm_title(ra_title)
+    if len(a) < 4 or len(b) < 4:
+        return False
+    return a in b or b in a
+
+
+# --- Active ROM resolution (delegates to the server's own resolver) -----------
 
 def _get_active_rom(handler):
     """
-    Returns (core_friendly, resolved_path, internal_path).
-    Uses the handler's OWN methods so all path/state logic stays in the server:
-      - get_current_core()  gives the friendly core name from live state
-      - get_rom_details()   gives resolved_zip_path / internal_path / path,
-                            already handling ZIP / CHD / USB / SAM resolution
-    resolved_path is the ZIP container (for zipped ROMs) or the plain file.
-    internal_path is the in-ZIP name, or None for plain files.
+    Returns (core_friendly, resolved_path, internal_path, search_name).
+    All path/state logic stays in the server (get_current_core /
+    get_rom_details); we only consume its resolved fields.
     """
     core = ""
     try:
@@ -250,30 +360,141 @@ def _get_active_rom(handler):
         print(f"[RA] get_current_core failed: {e}")
 
     if not core or core.strip().lower() == "menu":
-        return core, None, None
+        return core, None, None, ""
 
     try:
         details = handler.get_rom_details()
     except Exception as e:
         print(f"[RA] get_rom_details failed: {e}")
-        return core, None, None
+        return core, None, None, ""
 
     if not isinstance(details, dict) or not details.get("available"):
-        return core, None, None
+        return core, None, None, ""
+
+    search_name = str(details.get("search_name", "") or "")
 
     zip_path = details.get("resolved_zip_path") or details.get("zip_path")
     internal = details.get("internal_path")
     if zip_path and internal:
-        return core, zip_path, internal
+        return core, zip_path, internal, search_name
 
     plain = details.get("path") or ""
     if plain and os.path.exists(plain):
-        return core, plain, None
+        return core, plain, None, search_name
 
-    return core, None, None
+    return core, None, None, search_name
 
 
-# --- Public entry point ------------------------------------------------------
+def _read_seq():
+    """Read the server's state seq via the injected getter, or None."""
+    if _state_getter is None:
+        return None
+    try:
+        state, lock = _state_getter()
+        with lock:
+            return state.get('seq')
+    except Exception:
+        return None
+
+
+# --- Unlock polling thread -----------------------------------------------------
+
+def _poll_once(user, key):
+    """
+    One polling cycle. Split out from the thread loop for testability.
+    """
+    seq = _read_seq()
+
+    with _ra_lock:
+        # Game changed since last resolution? Drop context; the endpoint will
+        # re-resolve on its next call and re-arm the baseline.
+        if (seq is not None and _ra_context["seq"] is not None
+                and seq != _ra_context["seq"]):
+            print("[RA] 🛰️ game changed (seq) — resetting unlock baseline")
+            _ra_context["seq"] = None
+            _ra_context["game_id"] = 0
+            _events["seen"].clear()
+            _events["baseline_done"] = False
+            return
+        gid = _ra_context["game_id"]
+
+    if not gid:
+        return
+
+    recent = _api_get("API_GetUserRecentAchievements.php",
+                      {'u': user, 'y': key, 'm': _RECENT_WINDOW_MINUTES})
+    if not isinstance(recent, list):
+        return
+
+    with _ra_lock:
+        if not _events["baseline_done"]:
+            # First poll for this game: absorb pre-existing unlocks silently
+            # so we never popup something that happened before we watched.
+            for a in recent:
+                aid = a.get("AchievementID")
+                if aid is not None:
+                    _events["seen"].add(aid)
+            _events["baseline_done"] = True
+            print(f"[RA] 🛰️ baseline set ({len(_events['seen'])} recent absorbed)")
+            return
+
+        fired = False
+        for a in recent:
+            aid = a.get("AchievementID")
+            if aid is None or aid in _events["seen"]:
+                continue
+            _events["seen"].add(aid)
+            try:
+                agid = int(a.get("GameID") or 0)
+            except (TypeError, ValueError):
+                agid = 0
+            if agid != gid:
+                continue   # unlock from another game/device — seen, not fired
+            _events["counter"] += 1
+            _events["last_title"]    = str(a.get("Title", "") or "")
+            try:
+                _events["last_points"] = int(a.get("Points", 0) or 0)
+            except (TypeError, ValueError):
+                _events["last_points"] = 0
+            try:
+                _events["last_hardcore"] = bool(int(a.get("HardcoreMode", 0) or 0))
+            except (TypeError, ValueError):
+                _events["last_hardcore"] = False
+            _events["last_date"] = str(a.get("Date", "") or "")
+            fired = True
+            print(f"[RA] 🏆 unlock: {_events['last_title']} "
+                  f"(+{_events['last_points']}{' HC' if _events['last_hardcore'] else ''})")
+        if fired:
+            _progress_cache["ts"] = 0.0   # next endpoint call refetches counts
+
+
+def _ra_poll_thread():
+    print(f"[RA] 🛰️ unlock polling thread started ({_POLL_INTERVAL_SECONDS}s)")
+    while True:
+        time.sleep(_POLL_INTERVAL_SECONDS)
+        try:
+            user, key = _load_credentials()
+            if user and key:
+                _poll_once(user, key)
+        except Exception as e:
+            print(f"[RA] poll error: {e}")
+
+
+def start_ra_polling(state_getter):
+    """
+    Called once from the server's __main__:
+        start_ra_polling(lambda: (_state, _state_lock))
+    Injects live-state access and starts the daemon polling thread.
+    """
+    global _state_getter, _poll_started
+    _state_getter = state_getter
+    if _poll_started:
+        return
+    _poll_started = True
+    threading.Thread(target=_ra_poll_thread, daemon=True).start()
+
+
+# --- Public entry point ----------------------------------------------------------
 
 def get_ra_status(handler):
     now = int(time.time())
@@ -285,24 +506,45 @@ def get_ra_status(handler):
         "game_title": "",
         "total": 0,
         "unlocked": 0,
+        "unlocked_hardcore": 0,
         "points_earned": 0,
         "points_total": 0,
+        "points_hardcore": 0,
+        "match_method": "",
+        "event_counter": 0,
+        "last_unlock_title": "",
+        "last_unlock_points": 0,
+        "last_unlock_hardcore": False,
+        "last_unlock_date": "",
+        "polling": _poll_started,
         "ssl_verified": _SSL_VERIFIED,
         "timestamp": now,
     }
 
+    # Events are attached to every response so the firmware can watch the
+    # counter from any page, whatever the resolution outcome below.
+    def _attach_events():
+        with _ra_lock:
+            out["event_counter"]        = _events["counter"]
+            out["last_unlock_title"]    = _events["last_title"]
+            out["last_unlock_points"]   = _events["last_points"]
+            out["last_unlock_hardcore"] = _events["last_hardcore"]
+            out["last_unlock_date"]     = _events["last_date"]
+
     user, key = _load_credentials()
     if not user or not key:
         out["status"] = "not_configured"
+        _attach_events()
         return out
     out["enabled"] = True
 
-    core_friendly, rom_path, internal = _get_active_rom(handler)
+    core_friendly, rom_path, internal, search_name = _get_active_rom(handler)
     out["core"] = core_friendly
 
-    ra_key = _friendly_to_key(core_friendly)
+    ra_key = FRIENDLY_TO_KEY.get((core_friendly or "").strip().lower(), "")
     if not ra_key or ra_key not in CORE_TO_CONSOLE_IDS or not is_core_supported(ra_key):
         out["status"] = "core_not_supported"
+        _attach_events()
         return out
     out["supported"] = True
     out["ra_key"] = ra_key
@@ -310,54 +552,106 @@ def get_ra_status(handler):
 
     if not rom_path:
         out["status"] = "no_game_loaded"
+        _attach_events()
         return out
 
-    hres = compute_ra_hash(ra_key, rom_path, internal)
-    if hres["error"] or not hres["hash"]:
-        out["status"] = "hash_error"
-        out["detail"] = hres["error"] or "no hash produced"
-        return out
-    out["ra_hash"] = hres["hash"].lower()
+    # --- Resolution (hash + index + fallback), cached per ROM identity -------
+    cache_key = (rom_path, internal)
+    now_f = time.time()
 
-    gid, matched_cid = _resolve_game_id(console_ids, hres["hash"], user, key)
+    with _ra_lock:
+        cached = dict(_res_cache) if _res_cache["key"] == cache_key else None
+
+    use_cached = False
+    if cached:
+        if cached["gid"] > 0:
+            use_cached = True
+        elif now_f - cached["ts"] < _NEGATIVE_TTL_SECONDS:
+            use_cached = True   # recent negative — don't hammer the API
+
+    if use_cached:
+        ra_hash_hex   = cached["hash"]
+        gid           = cached["gid"]
+        match_method  = cached["method"]
+        fb_title      = cached["title"]
+    else:
+        hres = compute_ra_hash(ra_key, rom_path, internal)
+        if hres["error"] or not hres["hash"]:
+            out["status"] = "hash_error"
+            out["detail"] = hres["error"] or "no hash produced"
+            _attach_events()
+            return out
+        ra_hash_hex = hres["hash"].lower()
+
+        gid, _cid = _resolve_game_id(console_ids, ra_hash_hex, user, key)
+        match_method = "index" if gid else ""
+        fb_title = ""
+
+        # --- LastGameID fallback with title corroboration --------------------
+        if gid == 0 and search_name:
+            summary = _api_get("API_GetUserSummary.php",
+                               {'u': user, 'y': key, 'g': 1, 'a': 1})
+            last_gid = 0
+            if isinstance(summary, dict):
+                try:
+                    last_gid = int(summary.get("LastGameID") or 0)
+                except (TypeError, ValueError):
+                    last_gid = 0
+            if last_gid:
+                agg = _get_progress_cached(last_gid, user, key)
+                if agg and _titles_match(search_name, agg["title"]):
+                    gid = last_gid
+                    match_method = "lastgame"
+                    fb_title = agg["title"]
+                    print(f"[RA] fallback corroborated: '{search_name}' ~ "
+                          f"'{agg['title']}' (game {gid})")
+                elif agg:
+                    print(f"[RA] fallback rejected: '{search_name}' !~ "
+                          f"'{agg['title']}'")
+
+        with _ra_lock:
+            _res_cache.update({
+                "key": cache_key, "hash": ra_hash_hex, "gid": gid,
+                "method": match_method, "title": fb_title, "ts": now_f,
+            })
+
+    out["ra_hash"] = ra_hash_hex
+
     if gid == 0:
         out["status"] = "rom_not_recognized"
+        _attach_events()
         return out
+
     out["game_matched"] = True
     out["game_id"] = gid
+    out["match_method"] = match_method
 
-    prog = _api_get("API_GetGameInfoAndUserProgress.php",
-                    {'g': gid, 'u': user, 'y': key})
-    if prog is None:
+    # Arm/refresh the polling context for this game.
+    seq = _read_seq()
+    with _ra_lock:
+        if _ra_context["game_id"] != gid:
+            _events["seen"].clear()
+            _events["baseline_done"] = False
+            _events["last_title"] = ""
+            _events["last_points"] = 0
+            _events["last_hardcore"] = False
+            _events["last_date"] = ""
+        _ra_context["game_id"] = gid
+        _ra_context["seq"] = seq
+
+    agg = _get_progress_cached(gid, user, key)
+    if agg is None:
         out["status"] = "progress_unavailable"
+        _attach_events()
         return out
 
-    out["game_title"] = str(prog.get("Title", "") or "")
-    try:
-        total = int(prog.get("NumAchievements", 0) or 0)
-    except (TypeError, ValueError):
-        total = 0
-    try:
-        unlocked = int(prog.get("NumAwardedToUser", 0) or 0)
-    except (TypeError, ValueError):
-        unlocked = 0
-
-    points_total = 0
-    points_earned = 0
-    ach = prog.get("Achievements", {})
-    if isinstance(ach, dict):
-        for a in ach.values():
-            try:
-                p = int(a.get("Points", 0) or 0)
-            except (TypeError, ValueError):
-                p = 0
-            points_total += p
-            if a.get("DateEarned") or a.get("DateEarnedHardcore"):
-                points_earned += p
-
-    out["total"] = total
-    out["unlocked"] = unlocked
-    out["points_earned"] = points_earned
-    out["points_total"] = points_total
+    out["game_title"]        = agg["title"]
+    out["total"]             = agg["total"]
+    out["unlocked"]          = agg["unlocked"]
+    out["unlocked_hardcore"] = agg["unlocked_hardcore"]
+    out["points_total"]      = agg["points_total"]
+    out["points_earned"]     = agg["points_earned"]
+    out["points_hardcore"]   = agg["points_hardcore"]
     out["status"] = "ok"
+    _attach_events()
     return out

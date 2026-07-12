@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 # RetroAchievements status resolver (sibling module). Imported lazily-safe:
 # if the file is missing the server still starts; the route reports the error.
 try:
-    from ra_status import get_ra_status
+    from ra_status import get_ra_status, start_ra_polling
     _RA_AVAILABLE = True
 except Exception as _ra_e:
     _RA_AVAILABLE = False
@@ -2433,6 +2433,11 @@ if __name__ == '__main__':
     try:
         _start_watcher()
         _start_discovery_responder()
+        if _RA_AVAILABLE:
+            try:
+                start_ra_polling(lambda: (_state, _state_lock))
+            except Exception as e:
+                print(f"ℹ️ RA polling not started: {e}")
         server = ThreadingHTTPServer(('', 8081), MiSTerStatusHandler)
         print("MiSTer Monitor Status Server v2 - port 8081")
         print("Endpoints:")
