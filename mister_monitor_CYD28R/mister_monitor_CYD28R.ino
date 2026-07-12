@@ -160,12 +160,28 @@ bool connected = false;
 bool wasConnected = false;
 bool sdCardAvailable = false;
 int currentPage = 0;
-const int totalPages = 6;  // 5 system pages + GAME INFO
+const int totalPages = 7;  // 5 system pages + GAME INFO + RETROACHIEVEMENTS
 unsigned long lastUpdate = 0;
 unsigned long lastPageChange = 0;
 unsigned long animTimer = 0;
 int blinkState = 0;
 bool needsRedraw = true;
+
+// ========== RETROACHIEVEMENTS (page 6) ==========
+// Data mirror of the server endpoint, fetch scheduling, and the live-unlock
+// popup state. The struct lives in mister_types.h.
+RAStatus raStatus = {false, false, false, "", "", "",
+                     0, 0, 0, 0, 0, 0, "", 0, "", 0, false, false};
+
+unsigned long lastRAFetch = 0;
+const unsigned long RA_FETCH_INTERVAL_ACTIVE = 30000;  // RA page visible
+const unsigned long RA_FETCH_INTERVAL_IDLE   = 60000;  // any other page/image
+
+int  raLastSeenEventCounter = -1;    // -1 = absorb the first value silently
+unsigned long raPopupUntil  = 0;     // millis() deadline while popup shows
+bool raPopupDrawn = false;
+
+ScrollTextState raUnlockScroll = {"", 0, 0, 0, 0, false, false, false};
 
 // Screensaver variables
 unsigned long lastButtonPress = 0;
@@ -514,6 +530,12 @@ int  wrapTextToLines(const String &text, int maxChars, String *out, int maxOut);
 void drawWrappedText(int x, int y, int w, int lineH, int maxLines, const String &text);
 void displayGameInfo();
 void drawGameInfoIcon(bool pressed = false);
+
+// --- RETROACHIEVEMENTS panel (page 6) ---
+void getRAStatus();
+void displayRetroAchievements();
+void drawRAMessage(const String &title, const String &subtitle, uint16_t color);
+void showAchievementUnlock();
 bool gameInfoAvailable();
 void drawGameInfoSynopsis();
 bool gameInfoSynNeedsScroll();
@@ -2912,6 +2934,21 @@ if (oldGame != currentGame && sdCardAvailable) {
     needsRedraw = true;
     lastUpdate = millis();
   }
+
+  // === RETROACHIEVEMENTS: periodic status fetch ==============================
+  // 30 s while the RA page is visible, 60 s otherwise (keeps the unlock
+  // counter watched from any page or from fullscreen image mode). Single-shot
+  // GET — the server answers from its own caches, so no retry loop is needed.
+  {
+    unsigned long raInterval = (currentPage == 6 && !showingCoreImage)
+                               ? RA_FETCH_INTERVAL_ACTIVE
+                               : RA_FETCH_INTERVAL_IDLE;
+    if (connected && millis() - lastRAFetch > raInterval) {
+      getRAStatus();
+      lastRAFetch = millis();
+      if (currentPage == 6 && !showingCoreImage) needsRedraw = true;
+    }
+  }
   
   // === GAME INFO subpage handling ===========================================
   // Lifecycle of the panel when left alone:
@@ -3053,6 +3090,49 @@ if (oldGame != currentGame && sdCardAvailable) {
     lastGameInfoRowUpdate = millis();
   }
   
+  // === RETROACHIEVEMENTS: unlock popup lifecycle =============================
+  // Armed by getRAStatus() when event_counter increases. Drawn once (overlay,
+  // no full-screen wipe) and held for 5 s; then the underlying screen is
+  // restored — pages via needsRedraw, fullscreen images via the same idiom the
+  // 30 s rotation uses.
+  if (raPopupUntil > 0) {
+    if (millis() < raPopupUntil) {
+      if (!raPopupDrawn) {
+        showAchievementUnlock();
+        raPopupDrawn = true;
+        lastRotationTime = millis();   // hold image rotation while popup is up
+      }
+    } else {
+      raPopupUntil = 0;
+      raPopupDrawn = false;
+      if (showingCoreImage) {
+        if (showingGameImage && currentGame.length() > 0) {
+          showGameImageScreen(currentCore, currentGame);
+        } else {
+          showCoreImageScreenWithAutoDownload(currentCore);
+        }
+        coreImageStartTime = millis();
+      } else {
+        needsRedraw = true;
+      }
+    }
+  }
+
+  // === RETROACHIEVEMENTS: last-unlock title scroll (page 6) ==================
+  static unsigned long lastRAScrollUpdate = 0;
+  if (currentPage == 6 && !showingCoreImage && raStatus.valid &&
+      raStatus.status == "ok" && raUnlockScroll.needsScroll &&
+      millis() - lastRAScrollUpdate > 100) {
+    String raShown = getScrolledText(&raUnlockScroll);
+    while ((int)raShown.length() < raUnlockScroll.maxChars) raShown += ' ';
+    Lcd.setTextWrap(false);
+    Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(46, 162);
+    Lcd.print(raShown);
+    lastRAScrollUpdate = millis();
+  }
+
   // Subtle animations only for specific elements
   if (millis() - animTimer > 1000) {
     blinkState = (blinkState + 1) % 4;
@@ -4890,6 +4970,257 @@ void getNetworkAndSession() {
   http.end();
 }
 
+// =============================================================================
+// RETROACHIEVEMENTS (page 6)
+// =============================================================================
+
+// Single-shot fetch of /status/retroachievements. Unlike getCurrentRomDetails()
+// there is no retry loop: the server resolves and caches everything in its own
+// thread, so the endpoint answers immediately. Arms the unlock popup when the
+// monotonic event_counter advances (first value is absorbed silently so a
+// reboot never pops a stale unlock).
+void getRAStatus() {
+  if (ESP.getFreeHeap() < 45000) {
+    Serial.printf("[RA] Low memory (%d), skipping fetch\n", ESP.getFreeHeap());
+    return;
+  }
+
+  String url = String("http://") + misterIP + ":8081/status/retroachievements";
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(8000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+
+  int code = http.GET();
+  if (code != 200) {
+    Serial.printf("[RA] HTTP %d\n", code);
+    http.end();
+    raStatus.valid = false;
+    return;
+  }
+
+  String response = http.getString();
+  http.end();
+
+  if (response.length() > 4000) {
+    response = response.substring(0, 4000);  // flat JSON is <1KB; safety cap
+  }
+
+  raStatus.enabled            = extractBoolValue(response, "enabled");
+  raStatus.supported          = extractBoolValue(response, "supported");
+  raStatus.gameMatched        = extractBoolValue(response, "game_matched");
+  raStatus.status             = extractStringValue(response, "status");
+  raStatus.matchMethod        = extractStringValue(response, "match_method");
+  raStatus.gameTitle          = extractStringValue(response, "game_title");
+  raStatus.total              = extractIntValue(response, "total");
+  raStatus.unlocked           = extractIntValue(response, "unlocked");
+  raStatus.unlockedHardcore   = extractIntValue(response, "unlocked_hardcore");
+  raStatus.pointsEarned       = extractIntValue(response, "points_earned");
+  raStatus.pointsTotal        = extractIntValue(response, "points_total");
+  raStatus.pointsHardcore     = extractIntValue(response, "points_hardcore");
+  raStatus.core               = extractStringValue(response, "core");
+  raStatus.eventCounter       = extractIntValue(response, "event_counter");
+  raStatus.lastUnlockTitle    = extractStringValue(response, "last_unlock_title");
+  raStatus.lastUnlockPoints   = extractIntValue(response, "last_unlock_points");
+  raStatus.lastUnlockHardcore = extractBoolValue(response, "last_unlock_hardcore");
+  raStatus.valid = true;
+
+  response = "";
+
+  Serial.printf("[RA] status=%s matched=%d %d/%d pts=%d/%d hc=%d evt=%d\n",
+                raStatus.status.c_str(), raStatus.gameMatched,
+                raStatus.unlocked, raStatus.total,
+                raStatus.pointsEarned, raStatus.pointsTotal,
+                raStatus.unlockedHardcore, raStatus.eventCounter);
+
+  if (raLastSeenEventCounter < 0) {
+    raLastSeenEventCounter = raStatus.eventCounter;      // boot: absorb
+  } else if (raStatus.eventCounter > raLastSeenEventCounter) {
+    raLastSeenEventCounter = raStatus.eventCounter;
+    raPopupUntil = millis() + 5000;                      // arm the popup
+    Serial.printf("[RA] Unlock popup armed: %s\n",
+                  raStatus.lastUnlockTitle.c_str());
+  }
+}
+
+// Full-panel status message helper (title + one-line subtitle).
+void drawRAMessage(const String &title, const String &subtitle, uint16_t color) {
+  Lcd.setTextColor(color);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(20, 70);
+  Lcd.print(title);
+
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(20, 100);
+  Lcd.print(subtitle);
+}
+
+// Page 6 renderer. Clears the same content band as displayMainHUD() and
+// branches on the endpoint's status field. unlocked==0 with status "ok" is a
+// legitimate "not started yet" state, not an error.
+void displayRetroAchievements() {
+  Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
+
+  if (!raStatus.valid) {
+    drawRAMessage("CONNECTING...", "Fetching achievement data", THEME_CYAN);
+    return;
+  }
+
+  if (raStatus.status == "not_configured") {
+    // The page is always present, so it must teach its own setup.
+    Lcd.setTextColor(THEME_YELLOW);
+    Lcd.setTextSize(2);
+    Lcd.setCursor(20, 44);
+    Lcd.print("RA NOT SET UP");
+
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(20, 76);   Lcd.print("To enable RetroAchievements:");
+    Lcd.setTextColor(THEME_WHITE);
+    Lcd.setCursor(20, 96);   Lcd.print("1. Get a Web API key at");
+    Lcd.setCursor(32, 108);  Lcd.print("retroachievements.org");
+    Lcd.setCursor(20, 124);  Lcd.print("2. On the MiSTer create");
+    Lcd.setCursor(32, 136);  Lcd.print("ra_credentials.ini");
+    Lcd.setCursor(20, 152);  Lcd.print("3. Add username + api_key");
+    Lcd.setCursor(20, 168);  Lcd.print("4. Restart the monitor server");
+    return;
+  }
+
+  if (raStatus.status == "core_not_supported") {
+    String sub = raStatus.core.length() > 0 ? raStatus.core : "this core";
+    if (sub.length() > 34) sub = sub.substring(0, 34);
+    drawRAMessage("NO RA SUPPORT", "No achievements for " + sub, THEME_GRAY);
+    return;
+  }
+
+  if (raStatus.status == "no_game_loaded") {
+    drawRAMessage("NO GAME LOADED", "Load a game to see trophies", THEME_GRAY);
+    return;
+  }
+
+  if (raStatus.status == "rom_not_recognized") {
+    Lcd.setTextColor(THEME_YELLOW);
+    Lcd.setTextSize(2);
+    Lcd.setCursor(20, 50);
+    Lcd.print("ROM NOT LINKED");
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(20, 82);   Lcd.print("This game has achievements,");
+    Lcd.setCursor(20, 96);   Lcd.print("but this exact dump is not");
+    Lcd.setCursor(20, 110);  Lcd.print("linked on RetroAchievements.");
+    Lcd.setTextColor(THEME_WHITE);
+    Lcd.setCursor(20, 134);  Lcd.print("A standard (USA / JU) dump");
+    Lcd.setCursor(20, 148);  Lcd.print("would be recognised.");
+    return;
+  }
+
+  if (raStatus.status != "ok") {
+    // hash_error / progress_unavailable / anything unexpected
+    drawRAMessage("RA UNAVAILABLE", "Could not read progress", THEME_RED);
+    return;
+  }
+
+  // ---- status == "ok": full progress panel ---------------------------------
+
+  // Game title, size 2, truncated to the 25 chars that fit from x=10.
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(10, 44);
+  {
+    String t = raStatus.gameTitle;
+    if (t.length() > 25) t = t.substring(0, 25);
+    Lcd.print(t);
+  }
+
+  // Progress bar: unlocked/total. Guard divide-by-zero.
+  float pct = (raStatus.total > 0)
+              ? (100.0f * raStatus.unlocked / raStatus.total) : 0.0f;
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(10, 74);
+  Lcd.printf("PROGRESS  %d/%d", raStatus.unlocked, raStatus.total);
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setCursor(250, 74);
+  Lcd.printf("%d%%", (int)pct);
+  drawProgressBar(10, 88, 300, 16, pct);
+
+  // Mini-panels row: POINTS + (HARDCORE | MATCHED)
+  char pointsVal[24];
+  snprintf(pointsVal, sizeof(pointsVal), "%d/%d",
+           raStatus.pointsEarned, raStatus.pointsTotal);
+  drawMiniPanel(10, 112, 145, 40, "POINTS", String(pointsVal), THEME_GREEN);
+
+  if (raStatus.unlockedHardcore > 0) {
+    char hcVal[24];
+    snprintf(hcVal, sizeof(hcVal), "%d (%dpt)",
+             raStatus.unlockedHardcore, raStatus.pointsHardcore);
+    drawMiniPanel(165, 112, 145, 40, "HARDCORE", String(hcVal), THEME_RED);
+  } else {
+    String mm = (raStatus.matchMethod == "lastgame") ? "LIVE (fork)" : "BY HASH";
+    drawMiniPanel(165, 112, 145, 40, "MATCHED", mm, THEME_CYAN);
+  }
+
+  // Last unlocked achievement (scrolling), or the "not started" line.
+  if (raStatus.lastUnlockTitle.length() > 0) {
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(10, 162);
+    Lcd.print("LAST:");
+
+    const int raVisibleChars = 40;   // x=46 + 40*6 = 286, inside the band
+    if (raUnlockScroll.fullText != raStatus.lastUnlockTitle ||
+        raUnlockScroll.maxChars != raVisibleChars) {
+      initScrollText(&raUnlockScroll, raStatus.lastUnlockTitle, raVisibleChars);
+    }
+    String shown = getScrolledText(&raUnlockScroll);
+    while ((int)shown.length() < raUnlockScroll.maxChars) shown += ' ';
+    Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+    Lcd.setCursor(46, 162);
+    Lcd.print(shown);
+  } else if (raStatus.unlocked == 0) {
+    Lcd.setTextColor(THEME_GRAY);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(10, 162);
+    Lcd.print("No achievements earned yet");
+  }
+}
+
+// Unlock popup overlay. Follows the showDownloadProgress() contract: paints a
+// framed band without a full-screen wipe, so it sits on top of whatever is up
+// (page or fullscreen image). loop() holds it 5 s and restores underneath.
+void showAchievementUnlock() {
+  const int bx = 20, by = 80, bw = 280, bh = 80;
+
+  Lcd.fillRect(bx, by, bw, bh, THEME_BLACK);
+  Lcd.drawRect(bx, by, bw, bh, THEME_YELLOW);
+  Lcd.drawRect(bx + 1, by + 1, bw - 2, bh - 2, THEME_YELLOW);
+
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(THEME_YELLOW);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(bx + 12, by + 10);
+  Lcd.print("ACHIEVEMENT!");
+
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(bx + 12, by + 36);
+  {
+    String t = raStatus.lastUnlockTitle;
+    if (t.length() > 42) t = t.substring(0, 42);   // 42*6=252 <= bw-24
+    Lcd.print(t);
+  }
+
+  Lcd.setTextColor(raStatus.lastUnlockHardcore ? THEME_RED : THEME_GREEN);
+  Lcd.setCursor(bx + 12, by + 54);
+  Lcd.printf("+%d pts%s", raStatus.lastUnlockPoints,
+             raStatus.lastUnlockHardcore ? "  [HARDCORE]" : "");
+
+  playNextButtonSound();
+}
+
 void updateDisplay() {
   Lcd.fillScreen(THEME_BLACK);
 
@@ -4902,6 +5233,7 @@ void updateDisplay() {
     case 3: displayNetworkTerminal(); break;
     case 4: displayDeviceScanner();   break;
     case 5: displayGameInfo();        break;
+    case 6: displayRetroAchievements(); break;
   }
 
   drawFooter();
@@ -5146,9 +5478,11 @@ void drawHeader(String title, String subtitle) {
   
   for (int i = 0; i < totalPages; i++) {
     uint16_t color = (i == currentPage) ? THEME_YELLOW : THEME_GRAY;
-    Lcd.fillRect(250 + i * 8, 8, 6, 6, color);
+    // Shifted 8px left of the original 250: with 7 pages the last dot would
+    // reach x=304 and collide with the connection circle (centre 307, r=8).
+    Lcd.fillRect(242 + i * 8, 8, 6, 6, color);
     if (i == currentPage) {
-      Lcd.drawRect(249 + i * 8, 7, 8, 8, THEME_YELLOW);
+      Lcd.drawRect(241 + i * 8, 7, 8, 8, THEME_YELLOW);
     }
   }
   
@@ -6307,6 +6641,7 @@ String getPageTitle() {
     case 3: return "NETWORK";
     case 4: return "DEVICES";
     case 5: return "GAME INFO";
+    case 6: return "RETROACHIEVEMENTS";
     default: return "SYSTEM";
   }
 }
@@ -6319,6 +6654,7 @@ String getPageSubtitle() {
     case 3: return "TERMINAL";
     case 4: return "SCANNER";
     case 5: return "NOW PLAYING";
+    case 6: return "RA TROPHIES";
     default: return "ONLINE";
   }
 }
