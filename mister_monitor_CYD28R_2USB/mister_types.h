@@ -43,6 +43,31 @@ struct GameMeta {
   String synopsis;         // ASCII-folded, whitespace-collapsed, capped
 };
 
+// RETROACHIEVEMENTS panel — flat mirror of /status/retroachievements.
+// Every field is a scalar; the endpoint JSON is deliberately flat so the
+// firmware's extract*Value() helpers can parse it without ArduinoJson.
+struct RAStatus {
+  bool    enabled;             // server has ra_credentials.ini
+  bool    supported;           // active core maps to an RA console
+  bool    gameMatched;         // hash or corroborated fallback resolved a game
+  String  status;              // "ok" | "not_configured" | "core_not_supported"
+                               // | "no_game_loaded" | "rom_not_recognized" | ...
+  String  matchMethod;         // "index" | "lastgame"
+  String  gameTitle;
+  int     total;               // achievements in the set
+  int     unlocked;            // earned (soft or hardcore)
+  int     unlockedHardcore;    // earned in hardcore
+  int     pointsEarned;
+  int     pointsTotal;
+  int     pointsHardcore;
+  String  core;                // friendly core name (for status messages)
+  int     eventCounter;        // monotonic unlock counter (popup trigger)
+  String  lastUnlockTitle;
+  int     lastUnlockPoints;
+  bool    lastUnlockHardcore;
+  bool    valid;               // last fetch parsed successfully
+};
+
 
 struct ScrollTextState {
   String fullText;
