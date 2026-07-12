@@ -18,3 +18,7 @@ credentials.h
 secrets.h
 # ScreenScraper dev credentials — injected by CI, never committed
 ss_credentials.h
+MiSTer/Scripts/.config/mister_monitor/ra_credentials.ini
+MiSTer/Scripts/.config/mister_monitor/ra_cache/
+MiSTer/Scripts/.config/mister_monitor/ra_credentials.ini
+MiSTer/Scripts/.config/mister_monitor/ra_cache/

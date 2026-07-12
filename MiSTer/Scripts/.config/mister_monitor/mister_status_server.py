@@ -18,6 +18,15 @@ import zipfile
 import io
 import socket
 from urllib.parse import urlparse
+
+# RetroAchievements status resolver (sibling module). Imported lazily-safe:
+# if the file is missing the server still starts; the route reports the error.
+try:
+    from ra_status import get_ra_status
+    _RA_AVAILABLE = True
+except Exception as _ra_e:
+    _RA_AVAILABLE = False
+    print(f"ℹ️ ra_status not loaded ({_ra_e}); /status/retroachievements disabled")
 import queue
 
 def _load_names_txt():
@@ -944,6 +953,13 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             self.send_json_response(self.get_network_stats())
         elif path == '/status/session':
             self.send_json_response(self.get_session_stats())
+        elif path == '/status/retroachievements':
+            if _RA_AVAILABLE:
+                self.send_json_response(get_ra_status(self))
+            else:
+                self.send_json_response({'enabled': False,
+                                         'status': 'module_unavailable',
+                                         'timestamp': int(time.time())})
         elif path == '/status/rom/details':
             from urllib.parse import parse_qs
             force = parse_qs(parsed_path.query).get('force', ['0'])[0] == '1'
@@ -2430,6 +2446,7 @@ if __name__ == '__main__':
         print("  /status/usb          - USB devices")
         print("  /status/session      - Session statistics")
         print("  /status/all          - All data combined")
+        print("  /status/retroachievements - RA progress for active game")
         print("")
         server.serve_forever()
     except Exception as e:
