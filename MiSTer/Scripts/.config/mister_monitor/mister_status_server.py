@@ -278,6 +278,28 @@ server_error_state        = ''    # last error message, empty string if none
 last_valid_core           = ''    # last corename that produced a valid state
 last_valid_core_timestamp = 0.0   # epoch time of last valid state update
 
+def _atari_78_or_26(game_path):
+    """Real system of a game loaded through the Atari7800 core (plays both).
+    .a26 -> 2600; .a78 -> 7800; else sniff the A78 header signature
+    ('ATARI7800' at offset 1) when the file is directly readable; headerless
+    dumps default to 2600 (real 7800 dumps virtually always carry the header).
+    ZIP-internal paths fall through to the extension rules only."""
+    p = game_path.lower()
+    if p.endswith('.a26'):
+        return 'Atari 2600'
+    if p.endswith('.a78'):
+        return 'Atari 7800'
+    try:
+        if os.path.isfile(game_path):
+            with open(game_path, 'rb') as f:
+                head = f.read(16)
+            if len(head) >= 10 and head[1:10] == b'ATARI7800':
+                return 'Atari 7800'
+    except OSError:
+        pass
+    return 'Atari 2600'
+
+
 def _commit_state(core, game, game_path, is_arcade, event):
     """
     Atomically commits a derived state. Bumps 'seq' and invalidates the
@@ -799,6 +821,12 @@ def _update_state():
             game_path = ''
         
         print(f"🎮 Non-arcade: core={corename} game={game_name}")
+
+    # Atari7800 core plays both 2600 and 7800: resolve the game's real system
+    # so artwork (ScreenScraper 26 vs 41) and the RA panel key off the game,
+    # not the core. Core-only (no game) stays 'Atari 7800'.
+    if not is_arcade and friendly_name == 'Atari 7800' and game_path:
+        friendly_name = _atari_78_or_26(game_path)
 
     _commit_state('Arcade' if is_arcade else friendly_name,
                   game_name, game_path, is_arcade,
