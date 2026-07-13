@@ -79,18 +79,19 @@ _SSL_CTX, _SSL_VERIFIED = _make_ssl_context()
 # --- Friendly core name -> internal RA key -----------------------------------
 
 FRIENDLY_TO_KEY = {
-    "super nintendo/super famicom": "snes",
-    "super nintendo":               "snes",
-    "nintendo nes/famicom":         "nes",
-    "sega genesis/mega drive":      "genesis",
-    "nintendo game boy":            "gameboy",
-    "nintendo game boy color":      "gameboy",
-    "nintendo game boy advance":    "gba",
-    "nintendo 64":                  "n64",
-    "turbografx-16/pc engine":      "tgfx16",
-    "sega master system":           "sms",
-    "sega master system/game gear": "sms",       # (?) verify friendly string
-    "atari 2600":                   "atari7800",  # RA 2600 runs via 7800 core
+    # Verified against the server's CORE_NAME_MAPPING values (2026-07).
+    # Keys are the lowercased FRIENDLY names the server exposes via
+    # get_current_core(); values are the internal RA hashing keys.
+    "super nintendo/super famicom":  "snes",
+    "nintendo nes/famicom":          "nes",
+    "sega genesis/mega drive":       "genesis",   # Genesis and MegaDrive cores
+    "sega genesis/megadrive 32x":    "s32x",
+    "nintendo game boy":             "gameboy",   # GB and GBC share this core
+    "nintendo game boy advance":     "gba",
+    "nintendo 64":                   "n64",
+    "turbografx-16/pc engine":       "tgfx16",    # HuCard only; PCE-CD deferred
+    "sega master system":            "sms",       # SMS and Game Gear share it
+    "atari 7800":                    "atari7800", # 7800 core also plays 2600
 }
 
 # --- Internal RA key -> consoleID(s), verified via API_GetConsoleIDs ----------
