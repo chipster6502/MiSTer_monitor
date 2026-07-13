@@ -78,21 +78,39 @@ _SSL_CTX, _SSL_VERIFIED = _make_ssl_context()
 
 # --- Friendly core name -> internal RA key -----------------------------------
 
-FRIENDLY_TO_KEY = {
-    # Verified against the server's CORE_NAME_MAPPING values (2026-07).
-    # Keys are the lowercased FRIENDLY names the server exposes via
-    # get_current_core(); values are the internal RA hashing keys.
-    "super nintendo/super famicom":  "snes",
-    "nintendo nes/famicom":          "nes",
-    "sega genesis/mega drive":       "genesis",   # Genesis and MegaDrive cores
-    "sega genesis/megadrive 32x":    "s32x",
-    "nintendo game boy":             "gameboy",   # GB and GBC share this core
-    "nintendo game boy advance":     "gba",
-    "nintendo 64":                   "n64",
-    "turbografx-16/pc engine":       "tgfx16",    # HuCard only; PCE-CD deferred
-    "sega master system":            "sms",       # SMS and Game Gear share it
-    "atari 7800":                    "atari7800", # 7800 core also plays 2600
-}
+# --- Friendly core name -> internal RA key (normalized, ordered rules) --------
+# The server merges the user's names.txt into CORE_NAME_MAPPING, so friendly
+# names are NOT deterministic across installs ('Game Boy' on one MiSTer,
+# 'Nintendo Game Boy' on another). Instead of exact strings we normalize the
+# friendly (lowercase, alphanumerics only) and apply substring rules in
+# specificity order: GBA before Game Boy, 32X before Genesis/Mega Drive,
+# SNES before NES. First hit wins.
+
+_FRIENDLY_RULES = [
+    # (normalized substrings — ANY match, key)
+    (("gameboyadvance", "gba"),                        "gba"),
+    (("gameboy",),                                     "gameboy"),
+    (("32x",),                                         "s32x"),
+    (("megadrive", "genesis"),                         "genesis"),
+    (("supernintendo", "superfamicom", "snes"),        "snes"),
+    (("nesfamicom", "nintendones", "famicom", "nes"),  "nes"),
+    (("nintendo64", "n64"),                            "n64"),
+    (("turbografx", "pcengine", "tgfx"),               "tgfx16"),
+    (("mastersystem", "gamegear", "sms"),              "sms"),
+    (("atari7800",),                                   "atari7800"),
+    (("atari2600",),                                   "atari2600"),
+]
+
+def _friendly_to_key(core_friendly):
+    """Resolve a friendly core name to an internal RA key, tolerant of
+    names.txt variants. Returns '' when no rule matches (unsupported)."""
+    n = re.sub(r'[^a-z0-9]', '', (core_friendly or '').lower())
+    if not n or n == 'menu':
+        return ''
+    for needles, key in _FRIENDLY_RULES:
+        if any(x in n for x in needles):
+            return key
+    return ''
 
 # --- Internal RA key -> consoleID(s), verified via API_GetConsoleIDs ----------
 CORE_TO_CONSOLE_IDS = {
@@ -105,6 +123,7 @@ CORE_TO_CONSOLE_IDS = {
     'n64':          [2],
     'tgfx16':       [8],
     'atari7800':    [51, 25],
+    'atari2600':    [25, 51],  # sniffed 2600 game: 2600 index first
     's32x':         [10],
 }
 
@@ -542,7 +561,7 @@ def get_ra_status(handler):
     core_friendly, rom_path, internal, search_name = _get_active_rom(handler)
     out["core"] = core_friendly
 
-    ra_key = FRIENDLY_TO_KEY.get((core_friendly or "").strip().lower(), "")
+    ra_key = _friendly_to_key(core_friendly)
     if not ra_key or ra_key not in CORE_TO_CONSOLE_IDS or not is_core_supported(ra_key):
         out["status"] = "core_not_supported"
         _attach_events()

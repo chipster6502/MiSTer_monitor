@@ -64,8 +64,8 @@ CORE_HASH_METHOD = {
     'n64':          'n64',
     'tgfx16':       'pce',    # HuCard only; PCE-CD is out of scope
     'turbografx16': 'pce',    # (?) alias
-    'atari7800':    'raw',    # RA 2600 support runs through the 7800 core
-    'atari2600':    'raw',    # (?) in case a plain-2600 core name appears
+    'atari7800':    '7800',   # A78 header skipped when present; raw otherwise
+    'atari2600':    '7800',   # same handler: headerless dumps hash raw
     's32x':         'raw',
 }
 
@@ -131,6 +131,22 @@ def _md5_stream(stream, md5=None):
 def _hash_raw(stream, size):
     """Full-file MD5 (Genesis, SMS/GG, GB/GBC, GBA, 2600, 32X)."""
     return _md5_stream(stream), 'raw full-file MD5'
+
+
+def _hash_7800(stream, size):
+    """
+    Atari 7800 per rc_hash: real .a78 dumps carry a 128-byte header with the
+    signature 'ATARI7800' at offset 1, skipped before hashing. Headerless
+    dumps (all 2600 games, rare raw 7800 binaries) hash the whole file, which
+    also makes this handler correct for 2600 games loaded through this core.
+    """
+    head = _read_exact(stream, 16)
+    if len(head) >= 10 and head[1:10] == b'ATARI7800':
+        _read_exact(stream, 112)   # rest of the 128-byte header
+        return _md5_stream(stream), 'A78 header skipped (128 bytes)'
+    md5 = hashlib.md5()
+    md5.update(head)
+    return _md5_stream(stream, md5), 'no A78 header, full-file MD5'
 
 
 def _hash_nes(stream, size):
@@ -247,6 +263,7 @@ def _hash_n64(stream, size):
 
 _HASHERS = {
     'raw':  _hash_raw,
+    '7800': _hash_7800,
     'nes':  _hash_nes,
     'snes': _hash_snes,
     'pce':  _hash_pce,
