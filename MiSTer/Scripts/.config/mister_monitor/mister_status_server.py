@@ -681,9 +681,17 @@ def _update_state():
         return
 
     # --- Resolve friendly core name ---
-    friendly_name = (CORE_NAME_MAPPING.get(corename) or
-                    CORE_NAME_MAPPING_LOWER.get(corename.lower()) or
-                    corename)
+    # RA_-prefixed cores: the RetroAchievements toolkit (odelot fork via
+    # MiSTer Companion) loads adapted cores through MGLs whose <setname>
+    # prefixes the stock name with 'RA_' (RA_SNES, RA_MegaDrive, ...).
+    # Strip the prefix for the lookup so they resolve exactly like their
+    # stock counterparts (friendly name, images, ScreenScraper mapping,
+    # RA panel). The raw corename keeps flowing to the arcade/ACTIVEGAME
+    # logic below, which already handles it.
+    lookup_name = corename[3:] if corename.startswith('RA_') else corename
+    friendly_name = (CORE_NAME_MAPPING.get(lookup_name) or
+                    CORE_NAME_MAPPING_LOWER.get(lookup_name.lower()) or
+                    lookup_name)
     friendly_name = CORE_NAME_MAPPING.get(friendly_name, friendly_name)
 
     if friendly_name == corename and '-' in corename:
