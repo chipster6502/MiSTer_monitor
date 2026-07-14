@@ -22,7 +22,8 @@ from urllib.parse import urlparse
 # RetroAchievements status resolver (sibling module). Imported lazily-safe:
 # if the file is missing the server still starts; the route reports the error.
 try:
-    from ra_status import get_ra_status, start_ra_polling
+    from ra_status import (get_ra_status, start_ra_polling,
+                           get_ra_event, get_ra_achievements)
     _RA_AVAILABLE = True
 except Exception as _ra_e:
     _RA_AVAILABLE = False
@@ -995,6 +996,29 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             else:
                 self.send_json_response({'enabled': False,
                                          'status': 'module_unavailable',
+                                         'timestamp': int(time.time())})
+        elif path == '/status/retroachievements/event':
+            # ~60-byte payload for the firmware's 5 s micro-poll: just the
+            # monotonic unlock counter (bumped <1 s after a real unlock when
+            # the odelot debug-log tailer is active) plus the tail flag.
+            if _RA_AVAILABLE:
+                self.send_json_response(get_ra_event())
+            else:
+                self.send_json_response({'event_counter': 0,
+                                         'status': 'module_unavailable',
+                                         'timestamp': int(time.time())})
+        elif path == '/status/retroachievements/achievements':
+            # Flat paginated trophy list for the firmware subpages. Served
+            # from the progress cache — zero extra RA API calls per page.
+            if _RA_AVAILABLE:
+                from urllib.parse import parse_qs
+                q = parse_qs(parsed_path.query)
+                ra_page = q.get('page', ['1'])[0]
+                ra_per  = q.get('per',  ['6'])[0]
+                self.send_json_response(
+                    get_ra_achievements(self, ra_page, ra_per))
+            else:
+                self.send_json_response({'status': 'module_unavailable',
                                          'timestamp': int(time.time())})
         elif path == '/status/rom/details':
             from urllib.parse import parse_qs
@@ -2488,6 +2512,8 @@ if __name__ == '__main__':
         print("  /status/session      - Session statistics")
         print("  /status/all          - All data combined")
         print("  /status/retroachievements - RA progress for active game")
+        print("  /status/retroachievements/event - unlock counter micro-poll")
+        print("  /status/retroachievements/achievements - trophy list (?page=N&per=M)")
         print("")
         server.serve_forever()
     except Exception as e:
