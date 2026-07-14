@@ -561,6 +561,8 @@ void drawGameInfoIcon(bool pressed = false);
 // --- RETROACHIEVEMENTS panel (page 6) ---
 void getRAStatus();
 void pollRAEvent();
+void serviceRAPopup();
+void pollRA();
 void getRAList(int listPage);
 void displayRAList();
 void drawRAPageIndicator(bool pressed);
@@ -2788,6 +2790,13 @@ void loop() {
       }
     }
 
+    // RetroAchievements live layer — MUST run while the fullscreen artwork is
+    // up. The return just below is the real screensaver early-exit (every
+    // iteration while showingCoreImage), so poll the unlock counter and
+    // paint/restore the popup over the image right here, before we bail out.
+    pollRA();
+    serviceRAPopup();
+
     // Don't continue with rest of loop while showing image
     return;
   }
@@ -2874,7 +2883,13 @@ void loop() {
   
   // Navigation with debounce
   handleTouch();
-  
+
+  // === RETROACHIEVEMENTS: counter poll (page path) ==========================
+  // The screensaver path polls and services the popup inside its own block
+  // above (before that block's return). Here we cover the page path; the
+  // page-path popup is serviced after the page render, further down.
+  pollRA();
+
   if (showingCoreImage) return;
 
   static unsigned long lastStateLog = 0;
@@ -2990,29 +3005,6 @@ if (oldGame != currentGame && sdCardAvailable) {
     lastUpdate = millis();
   }
 
-  // === RETROACHIEVEMENTS: periodic status fetch ==============================
-  // 30 s while the RA page is visible, 60 s otherwise (keeps the unlock
-  // counter watched from any page or from fullscreen image mode). Single-shot
-  // GET — the server answers from its own caches, so no retry loop is needed.
-  {
-    unsigned long raInterval = (currentPage == 6 && !showingCoreImage)
-                               ? RA_FETCH_INTERVAL_ACTIVE
-                               : RA_FETCH_INTERVAL_IDLE;
-    if (connected && millis() - lastRAFetch > raInterval) {
-      getRAStatus();
-      lastRAFetch = millis();
-      if (currentPage == 6 && !showingCoreImage) needsRedraw = true;
-    }
-  }
-
-  // === RETROACHIEVEMENTS: 5 s event micro-poll ==============================
-  // Cheap counter check between full fetches; a moving counter triggers an
-  // immediate getRAStatus(), which arms the popup within seconds of the
-  // server's log tailer (or OSD trigger) seeing the unlock.
-  if (connected && millis() - lastRAEventPoll > RA_EVENT_POLL_INTERVAL) {
-    pollRAEvent();
-    lastRAEventPoll = millis();
-  }
   
   // === GAME INFO subpage handling ===========================================
   // Lifecycle of the panel when left alone:
@@ -3165,33 +3157,10 @@ if (oldGame != currentGame && sdCardAvailable) {
     lastGameInfoRowUpdate = millis();
   }
   
-  // === RETROACHIEVEMENTS: unlock popup lifecycle =============================
-  // Armed by getRAStatus() when event_counter increases. Drawn once (overlay,
-  // no full-screen wipe) and held for 5 s; then the underlying screen is
-  // restored — pages via needsRedraw, fullscreen images via the same idiom the
-  // 30 s rotation uses.
-  if (raPopupUntil > 0) {
-    if (millis() < raPopupUntil) {
-      if (!raPopupDrawn) {
-        showAchievementUnlock();
-        raPopupDrawn = true;
-        lastRotationTime = millis();   // hold image rotation while popup is up
-      }
-    } else {
-      raPopupUntil = 0;
-      raPopupDrawn = false;
-      if (showingCoreImage) {
-        if (showingGameImage && currentGame.length() > 0) {
-          showGameImageScreen(currentCore, currentGame);
-        } else {
-          showCoreImageScreenWithAutoDownload(currentCore);
-        }
-        coreImageStartTime = millis();
-      } else {
-        needsRedraw = true;
-      }
-    }
-  }
+  // === RETROACHIEVEMENTS: unlock popup lifecycle (PAGE path) ================
+  // Runs after the page has rendered so the popup lands on top. The image
+  // path services the same function above the screensaver early-return.
+  serviceRAPopup();
 
   // === RETROACHIEVEMENTS: last-unlock title scroll (page 6) ==================
   static unsigned long lastRAScrollUpdate = 0;
@@ -5334,6 +5303,56 @@ void showAchievementUnlock() {
 // status fetch: when the monotonic counter moves, the full fetch runs at
 // once and arms the popup. Baseline absorption stays in getRAStatus(), so a
 // reboot never pops a stale unlock through this path either.
+// Schedules the two RA polls (full status fetch + 5 s event micro-poll). No
+// drawing, so it is safe to call from any mode; used by both the screensaver
+// path and the page path. getRAStatus()/pollRAEvent() arm the popup inside.
+void pollRA() {
+  unsigned long raInterval = (currentPage == 6 && !showingCoreImage)
+                             ? RA_FETCH_INTERVAL_ACTIVE
+                             : RA_FETCH_INTERVAL_IDLE;
+  if (connected && millis() - lastRAFetch > raInterval) {
+    getRAStatus();
+    lastRAFetch = millis();
+    if (currentPage == 6 && !showingCoreImage) needsRedraw = true;
+  }
+  if (connected && millis() - lastRAEventPoll > RA_EVENT_POLL_INTERVAL) {
+    pollRAEvent();
+    lastRAEventPoll = millis();
+  }
+}
+
+// Services the unlock popup lifecycle: paints the armed popup as an overlay
+// (no full-screen wipe) and, after 5 s, restores whatever was underneath — a
+// page via needsRedraw, the fullscreen artwork via the same idiom the 30 s
+// rotation uses. Called from TWO sites in loop(): the screensaver path ABOVE
+// the `if (showingCoreImage) return;` early-return (so it can paint over the
+// image) and the page path AFTER the page render. The raPopupDrawn guard
+// means each arming paints exactly once, and every loop reaches only one of
+// the two sites.
+void serviceRAPopup() {
+  if (raPopupUntil == 0) return;
+  if (millis() < raPopupUntil) {
+    if (!raPopupDrawn) {
+      showAchievementUnlock();
+      raPopupDrawn = true;
+      lastRotationTime = millis();   // hold image rotation while popup is up
+    }
+  } else {
+    raPopupUntil = 0;
+    raPopupDrawn = false;
+    if (showingCoreImage) {
+      if (showingGameImage && currentGame.length() > 0) {
+        showGameImageScreen(currentCore, currentGame);
+      } else {
+        showCoreImageScreenWithAutoDownload(currentCore);
+      }
+      coreImageStartTime = millis();
+    } else {
+      needsRedraw = true;
+    }
+  }
+}
+
 void pollRAEvent() {
   if (ESP.getFreeHeap() < 40000) return;
 
