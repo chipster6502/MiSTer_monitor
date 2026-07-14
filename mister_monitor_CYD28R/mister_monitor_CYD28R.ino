@@ -183,6 +183,33 @@ bool raPopupDrawn = false;
 
 ScrollTextState raUnlockScroll = {"", 0, 0, 0, 0, false, false, false};
 
+// --- Instant-unlock tier: /event micro-poll ---------------------------------
+// The server's odelot-log tailer bumps event_counter <1 s after a real unlock
+// (fork with debug=1 in retroachievements.cfg); this 5 s micro-poll of a
+// ~60-byte payload turns that into a popup without waiting for the 30/60 s
+// full fetch. Without the log the server's OSD trigger still shortens the
+// cloud poll, so the tier is useful in every configuration.
+unsigned long lastRAEventPoll = 0;
+const unsigned long RA_EVENT_POLL_INTERVAL = 5000;
+
+String raLastUnlockDesc = "";   // last_unlock_description (log tailer fills it)
+int    raGameId = 0;            // resolved RA game id — subpage reset key
+
+// --- Trophy-list subpages (page 6) -------------------------------------------
+// raSubPage 0 = progress panel; 1..N = paginated list, cycled by tapping the
+// content band (same gesture as the GAME INFO 1/2 toggle). The row buffer
+// holds exactly one server page, fetched on demand from the touch handler.
+const int RA_LIST_PER_PAGE = 6;
+int  raSubPage   = 0;
+int  raListPage  = 0;                    // which page the buffer holds
+int  raListPages = 0;                    // total pages reported by the server
+int  raListCount = 0;                    // rows currently buffered
+bool raListValid = false;
+String raListTitle[RA_LIST_PER_PAGE];
+int    raListPoints[RA_LIST_PER_PAGE];
+bool   raListUnlocked[RA_LIST_PER_PAGE];
+bool   raListHardcore[RA_LIST_PER_PAGE];
+
 // Screensaver variables
 unsigned long lastButtonPress = 0;
 const unsigned long SCREENSAVER_TIMEOUT = 30000;  // 30 seconds of inactivity
@@ -533,6 +560,10 @@ void drawGameInfoIcon(bool pressed = false);
 
 // --- RETROACHIEVEMENTS panel (page 6) ---
 void getRAStatus();
+void pollRAEvent();
+void getRAList(int listPage);
+void displayRAList();
+void drawRAPageIndicator(bool pressed);
 void displayRetroAchievements();
 void drawRAMessage(const String &title, const String &subtitle, uint16_t color);
 void showAchievementUnlock();
@@ -2118,6 +2149,30 @@ void handleTouch() {
       lastButtonPress = millis();
     }
 
+    // RETROACHIEVEMENTS subpage cycle (page 6). Same wide hit target and
+    // feedback contract as the GAME INFO toggle above, and for the same
+    // wasPressed()-sampling reason. Cycles: progress panel -> list page
+    // 1..N -> back to the panel. Only offered when a matched game actually
+    // reports trophies. The list fetch happens right here, before the
+    // redraw, so displayRAList() always finds a buffer that matches
+    // raSubPage (server answers from its progress cache: tens of ms).
+    else if (currentPage == 6 && raStatus.valid && raStatus.status == "ok" &&
+             raStatus.total > 0 && physicalY < 205) {
+      Serial.println("  -> RA TROPHIES subpage cycle");
+
+      drawRAPageIndicator(true);      // white flash, page-5 feedback idiom
+      playNextButtonSound();
+      delay(200);
+
+      int listPages = (raStatus.total + RA_LIST_PER_PAGE - 1) / RA_LIST_PER_PAGE;
+      raSubPage = (raSubPage + 1) % (listPages + 1);
+      if (raSubPage > 0 && (!raListValid || raListPage != raSubPage)) {
+        getRAList(raSubPage);
+      }
+      needsRedraw = true;
+      lastButtonPress = millis();
+    }
+
     // Check PREV button
     else if (btnPrev.contains(physicalX, physicalY)) {
       Serial.println("  -> PREV button pressed");
@@ -2949,6 +3004,15 @@ if (oldGame != currentGame && sdCardAvailable) {
       if (currentPage == 6 && !showingCoreImage) needsRedraw = true;
     }
   }
+
+  // === RETROACHIEVEMENTS: 5 s event micro-poll ==============================
+  // Cheap counter check between full fetches; a moving counter triggers an
+  // immediate getRAStatus(), which arms the popup within seconds of the
+  // server's log tailer (or OSD trigger) seeing the unlock.
+  if (connected && millis() - lastRAEventPoll > RA_EVENT_POLL_INTERVAL) {
+    pollRAEvent();
+    lastRAEventPoll = millis();
+  }
   
   // === GAME INFO subpage handling ===========================================
   // Lifecycle of the panel when left alone:
@@ -2992,6 +3056,17 @@ if (oldGame != currentGame && sdCardAvailable) {
     }
     // Leaving the panel (or any page) for image mode forces a clean re-entry.
     giLastPage = showingCoreImage ? -1 : currentPage;
+  }
+
+  // === RETROACHIEVEMENTS subpage lifecycle ===================================
+  // Re-enter page 6 on the progress panel; the trophy-list buffer itself is
+  // per-game (getRAStatus() resets it when game_id changes).
+  {
+    static int raLastPageSeen = -1;
+    if (currentPage == 6 && !showingCoreImage && raLastPageSeen != 6) {
+      raSubPage = 0;
+    }
+    raLastPageSeen = showingCoreImage ? -1 : currentPage;
   }
 
   // Only redraw when necessary
@@ -3148,7 +3223,9 @@ if (oldGame != currentGame && sdCardAvailable) {
   // each iteration longer, and at a 100 ms cadence a quick tap on the subpage
   // indicator can fall entirely between two touch samples. The refreshers keep
   // their own 100 ms timers, so this only raises the touch sampling rate.
-  delay(needsRedraw || showingCoreImage || currentPage == 5 ? 10 : 100);
+  // Page 6 gets the same treatment now that its subpage indicator is tappable.
+  delay(needsRedraw || showingCoreImage ||
+        currentPage == 5 || currentPage == 6 ? 10 : 100);
 }
 
 void initSDCard() {
@@ -5024,6 +5101,16 @@ void getRAStatus() {
   raStatus.lastUnlockTitle    = extractStringValue(response, "last_unlock_title");
   raStatus.lastUnlockPoints   = extractIntValue(response, "last_unlock_points");
   raStatus.lastUnlockHardcore = extractBoolValue(response, "last_unlock_hardcore");
+  raLastUnlockDesc            = extractStringValue(response, "last_unlock_description");
+  if (raLastUnlockDesc == "N/A") raLastUnlockDesc = "";
+
+  // New game resolved: the trophy-list buffer belongs to the old one.
+  int gid = extractIntValue(response, "game_id");
+  if (gid != raGameId) {
+    raGameId    = gid;
+    raSubPage   = 0;
+    raListValid = false;
+  }
   raStatus.valid = true;
 
   response = "";
@@ -5130,10 +5217,14 @@ void displayRetroAchievements() {
   Lcd.setTextSize(2);
   Lcd.setCursor(10, 44);
   {
+    // Leave room for the tappable subpage indicator when a trophy list
+    // exists (17 chars end at x=214; the indicator right-aligns to x=310).
+    unsigned int cap = (raStatus.total > 0) ? 17 : 25;
     String t = raStatus.gameTitle;
-    if (t.length() > 25) t = t.substring(0, 25);
+    if (t.length() > cap) t = t.substring(0, cap);
     Lcd.print(t);
   }
+  drawRAPageIndicator(false);
 
   // Progress bar: unlocked/total. Guard divide-by-zero.
   float pct = (raStatus.total > 0)
@@ -5192,7 +5283,7 @@ void displayRetroAchievements() {
 // framed band without a full-screen wipe, so it sits on top of whatever is up
 // (page or fullscreen image). loop() holds it 5 s and restores underneath.
 void showAchievementUnlock() {
-  const int bx = 20, by = 80, bw = 280, bh = 80;
+  const int bx = 20, by = 72, bw = 280, bh = 96;
 
   Lcd.fillRect(bx, by, bw, bh, THEME_BLACK);
   Lcd.drawRect(bx, by, bw, bh, THEME_YELLOW);
@@ -5206,19 +5297,184 @@ void showAchievementUnlock() {
 
   Lcd.setTextColor(THEME_WHITE);
   Lcd.setTextSize(1);
-  Lcd.setCursor(bx + 12, by + 36);
+  Lcd.setCursor(bx + 12, by + 38);
   {
     String t = raStatus.lastUnlockTitle;
     if (t.length() > 42) t = t.substring(0, 42);   // 42*6=252 <= bw-24
     Lcd.print(t);
   }
 
+  // Description — the server's log tailer fills it instantly (title AND
+  // description travel in the fork's log line); cloud-poll-only unlocks
+  // leave it empty and the row simply stays blank.
+  if (raLastUnlockDesc.length() > 0) {
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.setCursor(bx + 12, by + 54);
+    String d = raLastUnlockDesc;
+    if (d.length() > 42) d = d.substring(0, 42);
+    Lcd.print(d);
+  }
+
+  // A log-fired popup reaches the screen before the cloud confirms the
+  // points, so 0 means "pending", not "worthless".
   Lcd.setTextColor(raStatus.lastUnlockHardcore ? THEME_RED : THEME_GREEN);
-  Lcd.setCursor(bx + 12, by + 54);
-  Lcd.printf("+%d pts%s", raStatus.lastUnlockPoints,
-             raStatus.lastUnlockHardcore ? "  [HARDCORE]" : "");
+  Lcd.setCursor(bx + 12, by + 74);
+  if (raStatus.lastUnlockPoints > 0) {
+    Lcd.printf("+%d pts%s", raStatus.lastUnlockPoints,
+               raStatus.lastUnlockHardcore ? "  [HARDCORE]" : "");
+  } else {
+    Lcd.print(raStatus.lastUnlockHardcore ? "UNLOCKED  [HARDCORE]" : "UNLOCKED");
+  }
 
   playNextButtonSound();
+}
+
+// Micro-poll of /status/retroachievements/event (~60 B payload). This is the
+// latency tier between the server's log tailer (<1 s) and the full 30/60 s
+// status fetch: when the monotonic counter moves, the full fetch runs at
+// once and arms the popup. Baseline absorption stays in getRAStatus(), so a
+// reboot never pops a stale unlock through this path either.
+void pollRAEvent() {
+  if (ESP.getFreeHeap() < 40000) return;
+
+  String url = String("http://") + misterIP + ":8081/status/retroachievements/event";
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(3000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+
+  int code = http.GET();
+  if (code != 200) { http.end(); return; }
+  String response = http.getString();
+  http.end();
+  if (response.length() > 300) response = response.substring(0, 300);
+
+  int counter = extractIntValue(response, "event_counter");
+  if (raLastSeenEventCounter < 0 || counter > raLastSeenEventCounter) {
+    getRAStatus();               // owns popup arming + baseline absorption
+    lastRAFetch = millis();
+    if (currentPage == 6 && !showingCoreImage) needsRedraw = true;
+  }
+}
+
+// Fetch one page of the trophy list (flat a{i}_* fields, <= RA_LIST_PER_PAGE
+// rows). Called from the touch handler right before the redraw, so by the
+// time displayRAList() runs the buffer matches raSubPage. The server answers
+// from its progress cache: zero extra RA API calls, tens of ms locally.
+void getRAList(int listPage) {
+  raListValid = false;
+  if (ESP.getFreeHeap() < 45000) {
+    Serial.printf("[RA] Low memory (%d), skipping list fetch\n", ESP.getFreeHeap());
+    return;
+  }
+
+  String url = String("http://") + misterIP +
+               ":8081/status/retroachievements/achievements?page=" +
+               String(listPage) + "&per=" + String(RA_LIST_PER_PAGE);
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(5000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+
+  int code = http.GET();
+  if (code != 200) {
+    Serial.printf("[RA] list HTTP %d\n", code);
+    http.end();
+    return;
+  }
+  String response = http.getString();
+  http.end();
+  if (response.length() > 6000) response = response.substring(0, 6000);
+
+  if (extractStringValue(response, "status") != "ok") return;
+
+  raListPages = extractIntValue(response, "pages");
+  raListCount = extractIntValue(response, "count");
+  if (raListCount > RA_LIST_PER_PAGE) raListCount = RA_LIST_PER_PAGE;
+  if (raListCount < 0) raListCount = 0;
+
+  for (int i = 0; i < raListCount; i++) {
+    String p = "a" + String(i);
+    raListTitle[i]    = extractStringValue(response, p + "_title");
+    raListPoints[i]   = extractIntValue(response,    p + "_points");
+    raListUnlocked[i] = extractBoolValue(response,   p + "_unlocked");
+    raListHardcore[i] = extractBoolValue(response,   p + "_hardcore");
+    if (raListTitle[i] == "N/A") raListTitle[i] = "";
+  }
+  raListPage  = listPage;
+  raListValid = true;
+  Serial.printf("[RA] list page %d/%d: %d rows\n",
+                listPage, raListPages, raListCount);
+}
+
+// Subpage indicator, top-right of the page-6 title row — same affordance and
+// hitbox contract as the GAME INFO "1/2>>" toggle. Shows "k/N>>" where k=1
+// is the progress panel and 2..N are the list pages; tapping the content
+// band advances and wraps. Drawn white as the press feedback, cyan at rest.
+void drawRAPageIndicator(bool pressed) {
+  if (!raStatus.valid || raStatus.status != "ok" || raStatus.total <= 0) return;
+  int listPages = (raStatus.total + RA_LIST_PER_PAGE - 1) / RA_LIST_PER_PAGE;
+  String ind = String(raSubPage + 1) + "/" + String(listPages + 1) + ">>";
+  int x = 310 - (int)ind.length() * 12;    // right-aligned, size 2 = 12 px/char
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(pressed ? THEME_WHITE : THEME_CYAN, THEME_BLACK);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(x, 44);
+  Lcd.print(ind);
+}
+
+// Page-6 subpage renderer: one page of the trophy list. Row format:
+//   [H] title ......................... 25p   hardcore unlock (red mark)
+//   [*] title ......................... 10p   softcore unlock (green mark)
+//   [ ] title .........................  5p   locked (gray, dim title)
+// Rows y = 70..180 step 22; the footer band (y>=205) stays untouched.
+void displayRAList() {
+  Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
+
+  // Same title-row geometry as the progress panel, so the indicator sits in
+  // exactly the same spot while cycling through subpages.
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(10, 44);
+  {
+    String t = raStatus.gameTitle;
+    if (t.length() > 17) t = t.substring(0, 17);
+    Lcd.print(t);
+  }
+  drawRAPageIndicator(false);
+
+  if (!raListValid || raListPage != raSubPage) {
+    drawRAMessage("LIST UNAVAILABLE", "Tap to advance and retry", THEME_GRAY);
+    return;
+  }
+
+  Lcd.setTextSize(1);
+  for (int i = 0; i < raListCount; i++) {
+    int y = 70 + i * 22;
+
+    const char* mark;
+    uint16_t markColor;
+    if (raListHardcore[i])      { mark = "[H]"; markColor = THEME_RED;   }
+    else if (raListUnlocked[i]) { mark = "[*]"; markColor = THEME_GREEN; }
+    else                        { mark = "[ ]"; markColor = THEME_GRAY;  }
+
+    Lcd.setTextColor(markColor, THEME_BLACK);
+    Lcd.setCursor(10, y);
+    Lcd.print(mark);
+
+    String t = raListTitle[i];
+    if (t.length() > 36) t = t.substring(0, 36);   // 40 + 36*6 = 256 < 268
+    Lcd.setTextColor(raListUnlocked[i] ? THEME_WHITE : THEME_GRAY, THEME_BLACK);
+    Lcd.setCursor(40, y);
+    Lcd.print(t);
+
+    Lcd.setTextColor(raListUnlocked[i] ? THEME_CYAN : THEME_GRAY, THEME_BLACK);
+    Lcd.setCursor(268, y);
+    Lcd.printf("%3dp", raListPoints[i]);
+  }
 }
 
 void updateDisplay() {
@@ -5233,7 +5489,9 @@ void updateDisplay() {
     case 3: displayNetworkTerminal(); break;
     case 4: displayDeviceScanner();   break;
     case 5: displayGameInfo();        break;
-    case 6: displayRetroAchievements(); break;
+    case 6: if (raSubPage == 0) displayRetroAchievements();
+            else                displayRAList();
+            break;
   }
 
   drawFooter();
@@ -6654,7 +6912,7 @@ String getPageSubtitle() {
     case 3: return "TERMINAL";
     case 4: return "SCANNER";
     case 5: return "NOW PLAYING";
-    case 6: return "RA TROPHIES";
+    case 6: return raSubPage == 0 ? "RA TROPHIES" : "TROPHY LIST";
     default: return "ONLINE";
   }
 }
