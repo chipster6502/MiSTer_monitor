@@ -76,7 +76,7 @@ KNOWN_NON_ARCADE_SYSTEMS = [
     'aquarius', 'microbee', 'atom', 'laser500',
     'vic20', 'c64', 'c128', 'c16', 'plus4', 'pet2001', 'ti99', 'trs80', 'coco', 'dragon', 'mc10',
     'trs80coco2', 'coleco', 'adam', 'apple2', 'applei', 'macplus',
-    'svi318', 'fmtowns', 'amiga', 'ao486', 'pcxt',
+    'svi318', 'fmtowns', 'amiga', 'ao486', 'pcxt', 'z386',
     'amiga', 'amigacd32', 'ao486', 'atari2600', 'atari5200', 'atari7800',
     'atarilynx', 'c64', 'fds', 'gb', 'gbc', 'gba', 'genesis', 'megacd',
     'n64', 'neogeo', 's32x', 'saturn', 'sms', 'snes', 'tgfx16', 'tgfx16cd',
@@ -147,6 +147,11 @@ CORE_NAME_MAPPING = {
     'AO486': 'PC Dos',
     'PCXT': 'PC Dos',
     'PCjr': 'PC Dos',
+    # z386: unofficial 80386 core by nand2mario. Not in the official
+    # Distribution DB, so it can only be learned from users running it.
+    # It shares games/AO486, so mapping it onto the existing 'PC Dos'
+    # friendly name gives it artwork with no firmware change.
+    'Z386': 'PC Dos',
     'Jupiter': 'Jupiter Ace',
     'PC8801': 'NEC PC-8801',
     'BK0011M': 'BK0011M',
