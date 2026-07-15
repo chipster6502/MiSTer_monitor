@@ -225,6 +225,10 @@ bool   raListHardcore[RA_LIST_PER_PAGE];
 // Description overlay: tapping a list row opens a full detail card for that
 // achievement; tapping again closes it back to the list.
 bool raDetailShown = false;
+
+// Armed by getRAStatus() when a game WITH achievements is newly matched;
+// consumed by loop(), which shows the footer banner once per game.
+bool raBannerPending = false;
 int  raDetailRow   = 0;                  // index into the raList* buffers
 
 // Screensaver variables
@@ -486,6 +490,7 @@ void connectWithAnimation();
 void buttonPressFeedback(TouchButton* btn, void (*soundFn)());
 void testMiSTerConnectivity(bool discovered);
 void showReconnectBanner();
+void showRAReadyBanner();
 void updateMiSTerData();
 void getCurrentCore();
 void getCurrentGame();
@@ -2617,6 +2622,17 @@ void loop() {
   }
   wasConnected = connected;
 
+  // RetroAchievements ready banner: armed by getRAStatus() when a game with
+  // achievements is newly matched. Sits here, above the screensaver block, so
+  // it fires in every mode — including over the fullscreen artwork, which is
+  // exactly where a game normally starts.
+  if (raBannerPending) {
+    raBannerPending = false;
+    Serial.println("[RA] Game with achievements loaded — showing banner");
+    showRAReadyBanner();
+    needsRedraw = true;          // repaint normal UI over the banner next loop
+  }
+
   // SAFETY: Check for critical memory levels every 30 seconds
   static unsigned long lastMemoryCheck = 0;
   if (millis() - lastMemoryCheck > 30000) {
@@ -4407,6 +4423,37 @@ void showReconnectBanner() {
   else                          drawCoreImageFooter();
 }
 
+void showRAReadyBanner() {
+  // Same footer band (Y=200..240) and hold-then-restore shape as
+  // showReconnectBanner(), so the image footer restore below fully covers it.
+  // "READY FOR RETROACHIEVEMENTS!" is 28 chars = 336 px at size 2, wider than
+  // the 320 px panel, so it goes on two centred lines: 2 x 16 px fits the
+  // 40 px band with room to breathe (204..220 and 222..238).
+  const char* l1 = "READY FOR";
+  const char* l2 = "RETROACHIEVEMENTS!";
+  int w1 = (int)strlen(l1) * 12;             // 12 px/char at size 2
+  int w2 = (int)strlen(l2) * 12;
+
+  Lcd.fillRect(0, 200, 320, 40, THEME_YELLOW);
+  Lcd.setTextWrap(false);
+  Lcd.setTextSize(2);
+  Lcd.setTextColor(THEME_BLUE, THEME_YELLOW);
+  Lcd.setCursor((320 - w1) / 2, 204);
+  Lcd.print(l1);
+  Lcd.setCursor((320 - w2) / 2, 222);
+  Lcd.print(l2);
+
+  delay(3400);                               // hold long enough to read
+
+  // Restore the image footer over the banner. In page mode the caller's
+  // needsRedraw repaints the real footer (PRV/SCAN/NXT) instead, so only the
+  // image path is restored here.
+  if (showingCoreImage) {
+    if (currentGame.length() > 0) addGameImageFooter(currentGame);
+    else                          drawCoreImageFooter();
+  }
+}
+
 void updateMiSTerData() {
   Serial.println("=== Updating MiSTer data ===");
   if (!getStateSnapshot()) {   // atomic path (server >= 2.6)
@@ -5129,6 +5176,13 @@ void getRAStatus() {
   // New game resolved: the trophy-list buffer belongs to the old one.
   int gid = extractIntValue(response, "game_id");
   if (gid != raGameId) {
+    // Announce only a real, playable RA set: a resolved game id whose status
+    // is ok and that actually ships achievements. gid 0 (unloaded, or not
+    // recognized) and 0-achievement matches stay silent. Both fields are
+    // parsed above, so they already describe THIS response.
+    if (gid != 0 && raStatus.status == "ok" && raStatus.total > 0) {
+      raBannerPending = true;
+    }
     raGameId    = gid;
     raSubPage   = 0;
     raListValid = false;
