@@ -199,16 +199,33 @@ int    raGameId = 0;            // resolved RA game id — subpage reset key
 // raSubPage 0 = progress panel; 1..N = paginated list, cycled by tapping the
 // content band (same gesture as the GAME INFO 1/2 toggle). The row buffer
 // holds exactly one server page, fetched on demand from the touch handler.
-const int RA_LIST_PER_PAGE = 6;
+const int RA_LIST_PER_PAGE = 4;
+
+// Trophy-row touch calibration — TOUCH space, not draw space. The CYD
+// resistive panel's Y does not read 1:1 with the display, so the row hit
+// bands cannot reuse the draw positions (y = 70 + i*22). Row i is centred at
+// RA_ROW_TOUCH_TOP + i*RA_ROW_TOUCH_PITCH in raw touch Y. Calibrate from the
+// serial line the page-6 handler prints on every tap: on a FULL (4-row) list
+// page, tap the centre of the top row and the centre of the bottom row, then
+//   RA_ROW_TOUCH_TOP   = <top reading>
+//   RA_ROW_TOUCH_PITCH = (<bottom reading> - <top reading>) / 3
+int RA_ROW_TOUCH_TOP   = 74;   // raw touch Y at centre of the FIRST row
+int RA_ROW_TOUCH_PITCH = 40;   // raw touch Y between consecutive row centres
 int  raSubPage   = 0;
 int  raListPage  = 0;                    // which page the buffer holds
 int  raListPages = 0;                    // total pages reported by the server
 int  raListCount = 0;                    // rows currently buffered
 bool raListValid = false;
 String raListTitle[RA_LIST_PER_PAGE];
+String raListDesc[RA_LIST_PER_PAGE];
 int    raListPoints[RA_LIST_PER_PAGE];
 bool   raListUnlocked[RA_LIST_PER_PAGE];
 bool   raListHardcore[RA_LIST_PER_PAGE];
+
+// Description overlay: tapping a list row opens a full detail card for that
+// achievement; tapping again closes it back to the list.
+bool raDetailShown = false;
+int  raDetailRow   = 0;                  // index into the raList* buffers
 
 // Screensaver variables
 unsigned long lastButtonPress = 0;
@@ -565,7 +582,10 @@ void serviceRAPopup();
 void pollRA();
 void getRAList(int listPage);
 void displayRAList();
+void displayRADetail();
 void drawRAPageIndicator(bool pressed);
+int  drawWrappedText(const String& text, int x, int y, int charsPerLine,
+                     int maxLines, uint16_t color);
 void displayRetroAchievements();
 void drawRAMessage(const String &title, const String &subtitle, uint16_t color);
 void showAchievementUnlock();
@@ -2160,19 +2180,51 @@ void handleTouch() {
     // raSubPage (server answers from its progress cache: tens of ms).
     else if (currentPage == 6 && raStatus.valid && raStatus.status == "ok" &&
              raStatus.total > 0 && physicalY < 205) {
-      Serial.println("  -> RA TROPHIES subpage cycle");
+      // TEMP CALIBRATION: raw touch Y of every page-6 content tap. Use these
+      // readings to set RA_ROW_TOUCH_TOP / RA_ROW_TOUCH_PITCH, then this line
+      // can be removed.
+      Serial.printf("  [RA touch] physicalY=%d physicalX=%d subPage=%d detail=%d\n",
+                    physicalY, physicalX, raSubPage, raDetailShown ? 1 : 0);
 
-      drawRAPageIndicator(true);      // white flash, page-5 feedback idiom
-      playNextButtonSound();
-      delay(200);
+      // Gesture split by touch Y only (X may be mirrored). Row bands live in
+      // TOUCH space: row i is centred at RA_ROW_TOUCH_TOP + i*RA_ROW_TOUCH_PITCH,
+      // so the first band starts at rowBandTop. Taps above that are the title/
+      // indicator area -> cycle subpages. Taps from rowBandTop down to the
+      // footer map to a row, clamped to the last one so there is no dead zone.
+      int rowBandTop = RA_ROW_TOUCH_TOP - RA_ROW_TOUCH_PITCH / 2;
 
-      int listPages = (raStatus.total + RA_LIST_PER_PAGE - 1) / RA_LIST_PER_PAGE;
-      raSubPage = (raSubPage + 1) % (listPages + 1);
-      if (raSubPage > 0 && (!raListValid || raListPage != raSubPage)) {
-        getRAList(raSubPage);
+      if (raDetailShown) {
+        Serial.println("  -> RA detail close");
+        raDetailShown = false;
+        playNextButtonSound();
+        needsRedraw = true;
+        lastButtonPress = millis();
+      } else if (raSubPage > 0 && raListValid && raListPage == raSubPage &&
+                 raListCount > 0 && physicalY >= rowBandTop) {
+        int row = (physicalY - rowBandTop) / RA_ROW_TOUCH_PITCH;
+        if (row >= raListCount) row = raListCount - 1;   // clamp: no dead zone
+        if (row < 0) row = 0;
+        Serial.printf("  -> RA detail open (row %d)\n", row);
+        raDetailRow   = row;
+        raDetailShown = true;
+        playNextButtonSound();
+        needsRedraw = true;
+        lastButtonPress = millis();
+      } else {
+        Serial.println("  -> RA TROPHIES subpage cycle");
+        drawRAPageIndicator(true);      // white flash, page-5 feedback idiom
+        playNextButtonSound();
+        delay(200);
+
+        int listPages = (raStatus.total + RA_LIST_PER_PAGE - 1) / RA_LIST_PER_PAGE;
+        raSubPage = (raSubPage + 1) % (listPages + 1);
+        raDetailShown = false;
+        if (raSubPage > 0 && (!raListValid || raListPage != raSubPage)) {
+          getRAList(raSubPage);
+        }
+        needsRedraw = true;
+        lastButtonPress = millis();
       }
-      needsRedraw = true;
-      lastButtonPress = millis();
     }
 
     // Check PREV button
@@ -3057,6 +3109,7 @@ if (oldGame != currentGame && sdCardAvailable) {
     static int raLastPageSeen = -1;
     if (currentPage == 6 && !showingCoreImage && raLastPageSeen != 6) {
       raSubPage = 0;
+      raDetailShown = false;
     }
     raLastPageSeen = showingCoreImage ? -1 : currentPage;
   }
@@ -3164,8 +3217,8 @@ if (oldGame != currentGame && sdCardAvailable) {
 
   // === RETROACHIEVEMENTS: last-unlock title scroll (page 6) ==================
   static unsigned long lastRAScrollUpdate = 0;
-  if (currentPage == 6 && !showingCoreImage && raStatus.valid &&
-      raStatus.status == "ok" && raUnlockScroll.needsScroll &&
+  if (currentPage == 6 && !showingCoreImage && raSubPage == 0 &&
+      raStatus.valid && raStatus.status == "ok" && raUnlockScroll.needsScroll &&
       millis() - lastRAScrollUpdate > 100) {
     String raShown = getScrolledText(&raUnlockScroll);
     while ((int)raShown.length() < raUnlockScroll.maxChars) raShown += ' ';
@@ -5079,6 +5132,7 @@ void getRAStatus() {
     raGameId    = gid;
     raSubPage   = 0;
     raListValid = false;
+    raDetailShown = false;
   }
   raStatus.valid = true;
 
@@ -5405,7 +5459,7 @@ void getRAList(int listPage) {
   }
   String response = http.getString();
   http.end();
-  if (response.length() > 6000) response = response.substring(0, 6000);
+  if (response.length() > 8000) response = response.substring(0, 8000);
 
   if (extractStringValue(response, "status") != "ok") return;
 
@@ -5417,15 +5471,108 @@ void getRAList(int listPage) {
   for (int i = 0; i < raListCount; i++) {
     String p = "a" + String(i);
     raListTitle[i]    = extractStringValue(response, p + "_title");
+    raListDesc[i]     = extractStringValue(response, p + "_desc");
     raListPoints[i]   = extractIntValue(response,    p + "_points");
     raListUnlocked[i] = extractBoolValue(response,   p + "_unlocked");
     raListHardcore[i] = extractBoolValue(response,   p + "_hardcore");
     if (raListTitle[i] == "N/A") raListTitle[i] = "";
+    if (raListDesc[i]  == "N/A") raListDesc[i]  = "";
   }
   raListPage  = listPage;
   raListValid = true;
   Serial.printf("[RA] list page %d/%d: %d rows\n",
                 listPage, raListPages, raListCount);
+}
+
+// Word-wraps `text` into at most maxLines lines of ~charsPerLine chars,
+// printed downward from (x, y) at text size 1 (6 px/char). Breaks on spaces
+// where possible; the last allowed line gets an ellipsis if text remains.
+// Returns the y just below the last line drawn.
+int drawWrappedText(const String& text, int x, int y, int charsPerLine,
+                    int maxLines, uint16_t color) {
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(color, THEME_BLACK);
+  Lcd.setTextSize(1);
+  String rest = text;
+  rest.trim();
+  int lines = 0;
+  while (rest.length() > 0 && lines < maxLines) {
+    String line;
+    if ((int)rest.length() <= charsPerLine) {
+      line = rest;
+      rest = "";
+    } else {
+      int cut = rest.lastIndexOf(' ', charsPerLine);
+      if (cut <= 0) cut = charsPerLine;      // no space: hard break
+      line = rest.substring(0, cut);
+      rest = rest.substring(cut);
+      rest.trim();
+    }
+    if (lines == maxLines - 1 && rest.length() > 0) {
+      if ((int)line.length() > charsPerLine - 3)
+        line = line.substring(0, charsPerLine - 3);
+      line += "...";
+    }
+    Lcd.setCursor(x, y);
+    Lcd.print(line);
+    y += 11;
+    lines++;
+  }
+  return y;
+}
+
+// Description overlay for the achievement at raDetailRow: title, full
+// description, points and state, drawn over the content band. Dismissed by
+// any tap (handleTouch clears raDetailShown). Guards the row index in case
+// the buffer changed under it.
+void displayRADetail() {
+  Lcd.fillRect(0, 35, 320, 170, THEME_BLACK);
+  const int bx = 8, by = 40, bw = 304, bh = 162;
+  Lcd.drawRect(bx, by, bw, bh, THEME_YELLOW);
+  Lcd.drawRect(bx + 1, by + 1, bw - 2, bh - 2, THEME_YELLOW);
+
+  int i = raDetailRow;
+  if (!raListValid || i < 0 || i >= raListCount) {
+    drawRAMessage("NO DETAIL", "Tap to go back", THEME_GRAY);
+    return;
+  }
+
+  uint16_t stateColor;
+  const char* stateLabel;
+  if (raListHardcore[i])      { stateColor = THEME_RED;   stateLabel = "UNLOCKED - HARDCORE"; }
+  else if (raListUnlocked[i]) { stateColor = THEME_GREEN; stateLabel = "UNLOCKED"; }
+  else                        { stateColor = THEME_GRAY;  stateLabel = "LOCKED"; }
+
+  const int tx = bx + 10;
+  int y = by + 12;
+
+  // Title (up to 2 lines, ~47 chars per line at size 1)
+  y = drawWrappedText(raListTitle[i], tx, y, 47, 2, THEME_YELLOW);
+  y += 4;
+
+  // Points + state
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(stateColor, THEME_BLACK);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(tx, y);
+  Lcd.printf("%d pts   %s", raListPoints[i], stateLabel);
+  y += 18;
+
+  // Separator rule
+  Lcd.drawFastHLine(tx, y, bw - 20, THEME_GRAY);
+  y += 8;
+
+  // Description (up to 5 lines)
+  String d = raListDesc[i];
+  d.trim();
+  if (d.length() == 0) d = "(No description provided.)";
+  drawWrappedText(d, tx, y, 47, 5, THEME_CYAN);
+
+  // Close hint, bottom-right inside the card
+  Lcd.setTextColor(THEME_GRAY, THEME_BLACK);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(bx + bw - 78, by + bh - 14);
+  Lcd.print("tap to close");
 }
 
 // Subpage indicator, top-right of the page-6 title row — same affordance and
@@ -5448,7 +5595,7 @@ void drawRAPageIndicator(bool pressed) {
 //   [H] title ......................... 25p   hardcore unlock (red mark)
 //   [*] title ......................... 10p   softcore unlock (green mark)
 //   [ ] title .........................  5p   locked (gray, dim title)
-// Rows y = 70..180 step 22; the footer band (y>=205) stays untouched.
+// Rows y = 90..180 step 30 (4 per page); the footer band (y>=205) stays untouched.
 void displayRAList() {
   Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
 
@@ -5472,7 +5619,7 @@ void displayRAList() {
 
   Lcd.setTextSize(1);
   for (int i = 0; i < raListCount; i++) {
-    int y = 70 + i * 22;
+    int y = 90 + i * 30;   // 4 rows, wider pitch for finger use
 
     const char* mark;
     uint16_t markColor;
@@ -5508,8 +5655,9 @@ void updateDisplay() {
     case 3: displayNetworkTerminal(); break;
     case 4: displayDeviceScanner();   break;
     case 5: displayGameInfo();        break;
-    case 6: if (raSubPage == 0) displayRetroAchievements();
-            else                displayRAList();
+    case 6: if (raSubPage == 0)      displayRetroAchievements();
+            else if (raDetailShown)  displayRADetail();
+            else                     displayRAList();
             break;
   }
 
