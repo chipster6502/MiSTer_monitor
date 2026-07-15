@@ -72,6 +72,7 @@ _RECENT_WINDOW_MINUTES = 15             # lookback for GetUserRecentAchievements
 _LIST_PER_PAGE_DEFAULT = 6              # trophy-list rows per firmware page
 _LIST_PER_PAGE_MAX     = 8              # single-digit a{i}_ indices, always
 _LIST_TITLE_MAX        = 64             # server-side cap for row titles
+_LIST_DESC_MAX         = 120            # server-side cap for row descriptions
 
 _RA_LOG_PATH         = "/tmp/ra_debug.log"   # odelot fork, debug=1
 _OSD_FLAG_PATH       = "/tmp/OSD_VISIBLE"    # fork, MiSTer.ini log_file_entry=1
@@ -397,6 +398,7 @@ def _fetch_progress_aggregate(gid, user, key):
         rows.append({
             "id":       _int(a.get("ID")),
             "title":    _flat_str(a.get("Title"), _LIST_TITLE_MAX),
+            "desc":     _flat_str(a.get("Description"), _LIST_DESC_MAX),
             "points":   p,
             "unlocked": earned,
             "hardcore": earned_hc,
@@ -1166,6 +1168,7 @@ def get_ra_achievements(handler, page=1, per_page=_LIST_PER_PAGE_DEFAULT):
     for i, r in enumerate(chunk):
         out[f"a{i}_id"]       = r["id"]
         out[f"a{i}_title"]    = r["title"]
+        out[f"a{i}_desc"]     = r["desc"]
         out[f"a{i}_points"]   = r["points"]
         out[f"a{i}_unlocked"] = r["unlocked"]
         out[f"a{i}_hardcore"] = r["hardcore"]
