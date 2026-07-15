@@ -636,6 +636,12 @@ int  g_mediaAttemptCount     = 0;      // attempts in the current media run (dri
 bool lastGameSearchExhausted = false;  // true when ScreenScraper search with valid
                                         // CRC completed without finding an image
                                         // (system in DB, but game not).
+bool g_currentGameIsContainer = false; // rom details said container_image: the
+                                        // loaded file is a whole-environment or
+                                        // compilation image (boot.vhd, msdos622.vhd),
+                                        // not a game. Present core-only: footers
+                                        // name the core, and no NOT-IN-SS banner —
+                                        // nothing is "missing" for a non-game.
 bool scanInProgress          = false;  // true while SCAN button operation is running
                                         // (used to lock further SCAN presses and to
                                         //  show "SCANNING" label on the button)
@@ -1067,7 +1073,7 @@ void drawCoreImageFooter() {
   Lcd.fillRect(0, 200, 320, 40, THEME_BLACK);
   Lcd.drawFastHLine(0, 200, 320, THEME_GREEN);
 
-  bool hasGame = (currentGame.length() > 0);
+  bool hasGame = (currentGame.length() > 0) && !g_currentGameIsContainer;
   Lcd.setTextWrap(false);
 
   if (hasGame) {
@@ -1141,7 +1147,7 @@ void drawFooter() {
     const int FOOTER_MID_X = 78;
     const int FOOTER_VIS   = 16;   // visible chars: 16 × 6 = 96 px
 
-    bool   hasGame = (currentGame.length() > 0);
+    bool   hasGame = (currentGame.length() > 0) && !g_currentGameIsContainer;
     String label  = hasGame ? "G:" : "C:";
     String source = hasGame ? currentGame : currentCore;
 
@@ -1231,8 +1237,11 @@ static bool _parseRomDetailsJson(String& response, RomDetails& details, const ch
 
   details.searchName     = extractStringValue(response, "search_name");
   details.nameSearchHint = extractBoolValue(response, "name_search_hint");
-  Serial.printf("  %sSearch name: '%s' (hint: %s)\n", prefix,
-                details.searchName.c_str(), details.nameSearchHint ? "YES" : "NO");
+  details.noHash         = extractBoolValue(response, "no_hash");
+  details.containerImage = extractBoolValue(response, "container_image");
+  Serial.printf("  %sSearch name: '%s' (hint: %s, no_hash: %s, container: %s)\n", prefix,
+                details.searchName.c_str(), details.nameSearchHint ? "YES" : "NO",
+                details.noHash ? "YES" : "NO", details.containerImage ? "YES" : "NO");
 
   details.error          = extractStringValue(response, "error");
   if (details.error.length() > 0) {
@@ -1262,7 +1271,7 @@ static bool _parseRomDetailsJson(String& response, RomDetails& details, const ch
 }
 
 RomDetails getCurrentRomDetails() {
-  RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0, "", false};
+  RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0, "", false, false, false};
 
   Serial.printf("=== GETTING ROM DETAILS ===\n");
   Serial.printf("Free heap before request: %d bytes\n", ESP.getFreeHeap());
@@ -1330,11 +1339,16 @@ RomDetails getCurrentRomDetails() {
         break;
       }
 
-      // Definitive negative: no ROM, or file can't be hashed. Stop polling.
-      if (!details.available || details.fileTooLarge) {
-        Serial.printf("ROM details: definitive negative (available=%s, tooLarge=%s) - stopping\n",
+      // Definitive negative: no ROM, file can't be hashed, or the server has
+      // determined the CRC can NEVER arrive (no_hash: unindexable, mutable
+      // container like .vhd). Stop polling — for no_hash this saves the full
+      // 4x20s retry budget on every 0MHz load, and the name-search fallback
+      // (or the container gate) takes over immediately.
+      if (!details.available || details.fileTooLarge || details.noHash) {
+        Serial.printf("ROM details: definitive negative (available=%s, tooLarge=%s, noHash=%s) - stopping\n",
                       details.available ? "YES" : "NO",
-                      details.fileTooLarge ? "YES" : "NO");
+                      details.fileTooLarge ? "YES" : "NO",
+                      details.noHash ? "YES" : "NO");
         break;
       }
 
@@ -1367,7 +1381,7 @@ RomDetails getCurrentRomDetails() {
 RomDetails getCurrentRomDetailsForced() {
   // Calls /status/rom/details?force=1 — the server bypasses timestamp checks
   // and reads CURRENTPATH/ACTIVEGAME directly to compute CRC.
-  RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0, "", false};
+  RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0, "", false, false, false};
 
   Serial.printf("=== FORCED ROM DETAILS (bypass timestamp) ===\n");
   Serial.printf("Free heap before request: %d bytes\n", ESP.getFreeHeap());
@@ -1411,27 +1425,15 @@ RomDetails getCurrentRomDetailsForced() {
       Serial.printf("Forced response (%d bytes): %s\n", response.length(),
                     response.substring(0, min(200, (int)response.length())).c_str());
 
-      if (response.length() > 5000) {
-        Serial.printf("Large forced ROM response (%d bytes), truncating\n", response.length());
-        response = response.substring(0, 5000);
+      // Reuse the shared parser instead of a second inline copy. The duplicate
+      // that lived here silently skipped search_name / name_search_hint /
+      // no_hash / container_image, so the noHash break below could never fire
+      // and SCAN burned the full 5x20s budget on every container.
+      if (!_parseRomDetailsJson(response, details, "Forced ")) {
+        http.end();
+        Serial.printf("Free heap after forced ROM details: %d bytes\n", ESP.getFreeHeap());
+        return details;
       }
-
-      details.filename      = extractStringValue(response, "filename");
-      details.crc32         = extractStringValue(response, "crc32");
-      details.md5           = extractStringValue(response, "md5");
-      details.sha1          = extractStringValue(response, "sha1");
-      details.filesize      = extractIntValue(response,  "size");
-      details.available     = extractBoolValue(response, "available");
-      details.hashCalculated= extractBoolValue(response, "hash_calculated");
-      details.fileTooLarge  = extractBoolValue(response, "file_too_large");
-      details.error         = extractStringValue(response, "error");
-      details.path          = extractStringValue(response, "path");
-      details.timestamp     = extractIntValue(response,  "timestamp");
-
-      Serial.printf("Forced CRC32: '%s' | available=%s | hashOK=%s\n",
-                    details.crc32.c_str(),
-                    details.available ? "YES" : "NO",
-                    details.hashCalculated ? "YES" : "NO");
 
       http.end();
 
@@ -1442,11 +1444,14 @@ RomDetails getCurrentRomDetailsForced() {
         break;
       }
 
-      // Definitive negative: no ROM, or file can't be hashed. Stop polling.
-      if (!details.available || details.fileTooLarge) {
-        Serial.printf("Forced ROM details: definitive negative (available=%s, tooLarge=%s) - stopping\n",
+      // Definitive negative: no ROM, file can't be hashed, or the server has
+      // determined the CRC can NEVER arrive (no_hash). Same rationale as the
+      // non-forced loop.
+      if (!details.available || details.fileTooLarge || details.noHash) {
+        Serial.printf("Forced ROM details: definitive negative (available=%s, tooLarge=%s, noHash=%s) - stopping\n",
                       details.available ? "YES" : "NO",
-                      details.fileTooLarge ? "YES" : "NO");
+                      details.fileTooLarge ? "YES" : "NO",
+                      details.noHash ? "YES" : "NO");
         break;
       }
 
@@ -2289,6 +2294,7 @@ void handleTouch() {
           lastSearchedGame        = "";
           lastGameImageOK         = false;
           lastGameSearchExhausted = false;
+          g_currentGameIsContainer = false; // SCAN re-decides from fresh rom details
 
           // Re-run the game image pipeline now and show the result, instead
           // of just flagging a HUD redraw.
@@ -4746,6 +4752,7 @@ void startCrcRecurrentForGame(String gameName, String coreName) {
   lastCrcRecurrentTime     = 0;     // Force immediate check
   crcRecurrentAttempts     = 0;
   lastGameSearchExhausted  = false;
+  g_currentGameIsContainer = false; // re-decided from rom details on next download
   
   Serial.printf("CRC recurrent started: '%s' core '%s'\n", gameName.c_str(), coreName.c_str());
   Serial.printf("DEBUG: crcRecurrentActive=%s\n", crcRecurrentActive ? "true" : "false");
@@ -8541,6 +8548,19 @@ void showGameImageScreenCorrected(String coreName, String gameName) {
     }
   }
   
+  // Container image (boot.vhd, msdos622.vhd): a whole DOS environment, not a
+  // game — there is no artwork to miss. Present it exactly like "core loaded
+  // without game". The flag is set inside the first download pass (which also
+  // marks the search exhausted), so this branch owns every redraw after it and
+  // keeps the NOT-IN-SS banner — semantically false here — from ever firing.
+  // A user-supplied local image still wins: it displays above, before this.
+  if (shouldDownload && g_currentGameIsContainer) {
+    Serial.println("Container image - core-only presentation");
+    lastGameImageOK = false;
+    showCoreImageScreen(coreName);
+    return;
+  }
+
   // AUTO-DOWNLOAD with SAFE STREAMING
   if (shouldDownload && ENABLE_AUTO_DOWNLOAD && WiFi.status() == WL_CONNECTED && !downloadInProgress) {
     // Two different "don't retry" reasons, deliberately kept apart:
@@ -9297,6 +9317,19 @@ bool tryNameSearchFallback(String coreName, String gameName, RomDetails romDetai
                                                         : gameName;
   Serial.printf("Name-search fallback for '%s' (server hint: %s)\n",
                 cleanName.c_str(), romDetails.nameSearchHint ? "YES" : "NO");
+
+  // The server sets this when search_name denotes a container image rather
+  // than a game (boot.vhd, BOOT-DOS98.vhd, Shareware Pack-fbit.vhd).
+  // jeuRecherche has no "no match": it answers with a fuzzy hit (observed:
+  // id 170580 for 'boot'), i.e. confident-looking wrong artwork. Gate HERE so
+  // both call legs are covered, and on containerImage — not nameSearchHint —
+  // because a DOS pack CHD with a valid-but-unindexed CRC reaches the second
+  // leg with hint=NO and must still be searched. Returning false lets the
+  // caller mark the search exhausted, stopping further ScreenScraper traffic.
+  if (romDetails.containerImage) {
+    Serial.println("Container image, not a game - skipping name search");
+    return false;
+  }
   showDownloadProgress(40, "Name search...");
 
   // Snapshot the diagnostic code the CRC path produced. jeuRecherche answers
@@ -9393,7 +9426,23 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
   // STEP 1: JSON-based precise search (much simpler than XML streaming)
   Serial.printf("STEP 1: JSON precise search with CRC...\n");
   RomDetails romDetails = getCurrentRomDetails();
-  
+
+  // Presentation flag for every screen from here on: container images get
+  // core-only treatment (see g_currentGameIsContainer). Assignment, not |=,
+  // so it also self-clears if the server's verdict changes for this game.
+  g_currentGameIsContainer = romDetails.containerImage;
+  if (g_currentGameIsContainer) {
+    // Bail out here rather than letting the container fall through to the
+    // name-search gate: reaching the tail with success=false lands in the
+    // generic failure branch, which paints "Download failed" and blocks for
+    // delay(6000). Nothing failed — there is simply no artwork to fetch for a
+    // whole-environment image. Marking the search exhausted also stops the
+    // 10 s recurrent from re-entering on every tick.
+    Serial.println("Container image per server - no artwork to fetch, core-only presentation");
+    lastGameSearchExhausted = true;
+    return false;                 // DownloadFlagGuard clears downloadInProgress
+  }
+
   Serial.printf("ROM Details check:\n");
   Serial.printf("  Available: %s\n", romDetails.available ? "YES" : "NO");
   Serial.printf("  Hash calculated: %s\n", romDetails.hashCalculated ? "YES" : "NO");

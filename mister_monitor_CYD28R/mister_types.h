@@ -25,6 +25,11 @@ struct RomDetails {
   unsigned long timestamp;
   String searchName;       // clean title from the server for name-based search (S6)
   bool   nameSearchHint;   // server says the CRC route cannot work for this container
+  bool   noHash;           // server says the CRC can NEVER arrive (unindexable, mutable
+                           // container). Distinct from !hashCalculated, which is also
+                           // true while a slow hash is still in flight.
+  bool   containerImage;   // search_name denotes a container image, not a game
+                           // (boot.vhd, BOOT-DOS98.vhd). Never text-search these.
 };
 
 // GAME INFO panel — metadata for the currently loaded game, extracted from
