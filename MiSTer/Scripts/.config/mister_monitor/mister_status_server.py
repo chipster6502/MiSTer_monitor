@@ -656,17 +656,71 @@ def is_generic_media_name(stem):
     return any(s == p or s.startswith(p + ' ') for p in GENERIC_MEDIA_PREFIXES)
 
 
+# 0MHz glues variant markers onto the stem as pseudo-extensions that splitext()
+# does not remove, so they survive into the query and guarantee a jeuRecherche
+# miss on a game that IS in the database — the mirror image of the container
+# denylist: a false negative on a real game, not wrong art on a non-game.
+# Censused over all 387 image names in the 0mhz-net/0mhz-collection MGLs:
+#   .mt32  x87   Roland MT-32 audio build
+#   .r2/.r3/.r4  x35 total   setup revision
+# No other dotted markers exist there. They stack in EITHER order, hence the
+# loop: 'cannon fodder 1.r2.mt32' and 'day of the tentacle.mt32.r2' both occur.
+# The revision marker is restricted to a dot separator (that is how the whole
+# collection writes it); allowing ' r2' would risk eating a real title's tail.
+_VARIANT_RE = re.compile(
+    r'(?:'
+    r'[.\-_ ]+(?:mt32|mt-32)'   # audio build; separator varies in community packs
+    r'|\.r\d+'                  # setup revision; always dotted
+    r')$',
+    re.I,
+)
+
+# A trailing '-<n>' is a CD disc number, not part of the title: '7th guest-1.chd'
+# is disc 1 of The 7th Guest, and querying '7th guest-1' misses. Two guards, both
+# earned by counterexamples rather than intuition:
+#   * at most 2 digits — 'top-300' is a compilation marker the container denylist
+#     needs intact, not a disc; real discs are single-digit in the whole corpus.
+#   * the remainder must be more than one word — a bare 'F-15.vhd' would otherwise
+#     be decapitated to 'F', the same catastrophic false positive as 'Boot Camp'.
+# Safe because the collection numbers SERIES with a space ('dune 2', 'doom 2' —
+# 98 of them) and NEVER with a hyphen; the only two hyphen-numbered names in the
+# whole set are '7th guest-1' and 'thunder in paradise-1', both discs.
+_DISC_RE = re.compile(r'(.*)-\d{1,2}$')
+
+
+def _strip_disc_number(base):
+    """Removes a trailing CD disc number when it cannot be part of the title."""
+    mo = _DISC_RE.match(base)
+    if not mo:
+        return base
+    title = mo.group(1)
+    return title if ' ' in title else base   # one-word remainder: keep, 'F-15' stays
+
+
+def _strip_variant_markers(base):
+    """Removes stacked trailing variant markers ('.r2.mt32') from a file stem."""
+    while True:
+        stripped = _VARIANT_RE.sub('', base)
+        if stripped == base:      # the pattern needs >=1 separator char, so every
+            return base           # successful sub shortens: no infinite loop
+        base = stripped
+
+
 def _clean_search_name(name):
     """
     Derives a ScreenScraper text-search query from a game/file name:
-    strips extension, bracketed tags and ALL parenthesised groups, then
-    collapses separators.
+    strips extension, variant markers, disc numbers, bracketed tags and ALL
+    parenthesised groups, then collapses separators.
       'Prince of Persia (1990)(Broderbund).vhd' -> 'Prince of Persia'
+      '7th guest-1.mt32.chd'                    -> '7th guest'
+      'cannon fodder 1.r2.mt32.vhd'             -> 'cannon fodder 1'
       'Doom_[0MHz].mgl'                         -> 'Doom'
     Recall beats precision here: jeuRecherche matches best on bare titles.
     Validated against the real 0mhz-dos item listing on archive.org.
     """
     base = os.path.splitext(os.path.basename(name or ''))[0]
+    base = _strip_variant_markers(base)        # '.mt32', '.r2' audio/revision siblings
+    base = _strip_disc_number(base)            # '-1' CD disc number
     base = re.sub(r'\[[^\]]*\]', '', base)     # [tags]
     base = re.sub(r'\([^)]*\)', '', base)      # (Year)(Publisher)(Region)
     base = base.lstrip('~ ')                   # 0MHz marks broken setups with a leading '~'
