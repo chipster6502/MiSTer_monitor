@@ -5306,7 +5306,14 @@ void displayRetroAchievements() {
 // framed band without a full-screen wipe, so it sits on top of whatever is up
 // (page or fullscreen image). loop() holds it 5 s and restores underneath.
 void showAchievementUnlock() {
-  const int bx = 20, by = 72, bw = 280, bh = 96;
+  // Card grew from 96 to 132 px tall so the title and the FULL description
+  // fit word-wrapped instead of being chopped at one 42-char line. Content
+  // width bw-24 = 256 px = 42 chars at size 1, and 3 wrapped lines hold 126
+  // chars >= the server's 120-char description cap, so nothing is lost.
+  // Card spans y 52..184, clear of the footer band (y >= 205).
+  const int bx = 20, by = 52, bw = 280, bh = 132;
+  const int tx = bx + 12;
+  const int CHARS = 42;
 
   Lcd.fillRect(bx, by, bw, bh, THEME_BLACK);
   Lcd.drawRect(bx, by, bw, bh, THEME_YELLOW);
@@ -5315,33 +5322,27 @@ void showAchievementUnlock() {
   Lcd.setTextWrap(false);
   Lcd.setTextColor(THEME_YELLOW);
   Lcd.setTextSize(2);
-  Lcd.setCursor(bx + 12, by + 10);
+  Lcd.setCursor(tx, by + 10);
   Lcd.print("ACHIEVEMENT!");
 
-  Lcd.setTextColor(THEME_WHITE);
-  Lcd.setTextSize(1);
-  Lcd.setCursor(bx + 12, by + 38);
-  {
-    String t = raStatus.lastUnlockTitle;
-    if (t.length() > 42) t = t.substring(0, 42);   // 42*6=252 <= bw-24
-    Lcd.print(t);
-  }
+  // Title: up to 2 wrapped lines.
+  int y = drawWrappedText(raStatus.lastUnlockTitle, tx, by + 34, CHARS, 2,
+                          THEME_WHITE);
 
   // Description — the server's log tailer fills it instantly (title AND
   // description travel in the fork's log line); cloud-poll-only unlocks
-  // leave it empty and the row simply stays blank.
+  // leave it empty and the block is simply skipped.
   if (raLastUnlockDesc.length() > 0) {
-    Lcd.setTextColor(THEME_CYAN);
-    Lcd.setCursor(bx + 12, by + 54);
-    String d = raLastUnlockDesc;
-    if (d.length() > 42) d = d.substring(0, 42);
-    Lcd.print(d);
+    y = drawWrappedText(raLastUnlockDesc, tx, y + 3, CHARS, 3, THEME_CYAN);
   }
 
   // A log-fired popup reaches the screen before the cloud confirms the
-  // points, so 0 means "pending", not "worthless".
+  // points, so 0 means "pending", not "worthless". Pinned to the bottom of
+  // the card so it never collides with a short or a full-length description.
+  Lcd.setTextWrap(false);
+  Lcd.setTextSize(1);
   Lcd.setTextColor(raStatus.lastUnlockHardcore ? THEME_RED : THEME_GREEN);
-  Lcd.setCursor(bx + 12, by + 74);
+  Lcd.setCursor(tx, by + bh - 16);
   if (raStatus.lastUnlockPoints > 0) {
     Lcd.printf("+%d pts%s", raStatus.lastUnlockPoints,
                raStatus.lastUnlockHardcore ? "  [HARDCORE]" : "");
