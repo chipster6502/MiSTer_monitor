@@ -607,6 +607,55 @@ _KNOWN_ROM_EXTS = {
 # rewrites them, so the CRC is unstable anyway). Extensible.
 _NO_HASH_EXTS = {'.vhd'}
 
+# --- Container-image denylist -------------------------------------------------
+# A DOS .vhd usually holds an entire environment or a multi-game compilation,
+# not a single title. jeuRecherche has no notion of "no match": it returns the
+# best fuzzy hit for whatever string it gets, so 'boot' yields a real game id
+# (observed: 170580) and the firmware shows wrong artwork with every appearance
+# of success. No similarity threshold fixes this — the query itself denotes no
+# game. This is NOT an extension check: 0MHz ships one .vhd per game with a real
+# title ('Prince of Persia (1990).vhd'), where name search is exactly right.
+#
+# All matching happens AFTER _clean_search_name(), against a name that is
+# lowercased and has -/_/whitespace collapsed to single spaces, so one entry
+# covers 'top-300', 'Top 300' and 'top_300'.
+
+# Whole-name matches: the cleaned name IS the container, no suffix possible.
+GENERIC_MEDIA_NAMES = {'hdd', 'harddisk', 'system'}
+
+# OS designators that may qualify a bare container marker: 'BOOT-DOS98'.
+_OS_TOKEN = r'(?:(?:ms)?dos ?\d*(?:\.\d+)?|win ?(?:31|3\.1|95|98|me|xp)|w9[58])'
+
+# Bare container names, optionally qualified by an OS designator.
+# 'boot' is deliberately NOT a free prefix: 'Boot Camp' is a real DOS title, so
+# only 'boot' alone or 'boot <os>' counts. Asymmetric cost drives this — a false
+# positive silently kills artwork for a real game forever, a false negative
+# merely leaves the existing bug on a name we have not seen yet. So 'BOOT-386'
+# or 'BOOT-Games' would escape by design: widen only with a filename in hand.
+GENERIC_MEDIA_RE = re.compile(
+    r'^(?:hdd?\d*|disk\d*|drive ?[a-z]|' + _OS_TOKEN + r'|boot(?: ' + _OS_TOKEN + r')?)$',
+    re.I,
+)
+
+# Leading-marker matches: a collection marker plus a per-distribution builder or
+# variant suffix — 'Shareware Pack-fbit', 'Top 300 DOS Games'. Chasing the
+# literals is hopeless (every builder picks a different suffix), so match the
+# whole leading marker. Never mid-name: 'Doom Shareware' is a real game and must
+# still reach the search. Unlike 'boot', these are implausible as the START of a
+# real title, which is what makes free-prefix matching safe here.
+GENERIC_MEDIA_PREFIXES = ('shareware', 'top 300')
+
+
+def is_generic_media_name(stem):
+    """True when the cleaned name identifies a container image, not a game."""
+    s = re.sub(r'[-_\s]+', ' ', (stem or '').strip().lower()).strip()
+    if not s:
+        return False
+    if s in GENERIC_MEDIA_NAMES or GENERIC_MEDIA_RE.match(s):
+        return True
+    return any(s == p or s.startswith(p + ' ') for p in GENERIC_MEDIA_PREFIXES)
+
+
 def _clean_search_name(name):
     """
     Derives a ScreenScraper text-search query from a game/file name:
@@ -628,24 +677,42 @@ def _clean_search_name(name):
 def _enrich_rom_result(result):
     """
     Adds name-search metadata to a rom-details result (success OR failure):
-      search_name      — clean title for jeuRecherche.php
-      name_search_hint — True when the CRC route cannot work: no ROM was
-                         resolvable, no CRC was computed, or the container
-                         extension is known to be unindexed (.vhd).
-    The firmware combines this hint with its own per-system allowlist, so a
-    TRANSIENT hash failure (USB race) on a CRC-capable system never silently
-    degrades into a fuzzy name search with wrong-region artwork risk.
+      search_name      — clean title for jeuRecherche.php. Always populated:
+                         the firmware displays it even when it must not search.
+      no_hash          — True when the CRC can NEVER arrive (unindexable,
+                         mutable container). Distinct from hash_calculated,
+                         which is also False while a hash is still in flight —
+                         an ambiguity that costs the firmware 5x20s of pointless
+                         retries on every .vhd load.
+      container_image  — True when search_name denotes a whole-environment or
+                         compilation image rather than a game ('boot',
+                         'BOOT-DOS98', 'Shareware Pack-fbit'). The firmware must
+                         never text-search these: jeuRecherche has no "no match"
+                         and returns a fuzzy hit (observed: id 170580 for
+                         'boot'), i.e. confident-looking wrong artwork.
+      name_search_hint — True when the CRC route cannot work: no ROM resolvable,
+                         no CRC computed, or an unindexed container.
+
+    These two flags are deliberately independent. A DOS game with a valid but
+    unindexed CRC (pack-built CHDs) has container_image=False and hint=False,
+    and must STILL reach the text search after the CRC path misses twice —
+    conflating them into one boolean would silently kill that path.
     """
     with _state_lock:
         game_for_name = _state['game']
         path_for_name = _state['game_path']
 
     ext = os.path.splitext(result.get('path') or path_for_name or '')[1].lower()
-    result['search_name']      = _clean_search_name(result.get('filename') or game_for_name)
+    search_name = _clean_search_name(result.get('filename') or game_for_name)
+    no_hash = ext in _NO_HASH_EXTS
+
+    result['search_name']      = search_name
+    result['no_hash']          = bool(no_hash)
+    result['container_image']  = bool(is_generic_media_name(search_name))
     result['name_search_hint'] = bool(
         (not result.get('available')) or
         (not result.get('crc32')) or
-        (ext in _NO_HASH_EXTS)
+        no_hash
     )
     return result
 
