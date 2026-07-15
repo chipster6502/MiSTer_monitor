@@ -607,6 +607,57 @@ _KNOWN_ROM_EXTS = {
 # rewrites them, so the CRC is unstable anyway). Extensible.
 _NO_HASH_EXTS = {'.vhd'}
 
+# Extensions worth hashing on MOST cores but not on specific ones. Keyed by the
+# RAW CORENAME, never the friendly name: names.txt lets any user rename 'AO486'
+# to whatever they like, and a friendly-name key would then miss silently.
+#
+# .chd on ao486: the 0MHz collection builds its own CHDs (64 of its 327 games
+# mount one), so the container's CRC exists in no database and the search always
+# falls through to the name query anyway. Hashing CRC32+MD5+SHA1 over a ~700 MB
+# CHD costs ~35 s of DE10-Nano ARM — longer than the firmware's 12 s HTTP
+# timeout, which is why CD-based DOS games visibly cycle through retries while
+# .vhd games resolve instantly. RetroAchievements does not cover DOS, so nothing
+# depends on that MD5 here.
+#
+# Deliberately NOT global: on console CD cores (PSX, Saturn, MegaCD, Neo Geo CD)
+# the CHD's MD5 is exactly what resolves the RetroAchievements set. Putting
+# '.chd' in _NO_HASH_EXTS would trade a DOS-only annoyance for broken RA across
+# every CD core — reasoning by extension instead of by context, the same mistake
+# that made 'boot' match 'Boot Camp'.
+#
+# .iso/.img on ao486 stay hashed on purpose: only 7 files in the collection, they
+# are small, and a raw rip's CRC may legitimately be indexed by ScreenScraper.
+_NO_HASH_EXTS_BY_CORE = {
+    'AO486': {'.chd'},
+}
+
+
+def _read_corename_raw():
+    """Raw CORENAME ('AO486'), RA_-prefix stripped. '' when unreadable."""
+    try:
+        with open('/tmp/CORENAME', 'r') as f:
+            corename = f.read().strip()
+    except Exception:
+        return ''
+    # RA_-prefixed cores: the RetroAchievements toolkit ships RA_SNES etc.
+    return corename[3:] if corename.startswith('RA_') else corename
+
+
+def _is_no_hash(ext, corename):
+    """
+    True when hashing this file can never yield a usable CRC/MD5.
+
+    MUST be the single source of truth for both the hashing decision in
+    get_rom_details_from_file() and the no_hash flag in _enrich_rom_result().
+    If the two ever disagree, the server skips the hash while still reporting
+    no_hash=false, and the firmware burns its full 5 x 20 s retry budget waiting
+    for a CRC that is never coming.
+    """
+    ext = (ext or '').lower()
+    if ext in _NO_HASH_EXTS:
+        return True
+    return ext in _NO_HASH_EXTS_BY_CORE.get(corename or '', frozenset())
+
 # --- Container-image denylist -------------------------------------------------
 # A DOS .vhd usually holds an entire environment or a multi-game compilation,
 # not a single title. jeuRecherche has no notion of "no match": it returns the
@@ -758,7 +809,7 @@ def _enrich_rom_result(result):
 
     ext = os.path.splitext(result.get('path') or path_for_name or '')[1].lower()
     search_name = _clean_search_name(result.get('filename') or game_for_name)
-    no_hash = ext in _NO_HASH_EXTS
+    no_hash = _is_no_hash(ext, _read_corename_raw())
 
     result['search_name']      = search_name
     result['no_hash']          = bool(no_hash)
@@ -2334,10 +2385,14 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             # does not index them AND the guest OS rewrites them (save files),
             # so their CRC is unstable by nature. Skip the minutes of
             # CRC+MD5+SHA1 on the ARM entirely — same outcome as file_too_large.
-            skip_hash = os.path.splitext(filename)[1].lower() in _NO_HASH_EXTS
+            _ext      = os.path.splitext(filename)[1].lower()
+            _corename = _read_corename_raw()
+            skip_hash = _is_no_hash(_ext, _corename)
 
             if skip_hash:
-                print(f"Hash skipped for {filename}: extension in _NO_HASH_EXTS (unindexable, mutable container)")
+                _why = ("unindexable, mutable container" if _ext in _NO_HASH_EXTS
+                        else f"locally built by the {_corename} collection; CRC in no database")
+                print(f"Hash skipped for {filename}: {_why}")
             elif file_size <= MAX_SIZE_FOR_HASH:
                 try:
                     _wait_for_rom_load_to_settle()   # don't hash mid-load
