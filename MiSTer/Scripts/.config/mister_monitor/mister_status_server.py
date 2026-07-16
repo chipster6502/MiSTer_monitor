@@ -249,6 +249,138 @@ KNOWN_SYSTEM_NAMES = set(v.lower() for v in CORE_NAME_MAPPING.values()) | \
 # Case-insensitive lookup dict — keys are lowercased
 CORE_NAME_MAPPING_LOWER = {k.lower(): v for k, v in CORE_NAME_MAPPING.items()}
 
+
+# ---------------------------------------------------------------------------
+# Unknown cores
+# ---------------------------------------------------------------------------
+# A core we cannot name shows its raw string and gets no artwork. Finding out
+# has always meant waiting for a user to notice (z386 arrived via a forum post),
+# and a scheduled scan of the distributions only half-solves it: it sees .rbf
+# FILENAMES, which are not the CORENAME — ZX-Spectrum.rbf announces itself as
+# 'Spectrum' — and it cannot see a manually-installed core at all, which is
+# exactly what z386 is.
+#
+# So the running server records what it actually saw. That string IS the key a
+# mapping needs: no inference, no guessing.
+#
+# Deliberately NOT telemetry. The file never leaves the MiSTer; the endpoint is
+# there so a user can paste it into a report if they choose to. The counter and
+# the timestamps exist to tell a core someone genuinely plays from one they
+# opened once by accident.
+# threading is imported again further down, next to the watcher threads; the
+# duplicate is deliberate. This block runs at line ~250, that import lands at
+# ~378, and a module-level Lock() here would raise NameError before the server
+# ever answered a request. Re-importing is free (sys.modules is a cache).
+import threading
+
+_UNKNOWN_CORES_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'unknown_cores.json')
+
+_unknown_cores = {}                  # raw corename -> {first_seen, last_seen, count}
+_unknown_cores_lock = threading.Lock()
+_unknown_cores_loaded = False
+
+
+def _load_unknown_cores():
+    """Restore the log so counts survive a restart. Corruption is not fatal."""
+    global _unknown_cores, _unknown_cores_loaded
+    if _unknown_cores_loaded:
+        return
+    _unknown_cores_loaded = True
+    try:
+        with open(_UNKNOWN_CORES_FILE, 'r') as f:
+            data = json.load(f)
+        if isinstance(data.get('cores'), dict):
+            _unknown_cores = data['cores']
+            print(f"📋 Unknown-core log restored: {len(_unknown_cores)} entries")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        # A truncated file must never stop the server from serving status.
+        print(f"⚠️ unknown_cores.json unreadable ({e}) - starting a fresh log")
+
+
+def _save_unknown_cores_locked():
+    """
+    Atomic write: temp file + os.replace.
+
+    The MiSTer loses power by having its plug pulled, which is precisely when a
+    half-written JSON would be left behind — and _load_unknown_cores() would
+    then discard the whole history.
+    """
+    tmp = _UNKNOWN_CORES_FILE + '.tmp'
+    try:
+        with open(tmp, 'w') as f:
+            json.dump({'comment': 'Cores this MiSTer ran that MiSTer Monitor '
+                                  'could not name. Local only; nothing is sent '
+                                  'anywhere. Safe to delete.',
+                       'updated': int(time.time()),
+                       'cores': _unknown_cores}, f, indent=1)
+        os.replace(tmp, _UNKNOWN_CORES_FILE)
+    except Exception as e:
+        print(f"⚠️ Cannot persist unknown_cores.json: {e}")
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+
+
+def _note_unknown_core(raw_corename):
+    """
+    Record a core name that resolves to nothing in CORE_NAME_MAPPING.
+
+    Membership in the mapping is the test, NOT 'friendly == raw': several cores
+    map to themselves ('MSX' -> 'MSX'), and comparing the strings would file
+    those as unknown forever.
+
+    Disk is touched only on a genuinely new name or once a minute, so a core
+    left running cannot turn this into a write loop on the SD card.
+    """
+    name = (raw_corename or '').strip()
+    if not name or name.upper() == 'MENU':
+        return
+    if name.lower() in CORE_NAME_MAPPING_LOWER or name in CORE_NAME_MAPPING:
+        return
+
+    now = int(time.time())
+    with _unknown_cores_lock:
+        _load_unknown_cores()
+        entry = _unknown_cores.get(name)
+        if entry is None:
+            _unknown_cores[name] = {'first_seen': now, 'last_seen': now,
+                                    'count': 1}
+            print(f"❓ Unknown core recorded: '{name}' "
+                  f"(no CORE_NAME_MAPPING entry) -> /status/unknown_cores")
+            _save_unknown_cores_locked()
+            return
+        entry['count'] = entry.get('count', 0) + 1
+        stale = now - entry.get('last_seen', 0) >= 60
+        entry['last_seen'] = now
+        if stale:
+            _save_unknown_cores_locked()
+
+
+def get_unknown_cores():
+    """Payload for /status/unknown_cores."""
+    with _unknown_cores_lock:
+        _load_unknown_cores()
+        cores = [
+            {'corename': k,
+             'first_seen': v.get('first_seen'),
+             'last_seen': v.get('last_seen'),
+             'count': v.get('count', 0)}
+            for k, v in _unknown_cores.items()
+        ]
+    cores.sort(key=lambda c: (-(c['count'] or 0), c['corename'].lower()))
+    return {
+        'count': len(cores),
+        'cores': cores,
+        'note': ('Cores this MiSTer ran that could not be mapped to a friendly '
+                 'name. These strings are the literal CORENAME and are exactly '
+                 'what a mapping must be keyed on. Local only.'),
+        'timestamp': int(time.time()),
+    }
+
 import threading
 
 # ---------------------------------------------------------------------------
@@ -1169,6 +1301,12 @@ def _update_state():
     if not is_arcade and friendly_name == 'Atari 7800' and game_path:
         friendly_name = _atari_78_or_26(game_path)
 
+    # Arcade is excluded on purpose: those cores are addressed by .mra and
+    # are deliberately absent from CORE_NAME_MAPPING, so logging them would
+    # bury the real finds under 160 false positives.
+    if not is_arcade:
+        _note_unknown_core(lookup_name)
+
     _commit_state('Arcade' if is_arcade else friendly_name,
                   game_name, game_path, is_arcade,
                   event='load' if game_name else 'core')
@@ -1330,6 +1468,11 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             self.send_json_response(self.get_network_stats())
         elif path == '/status/session':
             self.send_json_response(self.get_session_stats())
+        elif path == '/status/unknown_cores':
+            # Cores this server could not name. Read by a human (or pasted into
+            # an issue) to turn a "shows the raw name, no artwork" report into
+            # the exact key to add. Local only — nothing is ever sent anywhere.
+            self.send_json_response(get_unknown_cores())
         elif path == '/status/retroachievements':
             if _RA_AVAILABLE:
                 self.send_json_response(get_ra_status(self))
