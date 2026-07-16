@@ -1,0 +1,147 @@
+name: Propose core mappings
+
+# Opens a PR adding CORE_NAME_MAPPING entries for official cores we do not name
+# yet, with the key taken from each core's own CONF_STR.
+#
+# It proposes; it never merges. Two reasons, both measured:
+#
+#   1. PCXT.sv and Tandy1000.sv are ONE source whose CONF_STR is a compile-time
+#      ternary, so a naive read hands PCXT the name 'Tandy1000'. A wrong key
+#      never fires, which means it looks handled while being dead — worse than
+#      an obvious gap. Those cases are detected and left out of the PR.
+#   2. The friendly name is editorial. The bot cannot know that 'GameNWatch' is
+#      'Nintendo Game & Watch'. It fills a placeholder; you write the name.
+#
+# Scope is the official channel only. Unofficial cores arrive via
+# ecosystem-watch.yml, and the literal CORENAME via /status/unknown_cores.
+
+on:
+  schedule:
+    - cron: '41 5 * * 1'     # Mondays, same day as ecosystem-watch. Safe to run
+                             # weekly because an already-open proposal PR makes
+                             # the job a no-op (see the guard below): a new core
+                             # is picked up within days instead of within a month.
+  workflow_dispatch:
+
+permissions:
+  contents: write            # push the proposal branch
+  pull-requests: write       # open the PR
+
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Read each core's CONF_STR and apply what is unambiguous
+        id: propose
+        env:
+          # Lifts the org listing from 60 to 5000 requests/hour. Without it the
+          # legacy repos (C64, Minimig, NeoGeo, Ti994a) cannot be resolved,
+          # because their names predate the <Core>_MiSTer convention.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          python3 tools/propose_mapping.py \
+            --server MiSTer/Scripts/.config/mister_monitor/mister_status_server.py \
+            --out /tmp/proposal.json \
+            --apply | tee /tmp/propose.txt
+          # $? after a pipe is tee's status, not python's.
+          echo "found=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Refuse to ship a file that does not import
+        if: steps.propose.outputs.found == '1'
+        # The bot edits a module the server imports at boot. py_compile alone
+        # would pass on a NameError, so the table itself is parsed back.
+        run: |
+          python3 -m py_compile MiSTer/Scripts/.config/mister_monitor/mister_status_server.py
+          python3 - <<'EOF'
+          import re, io
+          src = io.open('MiSTer/Scripts/.config/mister_monitor/mister_status_server.py',
+                        encoding='utf-8').read()
+          m = re.search(r"^CORE_NAME_MAPPING\s*=\s*\{(.*?)^\}", src, re.S | re.M)
+          assert m, "CORE_NAME_MAPPING block is gone"
+          entries = re.findall(r"^\s*['\"]([^'\"]+)['\"]\s*:\s*['\"]([^'\"]+)['\"]\s*,",
+                               m.group(1), re.M)
+          assert len(entries) > 100, f"table collapsed to {len(entries)} entries"
+          print(f"table parses: {len(entries)} entries")
+          EOF
+
+      - name: Open the PR
+        if: steps.propose.outputs.found == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Fixed name on purpose. Dating the branch would defeat the guard
+          # below — a new date means a new branch, so every run would open yet
+          # another PR carrying the same proposals.
+          BRANCH="bot/core-mappings"
+
+          # An open proposal is still valid, and you may well have started
+          # filling in display names on it. Touching the branch would force-push
+          # over that work, so the job stops here instead. Merge or close the PR
+          # and the next run proposes whatever is left.
+          if gh pr list --head "$BRANCH" --state open --json number \
+               | grep -q '"number"'; then
+            echo "a proposal PR is already open; leaving it and your edits alone"
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # -B resets the branch onto current main: a stale branch from a
+          # closed-without-merging PR must not resurrect its old commits.
+          git checkout -B "$BRANCH"
+          git add MiSTer/Scripts/.config/mister_monitor/mister_status_server.py
+          git commit -m "feat(server): map official cores using their own CONF_STR
+
+          Keys are read verbatim from each core's Verilog. Values are
+          placeholders and must be replaced with display names before merging."
+          git push -f -u origin "$BRANCH"
+
+          {
+            echo "Keys below are read from each core's own \`CONF_STR\` — the string it"
+            echo "writes to \`/tmp/CORENAME\`. They are **correct and must not be edited**."
+            echo ""
+            echo "**The values are placeholders and this PR is inert until you replace them.**"
+            echo "An entry like \`'C16': 'C16'\` changes nothing: without a mapping the"
+            echo "server already falls back to the raw name. The point of the PR is that"
+            echo "the *key* is right — that is the part that goes wrong by hand:"
+            echo ""
+            echo '```'
+            echo "AdventureVision.rbf -> 'AVision'      GnW.rbf     -> 'GameNWatch'"
+            echo "ColecoVision.rbf    -> 'Coleco'       Specialist  -> 'SPMX'"
+            echo "ZX-Spectrum.rbf     -> 'Spectrum'     Laser310    -> 'Laser'"
+            echo '```'
+            echo ""
+            echo "So: edit each value (\`'C16': 'Commodore 16'\`), drop the lines you do"
+            echo "not want, and merge. Leaving a placeholder is harmless — it is what"
+            echo "the server does today anyway."
+            echo ""
+            echo "<details><summary>Run output, including what the bot refused to guess</summary>"
+            echo ""
+            echo '```'
+            head -c 40000 /tmp/propose.txt
+            echo '```'
+            echo "</details>"
+          } > /tmp/pr_body.md
+
+          gh pr create \
+            --title "Map official cores from their CONF_STR (values need naming)" \
+            --body-file /tmp/pr_body.md \
+            --label core-mapping
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mapping-proposal
+          path: |
+            /tmp/proposal.json
+            /tmp/propose.txt
+          retention-days: 90
