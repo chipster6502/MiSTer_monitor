@@ -2938,6 +2938,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             ('/status/usb', 'USB devices'),
             ('/status/session', 'Session statistics'),
             ('/status/all', 'All data combined'),
+            ('/status/unknown_cores', 'Cores this MiSTer ran that we cannot name'),
         ]
         rows = ''.join(
             f'<li><a href="{p}">{p}</a> — {d}</li>' for p, d in endpoints
@@ -3001,6 +3002,7 @@ if __name__ == '__main__':
         print("  /status/retroachievements - RA progress for active game")
         print("  /status/retroachievements/event - unlock counter micro-poll")
         print("  /status/retroachievements/achievements - trophy list (?page=N&per=M)")
+        print("  /status/unknown_cores - cores this MiSTer ran that we cannot name")
         print("")
         server.serve_forever()
     except Exception as e:
