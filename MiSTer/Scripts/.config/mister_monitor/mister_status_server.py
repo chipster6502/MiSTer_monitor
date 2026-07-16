@@ -235,6 +235,48 @@ CORE_NAME_MAPPING = {
     'turbografx16': 'TurboGrafx-16/PC Engine',
     'mastersystem': 'Sega Master System',
     'atari2600': 'Atari 2600',
+
+    # --- Proposed automatically from each core's CONF_STR.
+    # The KEY is verbatim from the core's Verilog and is correct.
+    # The VALUE is a placeholder: replace it with a display name
+    # before merging ('C16' -> 'Commodore 16').
+    'Adam': 'Adam',  # ColecoAdam.rbf, ColecoAdam_MiSTer
+    'Altair8800': 'Altair8800',  # Altair8800.rbf, Altair8800_Mister
+    'APOGEE': 'APOGEE',  # Apogee.rbf, Apogee_MiSTer
+    'Apple-IIgs': 'Apple-IIgs',  # Apple-IIgs.rbf, Apple-IIgs_MiSTer
+    'Apple-Lisa': 'Apple-Lisa',  # Apple-Lisa.rbf, Apple-Lisa_MiSTer
+    'Arduboy': 'Arduboy',  # Arduboy.rbf, Arduboy_MiSTer
+    'Astrocade': 'Astrocade',  # Astrocade.rbf, Astrocade_MiSTer
+    'BBCBridgeCompanion': 'BBCBridgeCompanion',  # BBCBridgeCompanion.rbf, BBCBridgeCompanion_MiSTer
+    'C16': 'C16',  # C16.rbf, C16_MiSTer
+    'Casio_PV-2000': 'Casio_PV-2000',  # Casio_PV-2000.rbf, Casio_PV-2000_MiSTer
+    'Chess': 'Chess',  # Chess.rbf, Chess_MiSTer
+    'Chip8': 'Chip8',  # Chip8.rbf, Chip8_MiSTer
+    'Donut': 'Donut',  # Donut.rbf, Donut_MiSTer
+    'Enterprise': 'Enterprise',  # Enterprise.rbf, Enterprise_MiSTer
+    'FLAPPY': 'FLAPPY',  # FlappyBird.rbf, FlappyBird_MiSTer
+    'Game and Watch': 'Game and Watch',  # GameAndWatch.rbf, GameAndWatch_MiSTer
+    'GBMidi': 'GBMidi',  # GBMidi.rbf, GBMidi_MiSTer
+    'GenMidi': 'GenMidi',  # GenMidi.rbf, GenMidi_MiSTer
+    'Interact': 'Interact',  # Interact.rbf, Interact_MiSTer
+    'IQ151': 'IQ151',  # IQ151.rbf, IQ151_MiSTer
+    'Laser': 'Laser',  # Laser310.rbf, Laser310_MiSTer
+    'MultiComp': 'MultiComp',  # MultiComp.rbf, MultiComp_MiSTer
+    'MyVision': 'MyVision',  # MyVision.rbf, MyVision_MiSTer
+    'Ondra SPO 186': 'Ondra SPO 186',  # Ondra_SPO186.rbf, OndraSPO186_MiSTer
+    'ORAO': 'ORAO',  # ORAO.rbf, Orao_MiSTer
+    'PDP1': 'PDP1',  # PDP1.rbf, PDP1_MiSTer
+    'PMD85': 'PMD85',  # PMD85.rbf, PMD85_MiSTer
+    'RX78': 'RX78',  # RX78.rbf, RX-78_MiSTer
+    'SlugCross': 'SlugCross',  # SlugCross.rbf, SlugCross_MiSTer
+    'SuperVision8000': 'SuperVision8000',  # Super_Vision_8000.rbf, Super_Vision_8000_MiSTer
+    'TatungEinstein': 'TatungEinstein',  # TatungEinstein.rbf, TatungEinstein_MiSTer
+    'TK2000': 'TK2000',  # TK2000.rbf, TK2000_MiSTer
+    'TomyTutor': 'TomyTutor',  # TomyTutor.rbf, TomyTutor_MiSTer
+    'TSConf': 'TSConf',  # TSConf.rbf, TSConf_MiSTer
+    'UK101': 'UK101',  # UK101.rbf, UK101_MiSTer
+    'VECTOR06': 'VECTOR06',  # Vector-06C.rbf, Vector-06C_MiSTer
+    'VT52': 'VT52',  # VT52.rbf, VT52_MiSTer
 }
 
 # names.txt fills in cores not already in CORE_NAME_MAPPING
