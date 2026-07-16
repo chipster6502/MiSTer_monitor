@@ -66,6 +66,21 @@ String _default_core_image_str  = "/cores/menu.jpg";
 // reason on screen once a download attempt has given up.
 int g_lastSSHttpCode = 0;
 
+// The romnom to send to ScreenScraper for this ROM.
+//
+// The server may override the on-disk filename with a romset id it confirmed
+// against the core's own data files (NeoGeo: 'Metal Slug 2 (mslug2).neo' ->
+// 'mslug2.zip'). ScreenScraper indexes NeoGeo as MAME romsets, so the romset
+// matches exactly, whereas the filename only matches through SS's internal
+// fuzzy fallback — which misses whenever the pack's title differs from SS's.
+//
+// An empty override means the server could not confirm a romset, and the
+// filename is used exactly as before: unknown systems, older servers and
+// unconfirmed names all keep today's behaviour.
+static inline String ssRomnomFor(const RomDetails& d) {
+  return d.ssRomnom.length() > 0 ? d.ssRomnom : d.filename;
+}
+
 // Media type search order — updated from appConfig in setup()
 // Defaults match AppConfig struct defaults (overridden by config.ini).
 String GAME_MEDIA_ORDER_STR              = "box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot";
@@ -1250,6 +1265,12 @@ static bool _parseRomDetailsJson(String& response, RomDetails& details, const ch
 
   details.path           = extractStringValue(response, "path");
   Serial.printf("  %sPath: '%s'\n", prefix, details.path.c_str());
+
+  details.ssRomnom       = extractStringValue(response, "ss_romnom");
+  if (details.ssRomnom.length() > 0) {
+    Serial.printf("  %sScreenScraper romnom override: '%s'\n", prefix,
+                  details.ssRomnom.c_str());
+  }
 
   details.timestamp      = extractIntValue(response, "timestamp");
 
@@ -6485,7 +6506,7 @@ bool fetchGameMetadataJSON(String gameId, String coreName,
     }
     url += "&systemeid=" + systemId;
     url += "&romtype=rom";
-    url += "&romnom=" + urlEncode(romDetails.filename);
+    url += "&romnom=" + urlEncode(ssRomnomFor(romDetails));
     url += "&crc=" + romDetails.crc32;
     url += "&romtaille=" + String(romDetails.filesize);
     url += "&md5=" + romDetails.md5;
@@ -9000,7 +9021,7 @@ GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
   url += "&sspassword=" + urlEncode(String(SCREENSCRAPER_PASS));
   url += "&systemeid=" + systemId;
   url += "&romtype=rom";
-  url += "&romnom=" + urlEncode(romDetails.filename);
+  url += "&romnom=" + urlEncode(ssRomnomFor(romDetails));
   url += "&crc=" + romDetails.crc32;
   url += "&romtaille=" + String(romDetails.filesize);
   url += "&md5=" + romDetails.md5;
@@ -9508,14 +9529,23 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
       }
     } else {
       Serial.println("First JSON search found no results");
-      
-      // SECOND TRY: Retry CRC search with longer delay  
-      Serial.printf("ATTEMPTING SECOND CRC SEARCH...\n");
-      showDownloadProgress(35, "Retrying CRC search...");
+
+      // A 404 from jeuInfos is ScreenScraper's definitive "nothing matches these
+      // parameters", not a transient failure. The retry re-issues a byte-identical
+      // URL, so it can only receive the identical 404: skipping it saves one API
+      // call and 10 s of dead screen per unmatchable game. Every other outcome
+      // (timeout, -1, 5xx, 429) may still be transient and keeps the retry.
+      const bool ssDefinitiveMiss = (g_lastSSHttpCode == 404);
+
+      // SECOND TRY: Retry CRC search with longer delay
+      Serial.printf(ssDefinitiveMiss
+                    ? "ScreenScraper 404 (definitive no-match) - skipping second CRC search\n"
+                    : "ATTEMPTING SECOND CRC SEARCH...\n");
+      if (!ssDefinitiveMiss) showDownloadProgress(35, "Retrying CRC search...");
       
       // WDT-safe wait: yields to OS in 100ms slices instead of blocking 10s
-      Serial.printf("Waiting 10s before CRC retry (WDT-safe, yielding every 100ms)...\n");
-      {
+      if (!ssDefinitiveMiss) {
+        Serial.printf("Waiting 10s before CRC retry (WDT-safe, yielding every 100ms)...\n");
         unsigned long _waitStart = millis();
         while (millis() - _waitStart < 10000) {
           Board.update();
@@ -9525,7 +9555,9 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
       }
       
       // Check memory before second attempt
-      if (ESP.getFreeHeap() < 90000) {
+      if (ssDefinitiveMiss) {
+        // Nothing to retry: an identical URL can only return the identical 404.
+      } else if (ESP.getFreeHeap() < 90000) {
         Serial.printf("Low memory for second attempt (%d bytes), skipping retry\n", ESP.getFreeHeap());
       } else {
         Serial.printf("Second attempt: Calling searchWithJeuInfosPreciseJSON()...\n");

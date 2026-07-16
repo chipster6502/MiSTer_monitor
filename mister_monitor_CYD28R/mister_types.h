@@ -30,6 +30,14 @@ struct RomDetails {
                            // true while a slow hash is still in flight.
   bool   containerImage;   // search_name denotes a container image, not a game
                            // (boot.vhd, BOOT-DOS98.vhd). Never text-search these.
+  String ssRomnom;         // server-resolved romnom override ('mslug2.zip'), or "".
+                           // NeoGeo ships .neo containers that ScreenScraper does
+                           // not index, so its CRC can never match and the lookup
+                           // falls back to fuzzy-matching the filename — which
+                           // misses whenever the pack's title differs from SS's
+                           // (48 of 281 romsets carry a subtitle). The romset id
+                           // matches exactly instead. "" = use filename, i.e. the
+                           // previous behaviour.
 };
 
 // GAME INFO panel — metadata for the currently loaded game, extracted from
