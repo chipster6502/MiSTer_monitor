@@ -131,6 +131,17 @@ jobs:
             echo "</details>"
           } > /tmp/pr_body.md
 
+          # `gh pr create --label` validates the label first and aborts the whole
+          # command if it does not exist — so a missing label means no PR at all,
+          # after the branch has already been pushed. (The REST API used by
+          # ecosystem-watch creates labels implicitly; the CLI does not.)
+          # Creating it up front is idempotent: the || true covers the run where
+          # it already exists.
+          gh label create core-mapping \
+            --color 0e8a16 \
+            --description "Automated core mapping proposals read from CONF_STR" \
+            2>/dev/null || true
+
           gh pr create \
             --title "Map official cores from their CONF_STR (values need naming)" \
             --body-file /tmp/pr_body.md \
