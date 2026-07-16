@@ -658,6 +658,160 @@ def _is_no_hash(ext, corename):
         return True
     return ext in _NO_HASH_EXTS_BY_CORE.get(corename or '', frozenset())
 
+
+# ---------------------------------------------------------------------------
+# NeoGeo -> ScreenScraper romnom
+# ---------------------------------------------------------------------------
+# ScreenScraper indexes NeoGeo as MAME romsets ('mslug2.zip'). MiSTer runs .neo
+# containers whose CRC exists in no database, so for this system the CRC route
+# can never match — verified against gameid 37605, whose 37 rom entries are all
+# .zip of 17-19 MB while the .neo on disk is 45 MB. Different universes.
+#
+# What actually resolves NeoGeo today is ScreenScraper's OWN fuzzy fallback on
+# romnom: it strips '(mslug).neo' and matches the leftover title. That only
+# works when the pack happens to name the file the way ScreenScraper does, and
+# packs are inconsistent about it. All three observed on the same @MiSTer Pack:
+#   'Metal Slug - Super Vehicle-001 (mslug).neo' -> hit  (gameid 37604)
+#   'Metal Slug 2 (mslug2).neo'                  -> miss (SS calls it
+#                                                   'Metal Slug 2 - Super Vehicle-001/ii')
+#   'Metal Slug X (mslugx).neo'                  -> miss (HTTP 404)
+# 48 of the 281 romsets carry a subtitle, so this is a systemic gap, not one
+# unlucky game.
+#
+# The romset id is the one identifier that is always present and always right:
+# it sits in the parentheses in pack layouts and IS the stem in Darksoft ones.
+# Sending it as romnom matches exactly, with no CRC and no fuzzy search —
+# verified: romnom=mslug2.zip returns gameid 37605 / rom id 21808.
+_NEOGEO_CORENAMES = frozenset({'neogeo'})
+
+# Installed by the MiSTer Downloader itself: |games/NEOGEO/romsets.xml is in the
+# official Distribution DB (md5 9b5536a3b95bcd755a4904d34e55582d). Both files
+# are read because a user may own either collection: romsets.xml describes the
+# Darksoft pack, gog-romsets.xml the GOG/Humble one.
+_ROMSET_XML_NAMES = ('romsets.xml', 'gog-romsets.xml')
+
+_romset_cache = {}                    # directory -> (mtime_stamp, frozenset)
+_romset_cache_lock = threading.Lock()
+
+
+def _load_romset_names(directory):
+    """
+    Every romset id declared by the NeoGeo core's own data files.
+
+    A 'name' may carry comma-separated aliases ('mslug3b6,mslug6',
+    'burningfh,brningfh'); each alias is registered, since any of them can be
+    the filename on disk.
+
+    Cached per directory, invalidated by mtime: the file is 41 KB and would
+    otherwise be re-parsed on every single game load.
+    """
+    if not directory or not os.path.isdir(directory):
+        return frozenset()
+
+    paths = [os.path.join(directory, n) for n in _ROMSET_XML_NAMES]
+    try:
+        stamp = tuple(os.path.getmtime(p) if os.path.isfile(p) else 0
+                      for p in paths)
+    except Exception:
+        return frozenset()
+    if not any(stamp):
+        return frozenset()
+
+    with _romset_cache_lock:
+        cached = _romset_cache.get(directory)
+        if cached and cached[0] == stamp:
+            return cached[1]
+
+    import xml.etree.ElementTree as ET
+    names = set()
+    for p in paths:
+        if not os.path.isfile(p):
+            continue
+        try:
+            root = ET.parse(p).getroot()
+        except Exception as e:
+            print(f"⚠️ {os.path.basename(p)} parse failed: {e}")
+            continue
+        for rs in root.iter('romset'):
+            for alias in (rs.get('name') or '').split(','):
+                alias = alias.strip().lower()
+                if alias:
+                    names.add(alias)
+
+    frozen = frozenset(names)
+    with _romset_cache_lock:
+        _romset_cache[directory] = (stamp, frozen)
+    print(f"ℹ️ NeoGeo romset ids loaded from {directory}: {len(frozen)}")
+    return frozen
+
+
+def _neogeo_games_dir(rom_path):
+    """
+    The directory holding romsets.xml for this ROM.
+
+    The ROM can be nested — inside a pack ZIP, inside a 'World A-Z/' subfolder —
+    while romsets.xml always sits at the games/NEOGEO root, so walk upwards from
+    the ROM until a romset file appears. Bounded to 4 levels: covers every
+    observed layout and stops the walk from wandering up to /media/fat.
+    """
+    if not rom_path:
+        return None
+    # A ZIP-internal path is not a filesystem path: the ZIP is the real entry.
+    m = re.search(r'(.+\.zip)', rom_path, re.IGNORECASE)
+    d = os.path.dirname(m.group(1) if m else rom_path)
+    for _ in range(4):
+        if not d or d == '/':
+            break
+        if any(os.path.isfile(os.path.join(d, n)) for n in _ROMSET_XML_NAMES):
+            return d
+        d = os.path.dirname(d)
+    return None
+
+
+def _neogeo_ss_romnom(rom_path, filename, corename):
+    """
+    ScreenScraper romnom for a NeoGeo ROM: '<romset>.zip', or '' when unknown.
+
+    Two candidates, most confident first:
+      1. the parenthesised group at the end of the stem —
+         'Metal Slug 2 (mslug2).neo' — the pack layouts, unambiguous;
+      2. the bare stem — 'mslug2.neo' — the Darksoft layout.
+
+    Both are confirmed against the core's own romsets.xml before use, so a
+    stray '(rev 1)' or an arbitrary filename can never be sent as a romset.
+    When nothing validates, '' is returned and the firmware keeps its current
+    behaviour: games that already resolve keep resolving.
+
+    Prefix matching is deliberately NOT attempted. 'Metal Slug 2' prefixes both
+    'mslug2' and 'mslug2t' (Metal Slug 2 Turbo); guessing between them is the
+    very mistake _lookup_neogeo_romset already refuses to make.
+    """
+    if (corename or '').strip().lower() not in _NEOGEO_CORENAMES:
+        return ''
+
+    stem = os.path.splitext(os.path.basename(filename or ''))[0]
+    if not stem:
+        return ''
+
+    candidates = []
+    m = re.search(r'\(([^()]+)\)\s*$', stem)
+    if m:
+        candidates.append(m.group(1).strip())
+    candidates.append(stem.strip())
+
+    names = _load_romset_names(_neogeo_games_dir(rom_path))
+    if not names:
+        return ''
+
+    for c in candidates:
+        if c.lower() in names:
+            romnom = c.lower() + '.zip'
+            print(f"🎯 NeoGeo romset resolved: '{stem}' -> romnom={romnom}")
+            return romnom
+
+    print(f"ℹ️ NeoGeo: no romset id confirmed for '{stem}' - using filename")
+    return ''
+
 # --- Container-image denylist -------------------------------------------------
 # A DOS .vhd usually holds an entire environment or a multi-game compilation,
 # not a single title. jeuRecherche has no notion of "no match": it returns the
@@ -789,6 +943,10 @@ def _enrich_rom_result(result):
                          which is also False while a hash is still in flight —
                          an ambiguity that costs the firmware 5x20s of pointless
                          retries on every .vhd load.
+      ss_romnom        — ScreenScraper romnom override ('mslug2.zip'). Only
+                         populated when a romset id could be confirmed against
+                         the core's own data files; '' means "use the filename",
+                         i.e. exactly today's behaviour.
       container_image  — True when search_name denotes a whole-environment or
                          compilation image rather than a game ('boot',
                          'BOOT-DOS98', 'Shareware Pack-fbit'). The firmware must
@@ -809,11 +967,16 @@ def _enrich_rom_result(result):
 
     ext = os.path.splitext(result.get('path') or path_for_name or '')[1].lower()
     search_name = _clean_search_name(result.get('filename') or game_for_name)
-    no_hash = _is_no_hash(ext, _read_corename_raw())
+    corename_raw = _read_corename_raw()
+    no_hash = _is_no_hash(ext, corename_raw)
 
     result['search_name']      = search_name
     result['no_hash']          = bool(no_hash)
     result['container_image']  = bool(is_generic_media_name(search_name))
+    result['ss_romnom']        = _neogeo_ss_romnom(
+        result.get('path') or path_for_name,
+        result.get('filename'),
+        corename_raw)
     result['name_search_hint'] = bool(
         (not result.get('available')) or
         (not result.get('crc32')) or
