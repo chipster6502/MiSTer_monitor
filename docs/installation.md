@@ -115,8 +115,8 @@ The fastest way to install the firmware. No Arduino IDE, no compiling.
    [https://chipster6502.github.io/MiSTer_monitor/flasher/](https://chipster6502.github.io/MiSTer_monitor/flasher/)
 4. Click the **Connect** button for your display, select the serial port in
    the browser dialog, and let it flash. The page lists every supported board
-   and explains how to tell the CYD variants apart (2.8" 1-USB vs 2-USB, and
-   3.5" capacitive vs resistive). It installs the latest released firmware,
+   and explains how to tell the CYD variants apart (2.8" ILI9341 vs ST7789,
+   and 3.5" capacitive vs resistive). It installs the latest released firmware,
    with the ScreenScraper credentials already built in.
 5. Prepare the display's microSD card with `config.ini` and the asset images
    (see [`configuration.md`](configuration.md)), then insert it and power on.
@@ -198,14 +198,18 @@ The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
 
    | Board | Sketch folder |
    |---|---|
-   | CYD 2.8" 1-USB (ESP32-2432S028R, ILI9341) | `mister_monitor_CYD28R/mister_monitor_CYD28R.ino` |
-   | CYD 2.8" 2-USB (ESP32-2432S028, ST7789) | `mister_monitor_CYD28R_2USB/mister_monitor_CYD28R_2USB.ino` |
+   | CYD 2.8" ILI9341 (ESP32-2432S028R) | `mister_monitor_CYD28R_ILI9341/mister_monitor_CYD28R_ILI9341.ino` |
+   | CYD 2.8" ST7789 (ESP32-2432S028) | `mister_monitor_CYD28R_ST7789/mister_monitor_CYD28R_ST7789.ino` |
    | CYD 3.5" capacitive (ESP32-3248S035C, GT911) | `mister_monitor_CYD35C/mister_monitor_CYD35C.ino` |
    | CYD 3.5" resistive (ESP32-3248S035R, XPT2046) | `mister_monitor_CYD35R/mister_monitor_CYD35R.ino` |
 
-   The 2.8" variants are told apart by USB-port count (1 = ILI9341, 2 =
-   ST7789). The 3.5" variants share the same panel and PCB; if touch does not
-   respond after flashing one, flash the other. Note that screenshot capture
+   The 2.8" variants differ only in panel controller, and the USB port count
+   is a hint rather than a rule: 1 port is usually ILI9341 and 2 ports usually
+   ST7789, but 2-port boards fitted with an ILI9341 do exist. A wrong pick
+   costs only a re-flash — the symptom is a blank, garbled or wrong-coloured
+   image — so if the picture is wrong, build the other sketch. The 3.5"
+   variants share the same panel and PCB; if touch does not respond after
+   flashing one, flash the other. Note that screenshot capture
    over HTTP is **not** available on the 3.5" (ST7796) boards, whose panel has
    no SPI readback.
 2. Install required libraries via **Tools → Manage Libraries…**:

@@ -44,7 +44,7 @@ jobs:
           set +e
           python3 tools/audit_cores.py \
             --server MiSTer/Scripts/.config/mister_monitor/mister_status_server.py \
-            --ino    mister_monitor_CYD28R/mister_monitor_CYD28R.ino \
+            --ino    mister_monitor_CYD28R_ILI9341/mister_monitor_CYD28R_ILI9341.ino \
             --ra     MiSTer/Scripts/.config/mister_monitor/ra_status.py \
             --baseline tools/known_cores.json \
             --json   /tmp/core_report.json \

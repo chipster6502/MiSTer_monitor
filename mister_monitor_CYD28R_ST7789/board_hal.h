@@ -5,10 +5,13 @@
 //  ESP32-2432S028R "CYD" board with no changes to the drawing logic.
 //
 //  Display calls are routed to a LovyanGFX instance configured
-//  for the dual-USB CYD's ST7789 panel; Touch uses the XPT2046 controller via
+//  for the CYD's ST7789 panel; Touch uses the XPT2046 controller via
 //  software SPI; Speaker is a no-op (CYD has no DAC speaker).
 //
-//  Pinout reference (CYD ESP32-2432S028R, dual-USB / ST7789 variant):
+//  Pinout reference (CYD ESP32-2432S028R, ST7789 variant):
+//  NOTE: the ST7789 panel is common on dual-USB boards but the port count is
+//  not a reliable indicator — ILI9341 dual-USB boards exist in the field.
+//  The panel controller is the identity of this build, not the connectors.
 //    TFT (VSPI):  SCK=14  MOSI=13  MISO=12  DC=2  CS=15  RST=hw  BL=21
 //    SD  (HSPI):  SCK=18  MOSI=23  MISO=19  CS=5     (handled in .ino, not here)
 //    Touch (software SPI, separate pins): CLK=25 MOSI=32 MISO=39 CS=33 IRQ=36
