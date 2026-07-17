@@ -9557,7 +9557,32 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
       // Check memory before second attempt
       if (ssDefinitiveMiss) {
         // Nothing to retry: an identical URL can only return the identical 404.
+        //
+        // But this shortcut must finish the job the retry branch below would
+        // have done, because that branch is the only other owner of the
+        // exhaustion flag on the CRC path. Two things were being skipped:
+        //
+        //  1. The name-search fallback (F4). A 404 on the CRC query says the
+        //     hash is unknown to ScreenScraper; it says nothing about whether
+        //     the title is findable by name. Allowlisted systems still get
+        //     their one text search.
+        //  2. lastGameSearchExhausted. A definitive 404 with no name-search
+        //     rescue IS "clean response, not in the DB". Leaving the flag
+        //     false made gameInfoAvailable() fall through to lastRomHasCrc —
+        //     true here, since the CRC is exactly what got the 404 — so the
+        //     GAME INFO button stayed up for a game that can never fill it.
+        //     It also left processCrcRecurrent re-asking every 10 s for an
+        //     answer ScreenScraper had already given.
+        if (isNameSearchSystem(systemId)) {
+          success = tryNameSearchFallback(coreName, gameName, romDetails);
+        }
+        if (!success) {
+          lastGameSearchExhausted = true;
+          Serial.println("ScreenScraper 404 on CRC, no name-search rescue - marked search as exhausted");
+        }
       } else if (ESP.getFreeHeap() < 90000) {
+        // Transient: memory pressure, not a ScreenScraper verdict. Deliberately
+        // leaves the search NOT exhausted so the 10 s recurrent retries later.
         Serial.printf("Low memory for second attempt (%d bytes), skipping retry\n", ESP.getFreeHeap());
       } else {
         Serial.printf("Second attempt: Calling searchWithJeuInfosPreciseJSON()...\n");
