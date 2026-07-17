@@ -258,6 +258,12 @@ const unsigned long SCREENSAVER_TIMEOUT = 30000;  // 30 seconds of inactivity
 int  gameInfoSubPage = 0;                 // 0 = fields (1/2), 1 = synopsis (2/2)
 unsigned long gameInfoSubPageChange = 0;  // last subpage change (auto-flip timer)
 bool gameInfoForceExit = false;           // synopsis finished -> leave the panel
+// True while page 5 is being shown as a rotation slide rather than opened by
+// the user. It changes the panel's lifecycle, not its looks: no auto-advance to
+// the synopsis, and the hand-back goes to the core image instead of the generic
+// return-to-image path. Cleared the moment the user touches the panel, which
+// promotes the slide into an ordinary on-demand panel.
+bool gameInfoFromRotation = false;
 const unsigned long GAMEINFO_SCREEN_TIMEOUT  = 60000;   // 1 min fallback
 const unsigned long GAMEINFO_SUBPAGE_TIMEOUT = 30000;   // 30 s on the fields page
 
@@ -611,6 +617,7 @@ void drawRAMessage(const String &title, const String &subtitle, uint16_t color);
 void showAchievementUnlock();
 bool gameInfoAvailable();
 void drawGameInfoSynopsis();
+bool gameInfoRotationReady();
 bool gameInfoSynNeedsScroll();
 void resetGameInfoSynScroll();
 void tickGameInfoSynScroll();
@@ -1054,6 +1061,42 @@ bool gameInfoAvailable() {
   // ROM turns out to have no CRC.
   if (lastRomCrcChecked) return lastRomHasCrc;
   return true;
+}
+
+// -----------------------------------------------------------------------------
+// gameInfoRotationReady() — may the rotation show a GAME INFO slide right now?
+//
+// Deliberately stricter than gameInfoAvailable(), and the difference is the
+// whole point. That function ends on an optimistic `return true` for the
+// "never tried" state, which is correct for a button: a human tapped it, the
+// lazy fetch settles the question, and a wrong guess costs one tap to leave.
+// An unattended attract loop has no such escape — an optimistic guess here
+// would park "NO METADATA AVAILABLE" on screen for 30 s every cycle. So this
+// answers yes only when the metadata is already in hand, or provably sits on
+// the SD card next to the artwork.
+//
+// The SD probe is memoised per game: the rotation tick must never turn into a
+// directory scan. Kept separate from gameInfoAvailable()'s own probe on
+// purpose — that one was just fixed and field-validated, and folding the two
+// together would put a working function back in play for no functional gain.
+// -----------------------------------------------------------------------------
+bool gameInfoRotationReady() {
+  if (!appConfig.infoInRotation) return false;
+  if (currentGame.length() == 0)  return false;
+
+  if (currentMeta.loaded && currentMeta.forGame == currentGame) return true;
+
+  static String rotProbeFor = "\x01";   // sentinel: never a real game name
+  static bool   rotProbeHit = false;
+  if (rotProbeFor != currentGame) {
+    rotProbeFor = currentGame;
+    rotProbeHit = false;
+    String imgPath;
+    if (sdCardAvailable && findGameImageExact(currentCore, currentGame, imgPath)) {
+      rotProbeHit = SD.exists(getMetaPathFromImagePath(imgPath));
+    }
+  }
+  return rotProbeHit;
 }
 
 // -----------------------------------------------------------------------------
@@ -2195,6 +2238,12 @@ void handleTouch() {
       playNextButtonSound();
       delay(200);
 
+      // The user touched a rotation slide: it stops being an attract slide and
+      // becomes a panel they are reading. Clearing the flag hands the lifecycle
+      // back to the on-demand rules — synopsis, auto-scroll, self-exit — which
+      // is what "touch for the synopsis" has to mean to be worth anything.
+      gameInfoFromRotation = false;
+
       gameInfoSubPage ^= 1;
       gameInfoSubPageChange = millis();
       resetGameInfoSynScroll();
@@ -2725,6 +2774,7 @@ void loop() {
       currentPage           = 5;
       gameInfoSubPage       = 0;
       gameInfoSubPageChange = millis();
+      gameInfoFromRotation  = false;   // opened on demand: full panel lifecycle
       resetGameInfoSynScroll();
       showingCoreImage      = false;
       backgroundLoaded      = false;
@@ -2760,6 +2810,7 @@ void loop() {
       // Check if game changed first (higher priority)
       if (oldGame != currentGame && sdCardAvailable) {
         lastRotationTime = 0; // Reset rotation timer for new game
+        gameInfoFromRotation = false;  // slide belonged to the previous game
         String coreNameLower = currentCore;
   coreNameLower.toLowerCase();
   bool isMameCore = (coreNameLower == "arcade");
@@ -2842,6 +2893,28 @@ void loop() {
       
       // Check for 30-second rotation
       if (millis() - lastRotationTime > 30000) { // 30 seconds
+        // GAME INFO slide ([gameinfo] info_in_rotation): an interstitial on the
+        // game -> core leg, so the cycle reads game -> info -> core. It sits
+        // second for a reason: every game change resets the rotation to the
+        // game image, so a third-place slide only surfaces 60 s in — longer
+        // than a SAM game often lives, which is exactly the audience that asked
+        // for this. showingGameImage stays true across the slide: we are still
+        // in the game half of the cycle, and the hand-back flips it to false so
+        // the core image follows.
+        if (showingGameImage && gameInfoRotationReady()) {
+          Serial.println("ROTATION: GAME INFO slide");
+          currentPage           = 5;
+          gameInfoSubPage       = 0;
+          gameInfoSubPageChange = millis();
+          gameInfoFromRotation  = true;
+          resetGameInfoSynScroll();
+          showingCoreImage      = false;   // page 5 is a monitor page
+          backgroundLoaded      = false;
+          needsRedraw           = true;
+          lastButtonPress       = millis();  // no screensaver while it shows
+          return;
+        }
+
         showingGameImage = !showingGameImage;
         lastRotationTime = millis();
         
@@ -3116,6 +3189,27 @@ if (oldGame != currentGame && sdCardAvailable) {
         gameInfoSubPage = 0;
         gameInfoSubPageChange = millis();
         resetGameInfoSynScroll();
+      } else if (gameInfoFromRotation && gameInfoSubPage == 0) {
+        // Rotation slide: 1/2 only, for the same 30 s the other slides get,
+        // then hand back to the core image. Checked before the on-demand
+        // lifecycle below and without requiring a synopsis: a slide must leave
+        // on the beat whether or not there is a second subpage to flip to,
+        // rather than fall through to the 1-min fallback and stall the cycle.
+        // Touching the panel clears gameInfoFromRotation, so this branch stops
+        // applying the moment the user takes over.
+        if (millis() - gameInfoSubPageChange > GAMEINFO_SUBPAGE_TIMEOUT) {
+          Serial.println("ROTATION: GAME INFO slide done - back to core image");
+          gameInfoFromRotation = false;
+          showingGameImage     = false;   // the core image is next in the cycle
+          lastRotationTime     = millis();
+          showCoreImageScreenWithAutoDownload(currentCore);
+          showingCoreImage     = true;
+          coreImageStartTime   = millis();
+          lastButtonPress      = millis();
+          // giLastPage is not updated on this path; the next iteration sees
+          // showingCoreImage and resets it to -1 by itself.
+          return;
+        }
       } else if (currentMeta.loaded && currentMeta.synopsis.length() > 0) {
         if (gameInfoSubPage == 0) {
           if (millis() - gameInfoSubPageChange > GAMEINFO_SUBPAGE_TIMEOUT) {
