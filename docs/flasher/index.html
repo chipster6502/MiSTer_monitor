@@ -11,14 +11,22 @@
   <p>Use <strong>Chrome or Edge on desktop</strong> and connect the display via USB.</p>
 
   <h2>Cheap Yellow Display 2.8" (ESP32-2432S028, 320x240)</h2>
-  <p><strong>Which variant do I have?</strong> Count the USB ports on the board:
-     <strong>1 port</strong> (Micro-USB only) → ILI9341,
-     <strong>2 ports</strong> (USB-C + Micro-USB) → ST7789.</p>
+  <p><strong>Which variant do I have?</strong> The two 2.8" boards look
+     identical and the silkscreen doesn't name the panel controller. The USB
+     port count is a <strong>hint, not a rule</strong>: <strong>1 port</strong>
+     (Micro-USB only) is usually ILI9341 and <strong>2 ports</strong> (USB-C +
+     Micro-USB) is usually ST7789 — but 2-port boards fitted with an
+     ILI9341 do exist, so the count can be wrong. Guessing wrong costs nothing
+     but a re-flash: the wrong build leaves the backlight on with a blank,
+     garbled or wrong-coloured image, and it cannot damage the board.
+     <strong>Start with the build matching your port count; if the picture is
+     wrong or never appears, flash the other one</strong> — that is the
+     answer, not a fault in your wiring or your MiSTer.</p>
 
-  <h3>1-USB — ILI9341</h3>
+  <h3>ILI9341 — usually 1-USB (some 2-USB boards too)</h3>
   <esp-web-install-button manifest="./manifest-cyd.json"></esp-web-install-button>
 
-  <h3>2-USB — ST7789</h3>
+  <h3>ST7789 — usually 2-USB</h3>
   <esp-web-install-button manifest="./manifest-cyd2usb.json"></esp-web-install-button>
 
   <h2>Cheap Yellow Display 3.5" (ESP32-3248S035, 480x320)</h2>

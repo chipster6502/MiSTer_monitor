@@ -54,14 +54,18 @@ console and computer games via the MiSTer Remote web application.*
 | Target | Display / Touch | Status |
 |---|---|---|
 | [M5Stack Tab5 (ESP32-P4)](https://www.digikey.com/en/products/detail/m5stack-technology-co-ltd/C145/26740595) | 5" 1280×720 IPS · capacitive | Stable — reference implementation |
-| [Cheap Yellow Display 2.8" — 1-USB (ESP32-2432S028)](https://a.aliexpress.com/_EJ4r0Hg) | 320×240 ILI9341 · resistive | Stable |
-| [Cheap Yellow Display 2.8" — 2-USB (ESP32-2432S028)](https://a.aliexpress.com/_EJ4r0Hg) | 320×240 ST7789 · resistive | Stable |
+| [Cheap Yellow Display 2.8" — ILI9341, usually 1-USB (ESP32-2432S028)](https://a.aliexpress.com/_EJ4r0Hg) | 320×240 ILI9341 · resistive | Stable |
+| [Cheap Yellow Display 2.8" — ST7789, usually 2-USB (ESP32-2432S028)](https://a.aliexpress.com/_EJ4r0Hg) | 320×240 ST7789 · resistive | Stable |
 | [Cheap Yellow Display 3.5" capacitive (ESP32-3248S035)](https://a.aliexpress.com/_EJ4r0Hg) | 480×320 ST7796 · GT911 capacitive | Stable |
 | [Cheap Yellow Display 3.5" resistive (ESP32-3248S035)](https://a.aliexpress.com/_EJ4r0Hg) | 480×320 ST7796 · XPT2046 resistive | Stable |
 
-The two 2.8" variants look identical but use different panel controllers —
-count the USB ports to tell them apart (**1 port** → ILI9341, **2 ports** →
-ST7789). The two 3.5" variants share the same panel and PCB and differ only in
+The two 2.8" variants look identical but use different panel controllers, and
+the silkscreen doesn't name them. The USB port count is a **hint, not a rule**:
+**1 port** is usually ILI9341 and **2 ports** usually ST7789, but 2-port boards
+fitted with an ILI9341 do exist. Guessing wrong costs only a re-flash — the
+wrong build leaves the backlight on with a blank, garbled or wrong-coloured
+image — so if the picture is wrong, flash the other build before suspecting the
+hardware. The two 3.5" variants share the same panel and PCB and differ only in
 the touch controller. The
 [web flasher](https://chipster6502.github.io/MiSTer_monitor/flasher/) walks you
 through picking the right build. Screenshot capture over HTTP is available on
