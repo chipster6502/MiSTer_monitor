@@ -1307,9 +1307,11 @@ static bool _parseRomDetailsJson(String& response, RomDetails& details, const ch
   details.nameSearchHint = extractBoolValue(response, "name_search_hint");
   details.noHash         = extractBoolValue(response, "no_hash");
   details.containerImage = extractBoolValue(response, "container_image");
-  Serial.printf("  %sSearch name: '%s' (hint: %s, no_hash: %s, container: %s)\n", prefix,
+  details.noRomOnDisk    = extractBoolValue(response, "no_rom_on_disk");
+  Serial.printf("  %sSearch name: '%s' (hint: %s, no_hash: %s, container: %s, no_rom: %s)\n", prefix,
                 details.searchName.c_str(), details.nameSearchHint ? "YES" : "NO",
-                details.noHash ? "YES" : "NO", details.containerImage ? "YES" : "NO");
+                details.noHash ? "YES" : "NO", details.containerImage ? "YES" : "NO",
+                details.noRomOnDisk ? "YES" : "NO");
 
   details.error          = extractStringValue(response, "error");
   if (details.error.length() > 0) {
@@ -9547,6 +9549,20 @@ bool tryNameSearchFallback(String coreName, String gameName, RomDetails romDetai
   GameInfo gameInfo = searchWithJeuRechercheJSON(coreName, cleanName);
   if (!(gameInfo.found && gameInfo.boxartUrl.length() > 0)) {
     Serial.println("Name search found no results");
+    if (romDetails.noRomOnDisk && !gameInfo.found && g_lastSSHttpCode == 200) {
+      // SAM name-only entry: no rom file on disk means the CRC route never
+      // existed, so this clean jeuRecherche miss (HTTP 200, zero results) IS
+      // the definitive verdict — the title is not in ScreenScraper. Present
+      // it with the stable card and mark the search exhausted so SAM redraws
+      // stop re-querying SS for this game. The verdict comes from the search
+      // itself, not from any name heuristic: commercial Amiga titles that DO
+      // exist in SS were found above and never reach this branch. A transient
+      // error (429, timeout, 5xx) leaves a different code and keeps the
+      // normal retry path. found-but-no-boxart is excluded (!gameInfo.found):
+      // that means catalogued-without-media, a different message.
+      lastGameSearchExhausted = true;
+      ssNotifyOnce(coreName + "|" + gameName, "GAME NOT IN SS DATABASE", cleanName);
+    }
     // Restore the CRC path's diagnostic on a clean 200-but-empty miss. A real
     // error from the name search (429, -1, ...) is newer and more relevant, so
     // it is kept.
@@ -9842,9 +9858,17 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
     Serial.println("ROM CRC not available for JSON search");
 
     // Hash-less fallback (F4, first leg): no usable CRC on an allowlisted
-    // system. The allowlist is the guardian — on CRC-capable systems a
-    // transient hash failure keeps behaving exactly as before.
-    if (isNameSearchSystem(systemId)) {
+    // system OR a server-confirmed name-only game. The per-system allowlist
+    // is the guardian for CRC-capable systems: a transient hash failure
+    // there keeps behaving exactly as before (no fuzzy search, no wrong-
+    // artwork risk). no_rom_on_disk is the per-GAME equivalent: the server
+    // verified this entry has no rom file at all (SAM name-only: Amiga
+    // MegaAGS demos and titles), so a hash can never exist and the name
+    // search is the only possible route — same guarantee, entry-scoped.
+    // Field log that motivated this: Amiga is NOT allowlisted, so SAM
+    // name-only games skipped the search entirely and flashed the generic
+    // failure on every redraw (nothing ever marked the search exhausted).
+    if (isNameSearchSystem(systemId) || romDetails.noRomOnDisk) {
       success = tryNameSearchFallback(coreName, gameName, romDetails);
       if (!success) {
         // Clean miss on a name-search system: stop the 10 s hammering.
@@ -9854,6 +9878,21 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
     }
   }
   
+  if (!success && romDetails.noRomOnDisk && lastGameSearchExhausted &&
+      g_lastSSHttpCode == 200) {
+    // g_lastSSHttpCode == 200 pins this to the clean-miss case where the
+    // NOT-IN-SS card was actually presented. A transient error (429,
+    // timeout) keeps its honest HUD message from the ladder below.
+    // tryNameSearchFallback() already presented the definitive NOT-IN-SS card
+    // for this name-only entry (and set the exhausted flag: it cannot be
+    // stale — startCrcRecurrentForGame() clears it on every new game and the
+    // caller gate never re-enters while it is set). Nothing failed: skip the
+    // generic "Download failed" + 6 s block.
+    Serial.printf("Final result: FAILED (name-only, not in SS - already presented)\n");
+    Serial.println("=== JSON DOWNLOAD COMPLETE ===\n");
+    return false;
+  }
+
   if (!success) {
     Serial.println("JSON method failed");
     // Game catalogued in ScreenScraper but with ZERO artwork of any configured

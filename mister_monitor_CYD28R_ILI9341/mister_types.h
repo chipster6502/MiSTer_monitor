@@ -38,6 +38,13 @@ struct RomDetails {
                            // (48 of 281 romsets carry a subtitle). The romset id
                            // matches exactly instead. "" = use filename, i.e. the
                            // previous behaviour.
+  bool   noRomOnDisk;      // server says this game has a NAME but NO rom file on
+                           // disk (SAM name-only content: Amiga demos, WHDLoad,
+                           // some MGL). The name search may still run, but if it
+                           // misses the firmware shows a stable NOT-IN-DATABASE
+                           // card instead of the DOWNLOADING->failed flash.
+                           // Added last so existing positional initializers
+                           // (which stop before ssRomnom) stay valid.
 };
 
 // GAME INFO panel — metadata for the currently loaded game, extracted from
