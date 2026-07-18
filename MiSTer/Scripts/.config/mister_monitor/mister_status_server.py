@@ -682,6 +682,21 @@ def _get_mtime_ns(path):
     except:
         return 0
 
+def _sam_looks_like_path(s):
+    """
+    True when a SAM_Games.log third field is a real filesystem path, not a
+    bare game name. SAM logs some content by name only — no absolute path on
+    disk — e.g. Amiga WHDLoad/MGL demos: "10:09:18 - amiga - Demo: Bayeu (OCS)".
+    Feeding that bare name to the hasher yields "ROM file not found"; worse, it
+    poisons game_path in the snapshot with a value that is not openable.
+
+    A genuine SAM path is always absolute ("/media/fat/games/..."). Requiring a
+    leading '/' is enough to tell the two apart, and is stricter than a mere
+    "contains a slash" test (a title could, in theory, contain one).
+    """
+    return bool(s) and s.startswith('/')
+
+
 def _sam_get_current():
     """
     Reads SAM_Games.log and returns (is_active, core, game, path).
@@ -711,9 +726,14 @@ def _sam_get_current():
         parts = line.split(' - ')
         if len(parts) >= 3:
             sam_core_raw = parts[1].strip()
-            sam_path     = ' - '.join(parts[2:])
-            game_filename = sam_path.split('/')[-1]
+            sam_field    = ' - '.join(parts[2:])
+            # SAM sometimes logs by name only (no path on disk). Keep the
+            # name for display, but never propagate a non-path as game_path
+            # — a bare name is not openable and must fall through to the
+            # firmware's name search instead of the (failing) hash path.
+            game_filename = sam_field.split('/')[-1]
             sam_game      = os.path.splitext(game_filename)[0]
+            sam_path      = sam_field if _sam_looks_like_path(sam_field) else ''
             sam_core      = (CORE_NAME_MAPPING.get(sam_core_raw) or
                              CORE_NAME_MAPPING_LOWER.get(sam_core_raw.lower()) or
                              sam_core_raw)
@@ -1127,7 +1147,7 @@ def _clean_search_name(name):
     base = re.sub(r'\s{2,}', ' ', base).strip(' -.')
     return base
 
-def _enrich_rom_result(result):
+def _enrich_rom_result(result, detection_method=None):
     """
     Adds name-search metadata to a rom-details result (success OR failure):
       search_name      — clean title for jeuRecherche.php. Always populated:
@@ -1176,6 +1196,18 @@ def _enrich_rom_result(result):
         (not result.get('crc32')) or
         no_hash
     )
+
+    # no_rom_on_disk — the game has a NAME to show but NO rom file on disk,
+    # so the CRC route is not merely unindexed (that is name_search_hint):
+    # there is nothing to hash at all. Set for SAM name-only content
+    # (Amiga demos, WHDLoad, some MGL) where the guard in
+    # _get_enhanced_rom_path returned None. The firmware uses it to skip
+    # the 'DOWNLOADING -> download failed' flash and show a stable
+    # NOT-IN-DATABASE card if the (still-attempted) name search misses.
+    # Must NOT fire for a legitimate CD32/DOS title, which resolves a real
+    # file (available=True) and whose name search must run — hence keying
+    # on detection_method, not on available alone.
+    result['no_rom_on_disk'] = bool(detection_method == 'sam_no_path')
     return result
 
 def _game_name_from_path(path):
@@ -2170,7 +2202,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                     result = self.get_rom_details_from_file(rom_path)
                 result["detection_method"] = getattr(self, '_last_detection_method', 'unknown')
 
-            _enrich_rom_result(result)
+            _enrich_rom_result(result, getattr(self, '_last_detection_method', None))
             result['seq'] = seq_at_start
             with _state_lock:
                 if _state['seq'] == seq_at_start:
@@ -2220,7 +2252,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 result = self.get_rom_details_from_file(rom_path)
 
             result["detection_method"] = "forced"
-            _enrich_rom_result(result)
+            _enrich_rom_result(result, getattr(self, '_last_detection_method', None))
             result['seq'] = seq_at_start
             # Update cache so subsequent normal calls benefit — but only if the
             # active game hasn't changed since we started hashing (a slow CHD
@@ -2274,6 +2306,22 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 print(f"✅ Found ROM path in SAM_Games.log: {sam_rom_path}")
                 self._last_detection_method = "sam_games_log"
                 return sam_rom_path
+
+            # SAM is authoritative. If it is driving the state but its log
+            # entry has no path on disk (name-only content: Amiga demos,
+            # WHDLoad, some MGL), there is NO rom to hash — STOP HERE.
+            # Falling through to STEP 3+ would read /tmp/ACTIVEGAME|
+            # CURRENTPATH|FULLPATH, which still hold the LAST manual OSD
+            # session (stale). Field-observed damage: a CD32 SAM game hashed
+            # a leftover 218 MB AO486 DOS CHD ('alone in the dark 3'),
+            # burning ~15 s of ARM and risking wrong-game artwork if that
+            # stale CRC happened to be indexed. The /tmp/ path is only valid
+            # when SAM is NOT the current source.
+            if _sam_is_current():
+                print("⛔ SAM active with no path on disk — not hashing "
+                      "stale /tmp/ ROM; deferring to name search")
+                self._last_detection_method = "sam_no_path"
+                return None
         
         # STEP 3: Check CORENAME to determine system type
         try:
@@ -2352,19 +2400,26 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 parts = line.split(' - ')
                 
                 if len(parts) >= 3:
-                    sam_path = ' - '.join(parts[2:])  # Rejoin path in case it contains " - "
+                    sam_field = ' - '.join(parts[2:])  # Rejoin in case the field contains " - "
                     
-                    # Extract game name from path
-                    if sam_path:
-                        game_filename = sam_path.split('/')[-1]
+                    # Extract game name (works whether the field is a path
+                    # or a bare name)
+                    if sam_field:
+                        game_filename = sam_field.split('/')[-1]
                         sam_game = os.path.splitext(game_filename)[0]
                         
-                        print(f"🔍 SAM entry - Game: '{sam_game}', Path: '{sam_path}'")
+                        print(f"🔍 SAM entry - Game: '{sam_game}', Field: '{sam_field}'")
                         
-                        # Check if this game matches our current game
+                        # Only return a REAL path. SAM logs some content by
+                        # name only (Amiga demos etc.); returning that bare
+                        # name produced 'ROM file not found' downstream.
                         if self._games_match(current_game, sam_game):
-                            print(f"✅ Game match found in SAM: '{current_game}' == '{sam_game}'")
-                            return sam_path
+                            if _sam_looks_like_path(sam_field):
+                                print(f"✅ Game match with real path in SAM: '{current_game}'")
+                                return sam_field
+                            print(f"ℹ️ SAM match '{current_game}' has no path on disk — "
+                                  f"deferring to name search")
+                            return None
             
             print(f"❌ No matching game found in SAM_Games.log for: '{current_game}'")
             return None
