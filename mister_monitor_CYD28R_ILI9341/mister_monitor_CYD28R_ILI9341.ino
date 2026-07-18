@@ -154,6 +154,13 @@ bool coreChanged = false;
 bool gameChanged = false;
 bool showingCoreImage = false;
 unsigned long coreImageStartTime = 0;  // Time when image was shown
+// Raw CORENAME for the core on screen, as the server read it from
+// /tmp/CORENAME ('AO486', 'neogeo', ...). Supplied by /status/snapshot on
+// servers that know the field; empty otherwise. The ScreenScraper mapping
+// keys on this FIRST (names.txt can relabel the friendly name at will, and a
+// label must never cost a core its artwork); display and SD image paths stay
+// on the friendly name, which is what every existing SD cache is foldered by.
+String currentCoreRaw = "";
 unsigned long lastCoreCheck = 0;  // To check core changes while showing image
 String coreDownloadFailedFor = "";  // Core for which ScreenScraper download failed — prevents screensaver retry loop
 
@@ -571,6 +578,7 @@ bool extractBoolValue(String json, String key);
 
 // ScreenScraper helper functions
 String getScreenScraperSystemId(String coreName);
+String mapCoreToScreenScraperId(String coreName);
 String getExactFileName(String gameName);
 String sanitizeCoreFilename(String name);
 String getSavePath(String exactFileName, String searchCore);
@@ -4614,8 +4622,12 @@ bool getStateSnapshot() {
 
   String newCore = extractStringValue(response, "core");
   String newGame = extractStringValue(response, "game");
+  // Absent on older servers -> empty -> the mapping falls back to the
+  // friendly name, i.e. exactly today's behavior.
+  String newCoreRaw = extractStringValue(response, "core_raw");
   newCore.trim();
   newGame.trim();
+  newCoreRaw.trim();
 
   if (newCore.length() == 0) {
     // /status/snapshot always carries "core"; an empty value means a
@@ -4628,8 +4640,10 @@ bool getStateSnapshot() {
   bool gameDidChange = false;
 
   // ---- CORE side effects (ported from getCurrentCore's 200-handler) ----
-  previousCore = currentCore;
-  currentCore  = newCore;
+  previousCore   = currentCore;
+  currentCore    = newCore;
+  currentCoreRaw = newCoreRaw;   // always assigned: empty overwrite is the
+                                 // fallback signal, stale carry-over is a bug
 
   if (currentCore == "Menu" || currentCore == "MENU") {
     Serial.println("Server reports Menu state - checking debug endpoint");
@@ -4704,6 +4718,10 @@ void getCurrentCore() {
 
     previousCore = currentCore;
     currentCore = response;
+    // Legacy endpoint: no raw travels with it. Clear rather than carry — a
+    // raw left over from a previous snapshot belongs to a previous core, and
+    // the raw-first mapping must not key this one with it.
+    currentCoreRaw = "";
     currentCore.trim();
     currentCore.replace("\n", "");
     currentCore.replace("\r", "");
@@ -7592,7 +7610,30 @@ String sanitizeCoreFilename(String name) {
 
 // ========== MISTER TO SCREENSCRAPER SYSTEM MAPPING ==========
 
+// -----------------------------------------------------------------------------
+// getScreenScraperSystemId() — resolution chain, raw CORENAME first.
+//
+// currentCoreRaw only applies when the question is about the core we are
+// actually tracking (coreName == currentCore): several call sites pass copies
+// (currentCoreForCrc and friends), and those match; a query about an arbitrary
+// name must not be answered with the current core's raw.
+//
+// An unmapped raw falls through to the friendly name. That fallback carries
+// three real cases: arcade (raw is the specific rbf, friendly 'Arcade' -> 75),
+// older servers (no core_raw in the snapshot), and the legacy /status/core
+// path (which clears the raw on purpose).
+// -----------------------------------------------------------------------------
 String getScreenScraperSystemId(String coreName) {
+  if (currentCoreRaw.length() > 0 && coreName == currentCore) {
+    String viaRaw = mapCoreToScreenScraperId(currentCoreRaw);
+    if (viaRaw.length() > 0) {
+      return viaRaw;
+    }
+  }
+  return mapCoreToScreenScraperId(coreName);
+}
+
+String mapCoreToScreenScraperId(String coreName) {
   String core = coreName;
   
   Serial.printf("Mapping MiSTer core '%s' to ScreenScraper system ID\n", core.c_str());
@@ -7758,6 +7799,16 @@ String getScreenScraperSystemId(String coreName) {
   if (coreLower == "amigacd32") return "130";
   if (coreLower == "c64" || coreLower == "commodore64" || coreLower == "c128") return "66";
   if (coreLower == "ao486" || coreLower == "pc dos" || coreLower == "pcxt") return "135";
+  // Raw CORENAMEs that reached this table only through their friendly names
+  // until core_raw existed. The raw chain must be self-sufficient for them:
+  // without these, "raw-first" silently degrades to friendly-only exactly on
+  // the cores the whole feature was built for.
+  if (coreLower == "atari800") return "43";        // Atari 8bit family
+  if (coreLower == "coco3") return "144";          // TRS-80 Color Computer 3
+  if (coreLower == "colecovision") return "48";
+  if (coreLower == "gameboy2p") return "10";       // shares GBC artwork
+  if (coreLower == "odyssey2") return "104";       // Videopac G7000/Odyssey 2
+  if (coreLower == "svi328") return "218";         // Spectravideo SVI-328
   if (coreLower == "amstrad" || coreLower == "cpc") return "65";
   if (coreLower == "sam" || coreLower == "samcoupe") return "213";
   if (coreLower == "x68000") return "79";
