@@ -2755,6 +2755,7 @@ void loop() {
       coreImageStartTime = millis();
       return;
     }
+    Serial.printf("Image timeout - returning to interface (page %d)\n", currentPage);
     showingCoreImage = false;
     backgroundLoaded = false;
     needsRedraw = true;
@@ -3004,6 +3005,27 @@ void loop() {
     Serial.printf("Current game: '%s'\n", currentGame.c_str());
     Serial.printf("Connected: %s\n", connected ? "YES" : "NO");
     Serial.printf("Time since last button: %lu ms\n", millis() - lastButtonPress);
+
+    // Any panel exit funnels through here (synopsis forceExit and the 1-min
+    // fallback both do): release the page-5 residency so a later silent
+    // image-timeout exit lands on the monitor page instead of resurrecting
+    // the panel with expired lifecycle timers. The rotation clock kept
+    // running while the panel was read, so restart it too — otherwise an
+    // overdue timer fires the GAME INFO slide within one iteration of the
+    // image below being drawn (image "blinks", panel comes straight back).
+    // The restamp must happen HERE, before the fresh-data check and the
+    // draw: the machine relies on lastRotationTime maturing BEFORE
+    // coreImageStartTime (the image-timeout check runs earlier in the loop
+    // than the rotation check, so on a tie the timeout would always win and
+    // the rotation would starve on a perpetual game image). The seconds the
+    // HTTP check and the draw take are exactly that safety margin.
+    if (currentPage == 5) {
+      currentPage      = 0;
+      gameInfoSubPage  = 0;
+      resetGameInfoSynScroll();   // safe: gameInfoForceExit already consumed above
+      lastRotationTime = millis();   // full 30 s slot for the image below
+      showingGameImage = true;       // counted as the game half of the cycle
+    }
     
     // Force fresh data check before screensaver
     Serial.println("Forcing fresh data check before screensaver...");
@@ -3212,14 +3234,20 @@ if (oldGame != currentGame && sdCardAvailable) {
         if (millis() - gameInfoSubPageChange > GAMEINFO_SUBPAGE_TIMEOUT) {
           Serial.println("ROTATION: GAME INFO slide done - back to core image");
           gameInfoFromRotation = false;
+          currentPage          = 0;       // release page-5 residency: a silent
+                                          // image-timeout exit must land on the
+                                          // monitor page, not on this panel
           showingGameImage     = false;   // the core image is next in the cycle
           lastRotationTime     = millis();
           showCoreImageScreenWithAutoDownload(currentCore);
           showingCoreImage     = true;
           coreImageStartTime   = millis();
           lastButtonPress      = millis();
-          // giLastPage is not updated on this path; the next iteration sees
-          // showingCoreImage and resets it to -1 by itself.
+          // giLastPage stays 5 for the whole image phase (its maintenance
+          // line sits below the image-mode early return, so image iterations
+          // never reach it); the clean-re-entry guard cannot be relied on
+          // after this exit — the currentPage reset above is what actually
+          // prevents an unintended panel resurrection.
           return;
         }
       } else if (currentMeta.loaded && currentMeta.synopsis.length() > 0) {
