@@ -734,7 +734,12 @@ def _sam_is_current():
         return False
 
     sam_ts = os.path.getmtime(sam_log_path)
-    grace  = 30  # seconds
+    # Max expected lag between SAM's log write and CORENAME/ACTIVEGAME
+    # landing (observed 2-5 s on rbf loads and same-core MGL hops).
+    # Was 30 s: that window let a MANUAL load made shortly after a SAM
+    # rotation be misattributed to SAM's stale log entry until the log
+    # aged out of _sam_get_current()'s 300 s ceiling.
+    grace  = 10  # seconds
 
     for fname in ['CORENAME', 'ACTIVEGAME']:
         try:
@@ -1350,7 +1355,14 @@ def _update_state():
             game_name = ''
             game_path = ''
             print(f"🎮 Non-arcade: core={corename} loaded without game (CURRENTPATH='{currentpath}')")
-        elif activegame and not activegame.lower().endswith('.ini'):
+        # ACTIVEGAME freshness gate (mirror of the arcade branch): a stale
+        # ACTIVEGAME surviving a later core-only load must not be paired
+        # with the new core — until now the currentpath heuristic above was
+        # the only defence. 30 s of tolerance covers launchers that announce
+        # the game seconds BEFORE the core lands (Remote/Zaparoo cross-core
+        # transient) and slow core loads, same rationale as ARCADE_FRESHNESS.
+        elif (activegame and not activegame.lower().endswith('.ini') and
+              activegame_ts >= corename_ts - 30):
             game_name = _game_name_from_path(activegame)
             game_path = activegame
         elif currentpath and not currentpath.lower().endswith('.ini'):
@@ -1421,13 +1433,15 @@ def _evaluator_thread():
     """
     Consumes events and calls _update_state() exactly once per settled burst.
     The last event of a burst (the real game load) can never be lost.
-    A low-frequency safety poll re-checks FILESELECT while idle, so a missed
-    inotify event (watcher restart, rare edge) can never freeze the state
+    A low-frequency safety poll re-checks FILESELECT and SAM_Games.log
+    while idle, so a missed inotify event (watcher restart, rare edge)
+    can never freeze the state
     permanently — the design guarantees eventual convergence.
     """
     print("🧠 Evaluator thread started")
     pending = False
-    last_evaluated_fs_ns = 0
+    last_evaluated_fs_ns  = 0
+    last_evaluated_sam_ns = 0
     while True:
         timeout = _SETTLE_SECONDS if pending else _SAFETY_POLL_SECONDS
         try:
@@ -1440,14 +1454,21 @@ def _evaluator_thread():
         if pending:
             pending = False
             _update_state()
-            last_evaluated_fs_ns = _get_mtime_ns('/tmp/FILESELECT')
+            last_evaluated_fs_ns  = _get_mtime_ns('/tmp/FILESELECT')
+            last_evaluated_sam_ns = _get_mtime_ns('/tmp/SAM_Games.log')
         else:
-            # Idle safety net: FILESELECT moved but was never evaluated
-            fs_ns = _get_mtime_ns('/tmp/FILESELECT')
-            if fs_ns > last_evaluated_fs_ns:
-                print("🛟 Safety poll: unevaluated FILESELECT change — evaluating")
+            # Idle safety net: FILESELECT or SAM_Games.log moved but was
+            # never evaluated. SAM matters here because a same-core SAM hop
+            # touches ONLY the log — without it, a watcher restart during a
+            # SAM session could leave the state frozen on the previous game
+            # until the next cross-file event.
+            fs_ns  = _get_mtime_ns('/tmp/FILESELECT')
+            sam_ns = _get_mtime_ns('/tmp/SAM_Games.log')
+            if fs_ns > last_evaluated_fs_ns or sam_ns > last_evaluated_sam_ns:
+                print("🛟 Safety poll: unevaluated FILESELECT/SAM change — evaluating")
                 _update_state()
-                last_evaluated_fs_ns = fs_ns
+                last_evaluated_fs_ns  = fs_ns
+                last_evaluated_sam_ns = sam_ns
 
 # --- MiSTer Monitor UDP discovery responder -------------------------------
 DISCOVERY_PORT    = 51234
@@ -3032,7 +3053,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
     
     def send_json_response(self, data):
-        body = json.dumps(data).encode('utf-8')
+        body = json.dumps(data, ensure_ascii=False).encode('utf-8')
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
