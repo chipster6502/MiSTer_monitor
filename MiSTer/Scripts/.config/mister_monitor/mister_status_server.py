@@ -274,9 +274,18 @@ CORE_NAME_MAPPING = {
     'VT52': 'DEC VT52',
 }
 
-# names.txt fills in cores not already in CORE_NAME_MAPPING
+# names.txt fills in cores not already in CORE_NAME_MAPPING.
+# Membership is tested CASE-INSENSITIVELY: CORE_NAME_MAPPING_LOWER (built
+# below) collapses keys to lowercase with last-insert-wins, so a names.txt
+# key differing only in case ('ao486' vs curated 'AO486') would silently
+# replace the curated value on every lowercase lookup — which is the path
+# SAM detection takes. The curated names are load-bearing: the firmware's
+# ScreenScraper table is keyed on them, so letting a user label win here
+# costs that core its artwork. names.txt keeps its legitimate job — naming
+# cores the curated table has never heard of.
+_curated_lower = {k.lower() for k in CORE_NAME_MAPPING}
 for k, v in NAMES_TXT.items():
-    if k not in CORE_NAME_MAPPING:
+    if k.lower() not in _curated_lower:
         CORE_NAME_MAPPING[k] = v
 
 # Set of all known system friendly names — used to detect CURRENTPATH = core name
