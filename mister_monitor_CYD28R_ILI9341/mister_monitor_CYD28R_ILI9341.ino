@@ -603,6 +603,7 @@ String getMetaPathFromImagePath(const String &imagePath);
 bool saveGameMeta(const String &metaPath, const GameMeta &m);
 bool loadGameMeta(const String &metaPath, GameMeta &m);
 String jsonUnescapeAndFold(const String &in);
+String foldForDisplay(const String &in);   // UTF-8 -> ASCII fold for the GLCD font (core/game display)
 bool fetchGameMetadataJSON(String gameId, String coreName, RomDetails romDetails, GameMeta &out);
 int  wrapTextToLines(const String &text, int maxChars, String *out, int maxOut);
 void drawWrappedText(int x, int y, int w, int lineH, int maxLines, const String &text);
@@ -917,7 +918,7 @@ void showDownloadingScreen(String coreName, String gameName) {
 
   Lcd.setTextColor(THEME_YELLOW);
   Lcd.setCursor(20, 80);
-  Lcd.printf("CORE: %s", coreName.c_str());
+  Lcd.printf("CORE: %s", foldForDisplay(coreName).c_str());
 
   Lcd.setCursor(20, 95);
   String displayGame = gameName.length() > 25 ? gameName.substring(0, 25) + "..." : gameName;
@@ -1151,9 +1152,10 @@ void drawCoreImageFooter() {
 
     const bool showInfoButton = gameInfoAvailable();
     const int visibleChars = showInfoButton ? 26 : 38;   // button at x>=213
-    if (imageFooterScroll.fullText != currentGame ||
+    String gameFooterSeed = foldForDisplay(currentGame);   // display-only fold
+    if (imageFooterScroll.fullText != gameFooterSeed ||
         imageFooterScroll.maxChars != visibleChars) {
-      initScrollText(&imageFooterScroll, currentGame, visibleChars);
+      initScrollText(&imageFooterScroll, gameFooterSeed, visibleChars);
     }
     String displayGame = getScrolledText(&imageFooterScroll);
     while ((int)displayGame.length() < imageFooterScroll.maxChars) {
@@ -1215,7 +1217,7 @@ void drawFooter() {
 
     bool   hasGame = (currentGame.length() > 0) && !g_currentGameIsContainer;
     String label  = hasGame ? "G:" : "C:";
-    String source = hasGame ? currentGame : currentCore;
+    String source = foldForDisplay(hasGame ? currentGame : currentCore);   // display-only fold
 
     if (gameFooterScroll.fullText != source ||
         gameFooterScroll.maxChars != FOOTER_VIS) {
@@ -2007,7 +2009,7 @@ void showCoreDownloadingScreen(String coreName) {
 
   Lcd.setTextColor(THEME_YELLOW);
   Lcd.setCursor(20, 80);
-  Lcd.printf("SYSTEM: %s", coreName.c_str());
+  Lcd.printf("SYSTEM: %s", foldForDisplay(coreName).c_str());
 
   Lcd.setCursor(20, 95);
   Lcd.setTextColor(THEME_GREEN);
@@ -5875,7 +5877,7 @@ void displayMainHUD() {
   
   // Core name with scroll for long names. Window of 14 chars at size 3 fits
   // comfortably between x=20 and x=290 logical (plenty of margin).
-  String coreNormalized = currentCore;
+  String coreNormalized = foldForDisplay(currentCore);   // display-only fold; currentCore stays raw
   if (coreNormalized.equalsIgnoreCase("arcade")) {
     coreNormalized = "Arcade";
   }
@@ -6471,6 +6473,44 @@ static char foldLatin1(uint16_t cp) {
     case 0x00A1: case 0x00BF: return 0;               // inverted !/? -> drop
     default: return (cp < 0x80) ? (char)cp : '?';
   }
+}
+
+// -----------------------------------------------------------------------------
+// foldForDisplay() — render-time fold of a RAW UTF-8 string to the ASCII the
+// stock GLCD font can draw. Used ONLY for the core/game name shown on screen
+// (ACTIVE CORE box, C:/G: footer). It must NEVER touch currentCore/currentGame
+// themselves: those stay raw UTF-8 so SD cache folders (sanitizeCoreFilename)
+// and ScreenScraper searches keep matching what the server sent. Folding the
+// stored value would fork the cache ('/cores/mgt sam coup?/' vs '.../coupe/').
+//
+// Unlike jsonUnescapeAndFold(), the input here is already-decoded UTF-8 bytes
+// (the server now emits ensure_ascii=false), not JSON \uXXXX escapes — so this
+// decodes the 2- and 3-byte UTF-8 sequences to a codepoint, then reuses
+// foldLatin1() for the actual glyph mapping. Malformed bytes are dropped.
+// -----------------------------------------------------------------------------
+String foldForDisplay(const String &in) {
+  String out;
+  out.reserve(in.length());
+  int i = 0, n = (int)in.length();
+  while (i < n) {
+    unsigned char c = (unsigned char)in[i];
+    uint16_t cp;
+    if (c < 0x80) {                       // plain ASCII
+      cp = c; i += 1;
+    } else if ((c & 0xE0) == 0xC0 && i + 1 < n) {   // 2-byte UTF-8
+      cp = ((c & 0x1F) << 6) | ((unsigned char)in[i + 1] & 0x3F);
+      i += 2;
+    } else if ((c & 0xF0) == 0xE0 && i + 2 < n) {   // 3-byte UTF-8 (curly quotes, dashes)
+      cp = ((c & 0x0F) << 12) | (((unsigned char)in[i + 1] & 0x3F) << 6)
+                              |  ((unsigned char)in[i + 2] & 0x3F);
+      i += 3;
+    } else {                              // stray/continuation byte: skip it
+      i += 1; continue;
+    }
+    char fc = foldLatin1(cp);
+    if (fc) out += fc;                    // foldLatin1 returns 0 to DROP (inverted !/?)
+  }
+  return out;
 }
 
 // -----------------------------------------------------------------------------
