@@ -441,6 +441,9 @@ _rom_details_compute_lock = threading.Lock()
 
 _state = {
     'core':              'Menu',   # friendly name — used for display, image lookup, and ScreenScraper mapping
+    'core_raw':          '',       # raw CORENAME at commit time ('AO486', 'neogeo', ...). Mapping key for
+                                   # firmware that understands it; display and SD paths never use it. Empty
+                                   # when unknown (legacy paths) — consumers must fall back to 'core'.
     'system_name':       'Menu',   # alias of 'core' (same value); kept for backward compatibility
     'game':              '',       # game name (filename without extension)
     'game_path':         '',       # absolute path to ROM file
@@ -484,7 +487,7 @@ def _atari_78_or_26(game_path):
     return 'Atari 2600'
 
 
-def _commit_state(core, game, game_path, is_arcade, event):
+def _commit_state(core, game, game_path, is_arcade, event, core_raw=''):
     """
     Atomically commits a derived state. Bumps 'seq' and invalidates the
     rom-details cache ONLY when the identity actually changed, so a spurious
@@ -496,6 +499,11 @@ def _commit_state(core, game, game_path, is_arcade, event):
                    _state['game']      != game or
                    _state['game_path'] != game_path or
                    _state['is_arcade'] != is_arcade)
+        # core_raw refreshes even when the identity did not change, and stays
+        # OUT of the 'changed' computation: AO486 and Z386 share the friendly
+        # 'PC Dos' on purpose, and a raw-only flip must not bump seq or wipe a
+        # rom_details hash computed for the very same game.
+        _state['core_raw'] = core_raw
         if changed:
             _state['core']              = core
             _state['system_name']       = core
@@ -524,6 +532,9 @@ _WATCHED_FILES = [
     '/tmp/FILESELECT',
     '/tmp/FULLPATH',
     '/tmp/STARTPATH',   # arcade ROM path — needed to detect arcade game changes
+    '/tmp/SAM_Games.log',  # SAM's own game log: the only signal when SAM rotates
+                           # between two games of the SAME core (ao486 DOS hops
+                           # load an .mgl without touching CORENAME)
 ]
 
 def _ensure_watched_files():
@@ -680,18 +691,18 @@ def _sam_get_current():
     sam_log_path = '/tmp/SAM_Games.log'
 
     if not os.path.exists(sam_log_path):
-        return False, '', '', ''
+        return False, '', '', '', ''
 
     age = time.time() - os.path.getmtime(sam_log_path)
     if age > 300:  # 5 minutes
         print(f"🔍 SAM_Games.log too old: {age:.1f}s")
-        return False, '', '', ''
+        return False, '', '', '', ''
 
     try:
         with open(sam_log_path, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
     except Exception:
-        return False, '', '', ''
+        return False, '', '', '', ''
 
     for line in reversed(lines):
         line = line.strip()
@@ -1190,6 +1201,24 @@ def _update_state():
     # microseconds apart, a human cursor-move followed by Enter is >= ~100 ms.
     global _last_evaluated_corename
 
+    # --- SAM detection runs BEFORE the OSD guard ---
+    # SAM is authoritative whenever active and current. It loads games in bursts
+    # that write FILESELECT and CURRENTPATH microseconds apart — indistinguishable
+    # from OSD navigation by timing alone — so if the guard ran first it would
+    # swallow every same-core SAM hop (e.g. ao486 DOS rotation) as "navigation".
+    # When SAM owns the state, a burst IS a real load, so decide here and return
+    # before the guard is consulted. _last_evaluated_corename is advanced so a
+    # later non-SAM event still has a correct baseline for the guard.
+    if _sam_is_current():
+        sam_active, sam_core_raw, sam_core_friendly, sam_game, sam_path = _sam_get_current()
+        if sam_active and sam_core_raw:
+            corename = _read_file('/tmp/CORENAME')
+            _last_evaluated_corename = corename
+            print(f"🎮 SAM active — core='{sam_core_friendly}' game='{sam_game}'")
+            _commit_state(sam_core_friendly, sam_game, sam_path,
+                          is_arcade=False, event='sam', core_raw=sam_core_raw)
+            return
+
     fs_ns = _get_mtime_ns('/tmp/FILESELECT')
     cp_ns = _get_mtime_ns('/tmp/CURRENTPATH')
     ag_ns = _get_mtime_ns('/tmp/ACTIVEGAME')
@@ -1206,19 +1235,11 @@ def _update_state():
 
     _last_evaluated_corename = corename
 
-    # --- SAM detection (takes priority if active and current) ---
-    if _sam_is_current():
-        sam_active, sam_core_raw, sam_core_friendly, sam_game, sam_path = _sam_get_current()
-        if sam_active and sam_core_raw:
-            print(f"🎮 SAM active — core='{sam_core_friendly}' game='{sam_game}'")
-            _commit_state(sam_core_friendly, sam_game, sam_path,
-                          is_arcade=False, event='sam')
-            return
-
     # --- Menu ---
     if not corename or corename.upper() == 'MENU':
         print("📋 MENU detected")
-        _commit_state('Menu', '', '', is_arcade=False, event='menu')
+        _commit_state('Menu', '', '', is_arcade=False, event='menu',
+                      core_raw=corename)
         return
 
     # --- Resolve friendly core name ---
@@ -1353,9 +1374,13 @@ def _update_state():
     if not is_arcade:
         _note_unknown_core(lookup_name)
 
+    # Arcade keeps its raw too (the specific rbf, e.g. 'jtcps1'): the firmware
+    # will find it unmapped and fall back to the friendly 'Arcade' -> 75, which
+    # is the existing behavior — but the raw stays observable for diagnostics.
     _commit_state('Arcade' if is_arcade else friendly_name,
                   game_name, game_path, is_arcade,
-                  event='load' if game_name else 'core')
+                  event='load' if game_name else 'core',
+                  core_raw=corename)
 
 _SETTLE_SECONDS      = 0.4   # quiet time after the last event before evaluating
 _SAFETY_POLL_SECONDS = 15.0  # idle re-check; heals watcher restarts / lost events
@@ -1616,6 +1641,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             return {
                 'seq':               _state['seq'],
                 'core':              _state['core'],
+                'core_raw':          _state['core_raw'],
                 'system_name':       _state['system_name'],
                 'game':              _state['game'],
                 'game_path':         _state['game_path'],
