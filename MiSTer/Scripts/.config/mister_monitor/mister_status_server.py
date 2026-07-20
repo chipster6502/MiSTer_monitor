@@ -272,6 +272,12 @@ CORE_NAME_MAPPING = {
     'UK101': 'Compukit UK101',
     'VECTOR06': 'Vector-06C',
     'VT52': 'DEC VT52',
+
+    # --- Proposed automatically from each core's CONF_STR.
+    # The KEY is verbatim from the core's Verilog and is correct.
+    # The VALUE is a placeholder: replace it with a display name
+    # before merging ('C16' -> 'Commodore 16').
+    '3DO': '3DO',  # 3DO.rbf, 3DO_MiSTer
 }
 
 # names.txt fills in cores not already in CORE_NAME_MAPPING.
