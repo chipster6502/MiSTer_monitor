@@ -25,6 +25,26 @@ struct RomDetails {
   unsigned long timestamp;
   String searchName;       // clean title from the server for name-based search (S6)
   bool   nameSearchHint;   // server says the CRC route cannot work for this container
+  bool   noHash;           // server says the CRC can NEVER arrive (unindexable, mutable
+                           // container). Distinct from !hashCalculated, which is also
+                           // true while a slow hash is still in flight.
+  bool   containerImage;   // search_name denotes a container image, not a game
+                           // (boot.vhd, BOOT-DOS98.vhd). Never text-search these.
+  String ssRomnom;         // server-resolved romnom override ('mslug2.zip'), or "".
+                           // NeoGeo ships .neo containers that ScreenScraper does
+                           // not index, so its CRC can never match and the lookup
+                           // falls back to fuzzy-matching the filename — which
+                           // misses whenever the pack's title differs from SS's
+                           // (48 of 281 romsets carry a subtitle). The romset id
+                           // matches exactly instead. "" = use filename, i.e. the
+                           // previous behaviour.
+  bool   noRomOnDisk;      // server says this game has a NAME but NO rom file on
+                           // disk (SAM name-only content: Amiga demos, WHDLoad,
+                           // some MGL). The name search may still run, but if it
+                           // misses the firmware shows a stable NOT-IN-DATABASE
+                           // card instead of the DOWNLOADING->failed flash.
+                           // Added last so existing positional initializers
+                           // (which stop before ssRomnom) stay valid.
 };
 
 // GAME INFO panel — metadata for the currently loaded game, extracted from

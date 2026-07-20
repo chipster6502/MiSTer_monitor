@@ -66,6 +66,21 @@ String _default_core_image_str  = "/cores/menu.jpg";
 // reason on screen once a download attempt has given up.
 int g_lastSSHttpCode = 0;
 
+// The romnom to send to ScreenScraper for this ROM.
+//
+// The server may override the on-disk filename with a romset id it confirmed
+// against the core's own data files (NeoGeo: 'Metal Slug 2 (mslug2).neo' ->
+// 'mslug2.zip'). ScreenScraper indexes NeoGeo as MAME romsets, so the romset
+// matches exactly, whereas the filename only matches through SS's internal
+// fuzzy fallback — which misses whenever the pack's title differs from SS's.
+//
+// An empty override means the server could not confirm a romset, and the
+// filename is used exactly as before: unknown systems, older servers and
+// unconfirmed names all keep today's behaviour.
+static inline String ssRomnomFor(const RomDetails& d) {
+  return d.ssRomnom.length() > 0 ? d.ssRomnom : d.filename;
+}
+
 // Media type search order — updated from appConfig in setup()
 // Defaults match AppConfig struct defaults (overridden by config.ini).
 String GAME_MEDIA_ORDER_STR              = "box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot";
@@ -139,6 +154,13 @@ bool coreChanged = false;
 bool gameChanged = false;
 bool showingCoreImage = false;
 unsigned long coreImageStartTime = 0;  // Time when image was shown
+// Raw CORENAME for the core on screen, as the server read it from
+// /tmp/CORENAME ('AO486', 'neogeo', ...). Supplied by /status/snapshot on
+// servers that know the field; empty otherwise. The ScreenScraper mapping
+// keys on this FIRST (names.txt can relabel the friendly name at will, and a
+// label must never cost a core its artwork); display and SD image paths stay
+// on the friendly name, which is what every existing SD cache is foldered by.
+String currentCoreRaw = "";
 unsigned long lastCoreCheck = 0;  // To check core changes while showing image
 String coreDownloadFailedFor = "";  // Core for which ScreenScraper download failed — prevents screensaver retry loop
 
@@ -183,6 +205,54 @@ bool raPopupDrawn = false;
 
 ScrollTextState raUnlockScroll = {"", 0, 0, 0, 0, false, false, false};
 
+// --- Instant-unlock tier: /event micro-poll ---------------------------------
+// The server's odelot-log tailer bumps event_counter <1 s after a real unlock
+// (fork with debug=1 in retroachievements.cfg); this 5 s micro-poll of a
+// ~60-byte payload turns that into a popup without waiting for the 30/60 s
+// full fetch. Without the log the server's OSD trigger still shortens the
+// cloud poll, so the tier is useful in every configuration.
+unsigned long lastRAEventPoll = 0;
+const unsigned long RA_EVENT_POLL_INTERVAL = 5000;
+
+String raLastUnlockDesc = "";   // last_unlock_description (log tailer fills it)
+int    raGameId = 0;            // resolved RA game id — subpage reset key
+
+// --- Trophy-list subpages (page 6) -------------------------------------------
+// raSubPage 0 = progress panel; 1..N = paginated list, cycled by tapping the
+// content band (same gesture as the GAME INFO 1/2 toggle). The row buffer
+// holds exactly one server page, fetched on demand from the touch handler.
+const int RA_LIST_PER_PAGE = 4;
+
+// Trophy-row touch calibration — TOUCH space, not draw space. The CYD
+// resistive panel's Y does not read 1:1 with the display, so the row hit
+// bands cannot reuse the draw positions (y = 70 + i*22). Row i is centred at
+// RA_ROW_TOUCH_TOP + i*RA_ROW_TOUCH_PITCH in raw touch Y. Calibrate from the
+// serial line the page-6 handler prints on every tap: on a FULL (4-row) list
+// page, tap the centre of the top row and the centre of the bottom row, then
+//   RA_ROW_TOUCH_TOP   = <top reading>
+//   RA_ROW_TOUCH_PITCH = (<bottom reading> - <top reading>) / 3
+int RA_ROW_TOUCH_TOP   = 74;   // raw touch Y at centre of the FIRST row
+int RA_ROW_TOUCH_PITCH = 40;   // raw touch Y between consecutive row centres
+int  raSubPage   = 0;
+int  raListPage  = 0;                    // which page the buffer holds
+int  raListPages = 0;                    // total pages reported by the server
+int  raListCount = 0;                    // rows currently buffered
+bool raListValid = false;
+String raListTitle[RA_LIST_PER_PAGE];
+String raListDesc[RA_LIST_PER_PAGE];
+int    raListPoints[RA_LIST_PER_PAGE];
+bool   raListUnlocked[RA_LIST_PER_PAGE];
+bool   raListHardcore[RA_LIST_PER_PAGE];
+
+// Description overlay: tapping a list row opens a full detail card for that
+// achievement; tapping again closes it back to the list.
+bool raDetailShown = false;
+
+// Armed by getRAStatus() when a game WITH achievements is newly matched;
+// consumed by loop(), which shows the footer banner once per game.
+bool raBannerPending = false;
+int  raDetailRow   = 0;                  // index into the raList* buffers
+
 // Screensaver variables
 unsigned long lastButtonPress = 0;
 const unsigned long SCREENSAVER_TIMEOUT = 30000;  // 30 seconds of inactivity
@@ -195,6 +265,12 @@ const unsigned long SCREENSAVER_TIMEOUT = 30000;  // 30 seconds of inactivity
 int  gameInfoSubPage = 0;                 // 0 = fields (1/2), 1 = synopsis (2/2)
 unsigned long gameInfoSubPageChange = 0;  // last subpage change (auto-flip timer)
 bool gameInfoForceExit = false;           // synopsis finished -> leave the panel
+// True while page 5 is being shown as a rotation slide rather than opened by
+// the user. It changes the panel's lifecycle, not its looks: no auto-advance to
+// the synopsis, and the hand-back goes to the core image instead of the generic
+// return-to-image path. Cleared the moment the user touches the panel, which
+// promotes the slide into an ordinary on-demand panel.
+bool gameInfoFromRotation = false;
 const unsigned long GAMEINFO_SCREEN_TIMEOUT  = 60000;   // 1 min fallback
 const unsigned long GAMEINFO_SUBPAGE_TIMEOUT = 30000;   // 30 s on the fields page
 
@@ -442,6 +518,7 @@ void connectWithAnimation();
 void buttonPressFeedback(TouchButton* btn, void (*soundFn)());
 void testMiSTerConnectivity(bool discovered);
 void showReconnectBanner();
+void showRAReadyBanner();
 void updateMiSTerData();
 void getCurrentCore();
 void getCurrentGame();
@@ -501,6 +578,7 @@ bool extractBoolValue(String json, String key);
 
 // ScreenScraper helper functions
 String getScreenScraperSystemId(String coreName);
+String mapCoreToScreenScraperId(String coreName);
 String getExactFileName(String gameName);
 String sanitizeCoreFilename(String name);
 String getSavePath(String exactFileName, String searchCore);
@@ -525,6 +603,7 @@ String getMetaPathFromImagePath(const String &imagePath);
 bool saveGameMeta(const String &metaPath, const GameMeta &m);
 bool loadGameMeta(const String &metaPath, GameMeta &m);
 String jsonUnescapeAndFold(const String &in);
+String foldForDisplay(const String &in);   // UTF-8 -> ASCII fold for the GLCD font (core/game display)
 bool fetchGameMetadataJSON(String gameId, String coreName, RomDetails romDetails, GameMeta &out);
 int  wrapTextToLines(const String &text, int maxChars, String *out, int maxOut);
 void drawWrappedText(int x, int y, int w, int lineH, int maxLines, const String &text);
@@ -533,11 +612,21 @@ void drawGameInfoIcon(bool pressed = false);
 
 // --- RETROACHIEVEMENTS panel (page 6) ---
 void getRAStatus();
+void pollRAEvent();
+void serviceRAPopup();
+void pollRA();
+void getRAList(int listPage);
+void displayRAList();
+void displayRADetail();
+void drawRAPageIndicator(bool pressed);
+int  drawWrappedText(const String& text, int x, int y, int charsPerLine,
+                     int maxLines, uint16_t color);
 void displayRetroAchievements();
 void drawRAMessage(const String &title, const String &subtitle, uint16_t color);
 void showAchievementUnlock();
 bool gameInfoAvailable();
 void drawGameInfoSynopsis();
+bool gameInfoRotationReady();
 bool gameInfoSynNeedsScroll();
 void resetGameInfoSynScroll();
 void tickGameInfoSynScroll();
@@ -578,6 +667,12 @@ int  g_mediaAttemptCount     = 0;      // attempts in the current media run (dri
 bool lastGameSearchExhausted = false;  // true when ScreenScraper search with valid
                                         // CRC completed without finding an image
                                         // (system in DB, but game not).
+bool g_currentGameIsContainer = false; // rom details said container_image: the
+                                        // loaded file is a whole-environment or
+                                        // compilation image (boot.vhd, msdos622.vhd),
+                                        // not a game. Present core-only: footers
+                                        // name the core, and no NOT-IN-SS banner —
+                                        // nothing is "missing" for a non-game.
 bool scanInProgress          = false;  // true while SCAN button operation is running
                                         // (used to lock further SCAN presses and to
                                         //  show "SCANNING" label on the button)
@@ -823,7 +918,7 @@ void showDownloadingScreen(String coreName, String gameName) {
 
   Lcd.setTextColor(THEME_YELLOW);
   Lcd.setCursor(20, 80);
-  Lcd.printf("CORE: %s", coreName.c_str());
+  Lcd.printf("CORE: %s", foldForDisplay(coreName).c_str());
 
   Lcd.setCursor(20, 95);
   String displayGame = gameName.length() > 25 ? gameName.substring(0, 25) + "..." : gameName;
@@ -978,6 +1073,42 @@ bool gameInfoAvailable() {
 }
 
 // -----------------------------------------------------------------------------
+// gameInfoRotationReady() — may the rotation show a GAME INFO slide right now?
+//
+// Deliberately stricter than gameInfoAvailable(), and the difference is the
+// whole point. That function ends on an optimistic `return true` for the
+// "never tried" state, which is correct for a button: a human tapped it, the
+// lazy fetch settles the question, and a wrong guess costs one tap to leave.
+// An unattended attract loop has no such escape — an optimistic guess here
+// would park "NO METADATA AVAILABLE" on screen for 30 s every cycle. So this
+// answers yes only when the metadata is already in hand, or provably sits on
+// the SD card next to the artwork.
+//
+// The SD probe is memoised per game: the rotation tick must never turn into a
+// directory scan. Kept separate from gameInfoAvailable()'s own probe on
+// purpose — that one was just fixed and field-validated, and folding the two
+// together would put a working function back in play for no functional gain.
+// -----------------------------------------------------------------------------
+bool gameInfoRotationReady() {
+  if (!appConfig.infoInRotation) return false;
+  if (currentGame.length() == 0)  return false;
+
+  if (currentMeta.loaded && currentMeta.forGame == currentGame) return true;
+
+  static String rotProbeFor = "\x01";   // sentinel: never a real game name
+  static bool   rotProbeHit = false;
+  if (rotProbeFor != currentGame) {
+    rotProbeFor = currentGame;
+    rotProbeHit = false;
+    String imgPath;
+    if (sdCardAvailable && findGameImageExact(currentCore, currentGame, imgPath)) {
+      rotProbeHit = SD.exists(getMetaPathFromImagePath(imgPath));
+    }
+  }
+  return rotProbeHit;
+}
+
+// -----------------------------------------------------------------------------
 // drawGameInfoIcon() — "GAME INFO" button in the RIGHT THIRD of the footer band
 // of a fullscreen game/core image. Tapping anywhere in that third opens the
 // GAME INFO panel (see the image-mode touch handler).
@@ -1009,7 +1140,7 @@ void drawCoreImageFooter() {
   Lcd.fillRect(0, 200, 320, 40, THEME_BLACK);
   Lcd.drawFastHLine(0, 200, 320, THEME_GREEN);
 
-  bool hasGame = (currentGame.length() > 0);
+  bool hasGame = (currentGame.length() > 0) && !g_currentGameIsContainer;
   Lcd.setTextWrap(false);
 
   if (hasGame) {
@@ -1021,9 +1152,10 @@ void drawCoreImageFooter() {
 
     const bool showInfoButton = gameInfoAvailable();
     const int visibleChars = showInfoButton ? 26 : 38;   // button at x>=213
-    if (imageFooterScroll.fullText != currentGame ||
+    String gameFooterSeed = foldForDisplay(currentGame);   // display-only fold
+    if (imageFooterScroll.fullText != gameFooterSeed ||
         imageFooterScroll.maxChars != visibleChars) {
-      initScrollText(&imageFooterScroll, currentGame, visibleChars);
+      initScrollText(&imageFooterScroll, gameFooterSeed, visibleChars);
     }
     String displayGame = getScrolledText(&imageFooterScroll);
     while ((int)displayGame.length() < imageFooterScroll.maxChars) {
@@ -1083,9 +1215,9 @@ void drawFooter() {
     const int FOOTER_MID_X = 78;
     const int FOOTER_VIS   = 16;   // visible chars: 16 × 6 = 96 px
 
-    bool   hasGame = (currentGame.length() > 0);
+    bool   hasGame = (currentGame.length() > 0) && !g_currentGameIsContainer;
     String label  = hasGame ? "G:" : "C:";
-    String source = hasGame ? currentGame : currentCore;
+    String source = foldForDisplay(hasGame ? currentGame : currentCore);   // display-only fold
 
     if (gameFooterScroll.fullText != source ||
         gameFooterScroll.maxChars != FOOTER_VIS) {
@@ -1173,8 +1305,13 @@ static bool _parseRomDetailsJson(String& response, RomDetails& details, const ch
 
   details.searchName     = extractStringValue(response, "search_name");
   details.nameSearchHint = extractBoolValue(response, "name_search_hint");
-  Serial.printf("  %sSearch name: '%s' (hint: %s)\n", prefix,
-                details.searchName.c_str(), details.nameSearchHint ? "YES" : "NO");
+  details.noHash         = extractBoolValue(response, "no_hash");
+  details.containerImage = extractBoolValue(response, "container_image");
+  details.noRomOnDisk    = extractBoolValue(response, "no_rom_on_disk");
+  Serial.printf("  %sSearch name: '%s' (hint: %s, no_hash: %s, container: %s, no_rom: %s)\n", prefix,
+                details.searchName.c_str(), details.nameSearchHint ? "YES" : "NO",
+                details.noHash ? "YES" : "NO", details.containerImage ? "YES" : "NO",
+                details.noRomOnDisk ? "YES" : "NO");
 
   details.error          = extractStringValue(response, "error");
   if (details.error.length() > 0) {
@@ -1183,6 +1320,12 @@ static bool _parseRomDetailsJson(String& response, RomDetails& details, const ch
 
   details.path           = extractStringValue(response, "path");
   Serial.printf("  %sPath: '%s'\n", prefix, details.path.c_str());
+
+  details.ssRomnom       = extractStringValue(response, "ss_romnom");
+  if (details.ssRomnom.length() > 0) {
+    Serial.printf("  %sScreenScraper romnom override: '%s'\n", prefix,
+                  details.ssRomnom.c_str());
+  }
 
   details.timestamp      = extractIntValue(response, "timestamp");
 
@@ -1204,7 +1347,7 @@ static bool _parseRomDetailsJson(String& response, RomDetails& details, const ch
 }
 
 RomDetails getCurrentRomDetails() {
-  RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0, "", false};
+  RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0, "", false, false, false};
 
   Serial.printf("=== GETTING ROM DETAILS ===\n");
   Serial.printf("Free heap before request: %d bytes\n", ESP.getFreeHeap());
@@ -1272,11 +1415,16 @@ RomDetails getCurrentRomDetails() {
         break;
       }
 
-      // Definitive negative: no ROM, or file can't be hashed. Stop polling.
-      if (!details.available || details.fileTooLarge) {
-        Serial.printf("ROM details: definitive negative (available=%s, tooLarge=%s) - stopping\n",
+      // Definitive negative: no ROM, file can't be hashed, or the server has
+      // determined the CRC can NEVER arrive (no_hash: unindexable, mutable
+      // container like .vhd). Stop polling — for no_hash this saves the full
+      // 4x20s retry budget on every 0MHz load, and the name-search fallback
+      // (or the container gate) takes over immediately.
+      if (!details.available || details.fileTooLarge || details.noHash) {
+        Serial.printf("ROM details: definitive negative (available=%s, tooLarge=%s, noHash=%s) - stopping\n",
                       details.available ? "YES" : "NO",
-                      details.fileTooLarge ? "YES" : "NO");
+                      details.fileTooLarge ? "YES" : "NO",
+                      details.noHash ? "YES" : "NO");
         break;
       }
 
@@ -1309,7 +1457,7 @@ RomDetails getCurrentRomDetails() {
 RomDetails getCurrentRomDetailsForced() {
   // Calls /status/rom/details?force=1 — the server bypasses timestamp checks
   // and reads CURRENTPATH/ACTIVEGAME directly to compute CRC.
-  RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0, "", false};
+  RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0, "", false, false, false};
 
   Serial.printf("=== FORCED ROM DETAILS (bypass timestamp) ===\n");
   Serial.printf("Free heap before request: %d bytes\n", ESP.getFreeHeap());
@@ -1353,27 +1501,15 @@ RomDetails getCurrentRomDetailsForced() {
       Serial.printf("Forced response (%d bytes): %s\n", response.length(),
                     response.substring(0, min(200, (int)response.length())).c_str());
 
-      if (response.length() > 5000) {
-        Serial.printf("Large forced ROM response (%d bytes), truncating\n", response.length());
-        response = response.substring(0, 5000);
+      // Reuse the shared parser instead of a second inline copy. The duplicate
+      // that lived here silently skipped search_name / name_search_hint /
+      // no_hash / container_image, so the noHash break below could never fire
+      // and SCAN burned the full 5x20s budget on every container.
+      if (!_parseRomDetailsJson(response, details, "Forced ")) {
+        http.end();
+        Serial.printf("Free heap after forced ROM details: %d bytes\n", ESP.getFreeHeap());
+        return details;
       }
-
-      details.filename      = extractStringValue(response, "filename");
-      details.crc32         = extractStringValue(response, "crc32");
-      details.md5           = extractStringValue(response, "md5");
-      details.sha1          = extractStringValue(response, "sha1");
-      details.filesize      = extractIntValue(response,  "size");
-      details.available     = extractBoolValue(response, "available");
-      details.hashCalculated= extractBoolValue(response, "hash_calculated");
-      details.fileTooLarge  = extractBoolValue(response, "file_too_large");
-      details.error         = extractStringValue(response, "error");
-      details.path          = extractStringValue(response, "path");
-      details.timestamp     = extractIntValue(response,  "timestamp");
-
-      Serial.printf("Forced CRC32: '%s' | available=%s | hashOK=%s\n",
-                    details.crc32.c_str(),
-                    details.available ? "YES" : "NO",
-                    details.hashCalculated ? "YES" : "NO");
 
       http.end();
 
@@ -1384,11 +1520,14 @@ RomDetails getCurrentRomDetailsForced() {
         break;
       }
 
-      // Definitive negative: no ROM, or file can't be hashed. Stop polling.
-      if (!details.available || details.fileTooLarge) {
-        Serial.printf("Forced ROM details: definitive negative (available=%s, tooLarge=%s) - stopping\n",
+      // Definitive negative: no ROM, file can't be hashed, or the server has
+      // determined the CRC can NEVER arrive (no_hash). Same rationale as the
+      // non-forced loop.
+      if (!details.available || details.fileTooLarge || details.noHash) {
+        Serial.printf("Forced ROM details: definitive negative (available=%s, tooLarge=%s, noHash=%s) - stopping\n",
                       details.available ? "YES" : "NO",
-                      details.fileTooLarge ? "YES" : "NO");
+                      details.fileTooLarge ? "YES" : "NO",
+                      details.noHash ? "YES" : "NO");
         break;
       }
 
@@ -1872,7 +2011,7 @@ void showCoreDownloadingScreen(String coreName) {
 
   Lcd.setTextColor(THEME_YELLOW);
   Lcd.setCursor(20, 80);
-  Lcd.printf("SYSTEM: %s", coreName.c_str());
+  Lcd.printf("SYSTEM: %s", foldForDisplay(coreName).c_str());
 
   Lcd.setCursor(20, 95);
   Lcd.setTextColor(THEME_GREEN);
@@ -2111,11 +2250,73 @@ void handleTouch() {
       playNextButtonSound();
       delay(200);
 
+      // The user touched a rotation slide: it stops being an attract slide and
+      // becomes a panel they are reading. Clearing the flag hands the lifecycle
+      // back to the on-demand rules — synopsis, auto-scroll, self-exit — which
+      // is what "touch for the synopsis" has to mean to be worth anything.
+      gameInfoFromRotation = false;
+
       gameInfoSubPage ^= 1;
       gameInfoSubPageChange = millis();
       resetGameInfoSynScroll();
       needsRedraw = true;
       lastButtonPress = millis();
+    }
+
+    // RETROACHIEVEMENTS subpage cycle (page 6). Same wide hit target and
+    // feedback contract as the GAME INFO toggle above, and for the same
+    // wasPressed()-sampling reason. Cycles: progress panel -> list page
+    // 1..N -> back to the panel. Only offered when a matched game actually
+    // reports trophies. The list fetch happens right here, before the
+    // redraw, so displayRAList() always finds a buffer that matches
+    // raSubPage (server answers from its progress cache: tens of ms).
+    else if (currentPage == 6 && raStatus.valid && raStatus.status == "ok" &&
+             raStatus.total > 0 && physicalY < 205) {
+      // TEMP CALIBRATION: raw touch Y of every page-6 content tap. Use these
+      // readings to set RA_ROW_TOUCH_TOP / RA_ROW_TOUCH_PITCH, then this line
+      // can be removed.
+      Serial.printf("  [RA touch] physicalY=%d physicalX=%d subPage=%d detail=%d\n",
+                    physicalY, physicalX, raSubPage, raDetailShown ? 1 : 0);
+
+      // Gesture split by touch Y only (X may be mirrored). Row bands live in
+      // TOUCH space: row i is centred at RA_ROW_TOUCH_TOP + i*RA_ROW_TOUCH_PITCH,
+      // so the first band starts at rowBandTop. Taps above that are the title/
+      // indicator area -> cycle subpages. Taps from rowBandTop down to the
+      // footer map to a row, clamped to the last one so there is no dead zone.
+      int rowBandTop = RA_ROW_TOUCH_TOP - RA_ROW_TOUCH_PITCH / 2;
+
+      if (raDetailShown) {
+        Serial.println("  -> RA detail close");
+        raDetailShown = false;
+        playNextButtonSound();
+        needsRedraw = true;
+        lastButtonPress = millis();
+      } else if (raSubPage > 0 && raListValid && raListPage == raSubPage &&
+                 raListCount > 0 && physicalY >= rowBandTop) {
+        int row = (physicalY - rowBandTop) / RA_ROW_TOUCH_PITCH;
+        if (row >= raListCount) row = raListCount - 1;   // clamp: no dead zone
+        if (row < 0) row = 0;
+        Serial.printf("  -> RA detail open (row %d)\n", row);
+        raDetailRow   = row;
+        raDetailShown = true;
+        playNextButtonSound();
+        needsRedraw = true;
+        lastButtonPress = millis();
+      } else {
+        Serial.println("  -> RA TROPHIES subpage cycle");
+        drawRAPageIndicator(true);      // white flash, page-5 feedback idiom
+        playNextButtonSound();
+        delay(200);
+
+        int listPages = (raStatus.total + RA_LIST_PER_PAGE - 1) / RA_LIST_PER_PAGE;
+        raSubPage = (raSubPage + 1) % (listPages + 1);
+        raDetailShown = false;
+        if (raSubPage > 0 && (!raListValid || raListPage != raSubPage)) {
+          getRAList(raSubPage);
+        }
+        needsRedraw = true;
+        lastButtonPress = millis();
+      }
     }
 
     // Check PREV button
@@ -2175,6 +2376,7 @@ void handleTouch() {
           lastSearchedGame        = "";
           lastGameImageOK         = false;
           lastGameSearchExhausted = false;
+          g_currentGameIsContainer = false; // SCAN re-decides from fresh rom details
 
           // Re-run the game image pipeline now and show the result, instead
           // of just flagging a HUD redraw.
@@ -2508,6 +2710,17 @@ void loop() {
   }
   wasConnected = connected;
 
+  // RetroAchievements ready banner: armed by getRAStatus() when a game with
+  // achievements is newly matched. Sits here, above the screensaver block, so
+  // it fires in every mode — including over the fullscreen artwork, which is
+  // exactly where a game normally starts.
+  if (raBannerPending) {
+    raBannerPending = false;
+    Serial.println("[RA] Game with achievements loaded — showing banner");
+    showRAReadyBanner();
+    needsRedraw = true;          // repaint normal UI over the banner next loop
+  }
+
   // SAFETY: Check for critical memory levels every 30 seconds
   static unsigned long lastMemoryCheck = 0;
   if (millis() - lastMemoryCheck > 30000) {
@@ -2542,6 +2755,7 @@ void loop() {
       coreImageStartTime = millis();
       return;
     }
+    Serial.printf("Image timeout - returning to interface (page %d)\n", currentPage);
     showingCoreImage = false;
     backgroundLoaded = false;
     needsRedraw = true;
@@ -2573,6 +2787,7 @@ void loop() {
       currentPage           = 5;
       gameInfoSubPage       = 0;
       gameInfoSubPageChange = millis();
+      gameInfoFromRotation  = false;   // opened on demand: full panel lifecycle
       resetGameInfoSynScroll();
       showingCoreImage      = false;
       backgroundLoaded      = false;
@@ -2608,6 +2823,7 @@ void loop() {
       // Check if game changed first (higher priority)
       if (oldGame != currentGame && sdCardAvailable) {
         lastRotationTime = 0; // Reset rotation timer for new game
+        gameInfoFromRotation = false;  // slide belonged to the previous game
         String coreNameLower = currentCore;
   coreNameLower.toLowerCase();
   bool isMameCore = (coreNameLower == "arcade");
@@ -2690,6 +2906,28 @@ void loop() {
       
       // Check for 30-second rotation
       if (millis() - lastRotationTime > 30000) { // 30 seconds
+        // GAME INFO slide ([gameinfo] info_in_rotation): an interstitial on the
+        // game -> core leg, so the cycle reads game -> info -> core. It sits
+        // second for a reason: every game change resets the rotation to the
+        // game image, so a third-place slide only surfaces 60 s in — longer
+        // than a SAM game often lives, which is exactly the audience that asked
+        // for this. showingGameImage stays true across the slide: we are still
+        // in the game half of the cycle, and the hand-back flips it to false so
+        // the core image follows.
+        if (showingGameImage && gameInfoRotationReady()) {
+          Serial.println("ROTATION: GAME INFO slide");
+          currentPage           = 5;
+          gameInfoSubPage       = 0;
+          gameInfoSubPageChange = millis();
+          gameInfoFromRotation  = true;
+          resetGameInfoSynScroll();
+          showingCoreImage      = false;   // page 5 is a monitor page
+          backgroundLoaded      = false;
+          needsRedraw           = true;
+          lastButtonPress       = millis();  // no screensaver while it shows
+          return;
+        }
+
         showingGameImage = !showingGameImage;
         lastRotationTime = millis();
         
@@ -2733,6 +2971,13 @@ void loop() {
       }
     }
 
+    // RetroAchievements live layer — MUST run while the fullscreen artwork is
+    // up. The return just below is the real screensaver early-exit (every
+    // iteration while showingCoreImage), so poll the unlock counter and
+    // paint/restore the popup over the image right here, before we bail out.
+    pollRA();
+    serviceRAPopup();
+
     // Don't continue with rest of loop while showing image
     return;
   }
@@ -2760,6 +3005,27 @@ void loop() {
     Serial.printf("Current game: '%s'\n", currentGame.c_str());
     Serial.printf("Connected: %s\n", connected ? "YES" : "NO");
     Serial.printf("Time since last button: %lu ms\n", millis() - lastButtonPress);
+
+    // Any panel exit funnels through here (synopsis forceExit and the 1-min
+    // fallback both do): release the page-5 residency so a later silent
+    // image-timeout exit lands on the monitor page instead of resurrecting
+    // the panel with expired lifecycle timers. The rotation clock kept
+    // running while the panel was read, so restart it too — otherwise an
+    // overdue timer fires the GAME INFO slide within one iteration of the
+    // image below being drawn (image "blinks", panel comes straight back).
+    // The restamp must happen HERE, before the fresh-data check and the
+    // draw: the machine relies on lastRotationTime maturing BEFORE
+    // coreImageStartTime (the image-timeout check runs earlier in the loop
+    // than the rotation check, so on a tie the timeout would always win and
+    // the rotation would starve on a perpetual game image). The seconds the
+    // HTTP check and the draw take are exactly that safety margin.
+    if (currentPage == 5) {
+      currentPage      = 0;
+      gameInfoSubPage  = 0;
+      resetGameInfoSynScroll();   // safe: gameInfoForceExit already consumed above
+      lastRotationTime = millis();   // full 30 s slot for the image below
+      showingGameImage = true;       // counted as the game half of the cycle
+    }
     
     // Force fresh data check before screensaver
     Serial.println("Forcing fresh data check before screensaver...");
@@ -2819,7 +3085,13 @@ void loop() {
   
   // Navigation with debounce
   handleTouch();
-  
+
+  // === RETROACHIEVEMENTS: counter poll (page path) ==========================
+  // The screensaver path polls and services the popup inside its own block
+  // above (before that block's return). Here we cover the page path; the
+  // page-path popup is serviced after the page render, further down.
+  pollRA();
+
   if (showingCoreImage) return;
 
   static unsigned long lastStateLog = 0;
@@ -2935,20 +3207,6 @@ if (oldGame != currentGame && sdCardAvailable) {
     lastUpdate = millis();
   }
 
-  // === RETROACHIEVEMENTS: periodic status fetch ==============================
-  // 30 s while the RA page is visible, 60 s otherwise (keeps the unlock
-  // counter watched from any page or from fullscreen image mode). Single-shot
-  // GET — the server answers from its own caches, so no retry loop is needed.
-  {
-    unsigned long raInterval = (currentPage == 6 && !showingCoreImage)
-                               ? RA_FETCH_INTERVAL_ACTIVE
-                               : RA_FETCH_INTERVAL_IDLE;
-    if (connected && millis() - lastRAFetch > raInterval) {
-      getRAStatus();
-      lastRAFetch = millis();
-      if (currentPage == 6 && !showingCoreImage) needsRedraw = true;
-    }
-  }
   
   // === GAME INFO subpage handling ===========================================
   // Lifecycle of the panel when left alone:
@@ -2965,6 +3223,33 @@ if (oldGame != currentGame && sdCardAvailable) {
         gameInfoSubPage = 0;
         gameInfoSubPageChange = millis();
         resetGameInfoSynScroll();
+      } else if (gameInfoFromRotation && gameInfoSubPage == 0) {
+        // Rotation slide: 1/2 only, for the same 30 s the other slides get,
+        // then hand back to the core image. Checked before the on-demand
+        // lifecycle below and without requiring a synopsis: a slide must leave
+        // on the beat whether or not there is a second subpage to flip to,
+        // rather than fall through to the 1-min fallback and stall the cycle.
+        // Touching the panel clears gameInfoFromRotation, so this branch stops
+        // applying the moment the user takes over.
+        if (millis() - gameInfoSubPageChange > GAMEINFO_SUBPAGE_TIMEOUT) {
+          Serial.println("ROTATION: GAME INFO slide done - back to core image");
+          gameInfoFromRotation = false;
+          currentPage          = 0;       // release page-5 residency: a silent
+                                          // image-timeout exit must land on the
+                                          // monitor page, not on this panel
+          showingGameImage     = false;   // the core image is next in the cycle
+          lastRotationTime     = millis();
+          showCoreImageScreenWithAutoDownload(currentCore);
+          showingCoreImage     = true;
+          coreImageStartTime   = millis();
+          lastButtonPress      = millis();
+          // giLastPage stays 5 for the whole image phase (its maintenance
+          // line sits below the image-mode early return, so image iterations
+          // never reach it); the clean-re-entry guard cannot be relied on
+          // after this exit — the currentPage reset above is what actually
+          // prevents an unintended panel resurrection.
+          return;
+        }
       } else if (currentMeta.loaded && currentMeta.synopsis.length() > 0) {
         if (gameInfoSubPage == 0) {
           if (millis() - gameInfoSubPageChange > GAMEINFO_SUBPAGE_TIMEOUT) {
@@ -2992,6 +3277,18 @@ if (oldGame != currentGame && sdCardAvailable) {
     }
     // Leaving the panel (or any page) for image mode forces a clean re-entry.
     giLastPage = showingCoreImage ? -1 : currentPage;
+  }
+
+  // === RETROACHIEVEMENTS subpage lifecycle ===================================
+  // Re-enter page 6 on the progress panel; the trophy-list buffer itself is
+  // per-game (getRAStatus() resets it when game_id changes).
+  {
+    static int raLastPageSeen = -1;
+    if (currentPage == 6 && !showingCoreImage && raLastPageSeen != 6) {
+      raSubPage = 0;
+      raDetailShown = false;
+    }
+    raLastPageSeen = showingCoreImage ? -1 : currentPage;
   }
 
   // Only redraw when necessary
@@ -3090,38 +3387,15 @@ if (oldGame != currentGame && sdCardAvailable) {
     lastGameInfoRowUpdate = millis();
   }
   
-  // === RETROACHIEVEMENTS: unlock popup lifecycle =============================
-  // Armed by getRAStatus() when event_counter increases. Drawn once (overlay,
-  // no full-screen wipe) and held for 5 s; then the underlying screen is
-  // restored — pages via needsRedraw, fullscreen images via the same idiom the
-  // 30 s rotation uses.
-  if (raPopupUntil > 0) {
-    if (millis() < raPopupUntil) {
-      if (!raPopupDrawn) {
-        showAchievementUnlock();
-        raPopupDrawn = true;
-        lastRotationTime = millis();   // hold image rotation while popup is up
-      }
-    } else {
-      raPopupUntil = 0;
-      raPopupDrawn = false;
-      if (showingCoreImage) {
-        if (showingGameImage && currentGame.length() > 0) {
-          showGameImageScreen(currentCore, currentGame);
-        } else {
-          showCoreImageScreenWithAutoDownload(currentCore);
-        }
-        coreImageStartTime = millis();
-      } else {
-        needsRedraw = true;
-      }
-    }
-  }
+  // === RETROACHIEVEMENTS: unlock popup lifecycle (PAGE path) ================
+  // Runs after the page has rendered so the popup lands on top. The image
+  // path services the same function above the screensaver early-return.
+  serviceRAPopup();
 
   // === RETROACHIEVEMENTS: last-unlock title scroll (page 6) ==================
   static unsigned long lastRAScrollUpdate = 0;
-  if (currentPage == 6 && !showingCoreImage && raStatus.valid &&
-      raStatus.status == "ok" && raUnlockScroll.needsScroll &&
+  if (currentPage == 6 && !showingCoreImage && raSubPage == 0 &&
+      raStatus.valid && raStatus.status == "ok" && raUnlockScroll.needsScroll &&
       millis() - lastRAScrollUpdate > 100) {
     String raShown = getScrolledText(&raUnlockScroll);
     while ((int)raShown.length() < raUnlockScroll.maxChars) raShown += ' ';
@@ -3148,7 +3422,9 @@ if (oldGame != currentGame && sdCardAvailable) {
   // each iteration longer, and at a 100 ms cadence a quick tap on the subpage
   // indicator can fall entirely between two touch samples. The refreshers keep
   // their own 100 ms timers, so this only raises the touch sampling rate.
-  delay(needsRedraw || showingCoreImage || currentPage == 5 ? 10 : 100);
+  // Page 6 gets the same treatment now that its subpage indicator is tappable.
+  delay(needsRedraw || showingCoreImage ||
+        currentPage == 5 || currentPage == 6 ? 10 : 100);
 }
 
 void initSDCard() {
@@ -4308,6 +4584,37 @@ void showReconnectBanner() {
   else                          drawCoreImageFooter();
 }
 
+void showRAReadyBanner() {
+  // Same footer band (Y=200..240) and hold-then-restore shape as
+  // showReconnectBanner(), so the image footer restore below fully covers it.
+  // "READY FOR RETROACHIEVEMENTS!" is 28 chars = 336 px at size 2, wider than
+  // the 320 px panel, so it goes on two centred lines: 2 x 16 px fits the
+  // 40 px band with room to breathe (204..220 and 222..238).
+  const char* l1 = "READY FOR";
+  const char* l2 = "RETROACHIEVEMENTS!";
+  int w1 = (int)strlen(l1) * 12;             // 12 px/char at size 2
+  int w2 = (int)strlen(l2) * 12;
+
+  Lcd.fillRect(0, 200, 320, 40, THEME_YELLOW);
+  Lcd.setTextWrap(false);
+  Lcd.setTextSize(2);
+  Lcd.setTextColor(THEME_BLUE, THEME_YELLOW);
+  Lcd.setCursor((320 - w1) / 2, 204);
+  Lcd.print(l1);
+  Lcd.setCursor((320 - w2) / 2, 222);
+  Lcd.print(l2);
+
+  delay(3400);                               // hold long enough to read
+
+  // Restore the image footer over the banner. In page mode the caller's
+  // needsRedraw repaints the real footer (PRV/SCAN/NXT) instead, so only the
+  // image path is restored here.
+  if (showingCoreImage) {
+    if (currentGame.length() > 0) addGameImageFooter(currentGame);
+    else                          drawCoreImageFooter();
+  }
+}
+
 void updateMiSTerData() {
   Serial.println("=== Updating MiSTer data ===");
   if (!getStateSnapshot()) {   // atomic path (server >= 2.6)
@@ -4347,8 +4654,12 @@ bool getStateSnapshot() {
 
   String newCore = extractStringValue(response, "core");
   String newGame = extractStringValue(response, "game");
+  // Absent on older servers -> empty -> the mapping falls back to the
+  // friendly name, i.e. exactly today's behavior.
+  String newCoreRaw = extractStringValue(response, "core_raw");
   newCore.trim();
   newGame.trim();
+  newCoreRaw.trim();
 
   if (newCore.length() == 0) {
     // /status/snapshot always carries "core"; an empty value means a
@@ -4361,8 +4672,10 @@ bool getStateSnapshot() {
   bool gameDidChange = false;
 
   // ---- CORE side effects (ported from getCurrentCore's 200-handler) ----
-  previousCore = currentCore;
-  currentCore  = newCore;
+  previousCore   = currentCore;
+  currentCore    = newCore;
+  currentCoreRaw = newCoreRaw;   // always assigned: empty overwrite is the
+                                 // fallback signal, stale carry-over is a bug
 
   if (currentCore == "Menu" || currentCore == "MENU") {
     Serial.println("Server reports Menu state - checking debug endpoint");
@@ -4437,6 +4750,10 @@ void getCurrentCore() {
 
     previousCore = currentCore;
     currentCore = response;
+    // Legacy endpoint: no raw travels with it. Clear rather than carry — a
+    // raw left over from a previous snapshot belongs to a previous core, and
+    // the raw-first mapping must not key this one with it.
+    currentCoreRaw = "";
     currentCore.trim();
     currentCore.replace("\n", "");
     currentCore.replace("\r", "");
@@ -4600,6 +4917,7 @@ void startCrcRecurrentForGame(String gameName, String coreName) {
   lastCrcRecurrentTime     = 0;     // Force immediate check
   crcRecurrentAttempts     = 0;
   lastGameSearchExhausted  = false;
+  g_currentGameIsContainer = false; // re-decided from rom details on next download
   
   Serial.printf("CRC recurrent started: '%s' core '%s'\n", gameName.c_str(), coreName.c_str());
   Serial.printf("DEBUG: crcRecurrentActive=%s\n", crcRecurrentActive ? "true" : "false");
@@ -5024,6 +5342,24 @@ void getRAStatus() {
   raStatus.lastUnlockTitle    = extractStringValue(response, "last_unlock_title");
   raStatus.lastUnlockPoints   = extractIntValue(response, "last_unlock_points");
   raStatus.lastUnlockHardcore = extractBoolValue(response, "last_unlock_hardcore");
+  raLastUnlockDesc            = extractStringValue(response, "last_unlock_description");
+  if (raLastUnlockDesc == "N/A") raLastUnlockDesc = "";
+
+  // New game resolved: the trophy-list buffer belongs to the old one.
+  int gid = extractIntValue(response, "game_id");
+  if (gid != raGameId) {
+    // Announce only a real, playable RA set: a resolved game id whose status
+    // is ok and that actually ships achievements. gid 0 (unloaded, or not
+    // recognized) and 0-achievement matches stay silent. Both fields are
+    // parsed above, so they already describe THIS response.
+    if (gid != 0 && raStatus.status == "ok" && raStatus.total > 0) {
+      raBannerPending = true;
+    }
+    raGameId    = gid;
+    raSubPage   = 0;
+    raListValid = false;
+    raDetailShown = false;
+  }
   raStatus.valid = true;
 
   response = "";
@@ -5130,10 +5466,14 @@ void displayRetroAchievements() {
   Lcd.setTextSize(2);
   Lcd.setCursor(10, 44);
   {
+    // Leave room for the tappable subpage indicator when a trophy list
+    // exists (17 chars end at x=214; the indicator right-aligns to x=310).
+    unsigned int cap = (raStatus.total > 0) ? 17 : 25;
     String t = raStatus.gameTitle;
-    if (t.length() > 25) t = t.substring(0, 25);
+    if (t.length() > cap) t = t.substring(0, cap);
     Lcd.print(t);
   }
+  drawRAPageIndicator(false);
 
   // Progress bar: unlocked/total. Guard divide-by-zero.
   float pct = (raStatus.total > 0)
@@ -5192,7 +5532,14 @@ void displayRetroAchievements() {
 // framed band without a full-screen wipe, so it sits on top of whatever is up
 // (page or fullscreen image). loop() holds it 5 s and restores underneath.
 void showAchievementUnlock() {
-  const int bx = 20, by = 80, bw = 280, bh = 80;
+  // Card grew from 96 to 132 px tall so the title and the FULL description
+  // fit word-wrapped instead of being chopped at one 42-char line. Content
+  // width bw-24 = 256 px = 42 chars at size 1, and 3 wrapped lines hold 126
+  // chars >= the server's 120-char description cap, so nothing is lost.
+  // Card spans y 52..184, clear of the footer band (y >= 205).
+  const int bx = 20, by = 52, bw = 280, bh = 132;
+  const int tx = bx + 12;
+  const int CHARS = 42;
 
   Lcd.fillRect(bx, by, bw, bh, THEME_BLACK);
   Lcd.drawRect(bx, by, bw, bh, THEME_YELLOW);
@@ -5201,24 +5548,326 @@ void showAchievementUnlock() {
   Lcd.setTextWrap(false);
   Lcd.setTextColor(THEME_YELLOW);
   Lcd.setTextSize(2);
-  Lcd.setCursor(bx + 12, by + 10);
+  Lcd.setCursor(tx, by + 10);
   Lcd.print("ACHIEVEMENT!");
 
-  Lcd.setTextColor(THEME_WHITE);
-  Lcd.setTextSize(1);
-  Lcd.setCursor(bx + 12, by + 36);
-  {
-    String t = raStatus.lastUnlockTitle;
-    if (t.length() > 42) t = t.substring(0, 42);   // 42*6=252 <= bw-24
-    Lcd.print(t);
+  // Title: up to 2 wrapped lines.
+  int y = drawWrappedText(raStatus.lastUnlockTitle, tx, by + 34, CHARS, 2,
+                          THEME_WHITE);
+
+  // Description — the server's log tailer fills it instantly (title AND
+  // description travel in the fork's log line); cloud-poll-only unlocks
+  // leave it empty and the block is simply skipped.
+  if (raLastUnlockDesc.length() > 0) {
+    y = drawWrappedText(raLastUnlockDesc, tx, y + 3, CHARS, 3, THEME_CYAN);
   }
 
+  // A log-fired popup reaches the screen before the cloud confirms the
+  // points, so 0 means "pending", not "worthless". Pinned to the bottom of
+  // the card so it never collides with a short or a full-length description.
+  Lcd.setTextWrap(false);
+  Lcd.setTextSize(1);
   Lcd.setTextColor(raStatus.lastUnlockHardcore ? THEME_RED : THEME_GREEN);
-  Lcd.setCursor(bx + 12, by + 54);
-  Lcd.printf("+%d pts%s", raStatus.lastUnlockPoints,
-             raStatus.lastUnlockHardcore ? "  [HARDCORE]" : "");
+  Lcd.setCursor(tx, by + bh - 16);
+  if (raStatus.lastUnlockPoints > 0) {
+    Lcd.printf("+%d pts%s", raStatus.lastUnlockPoints,
+               raStatus.lastUnlockHardcore ? "  [HARDCORE]" : "");
+  } else {
+    Lcd.print(raStatus.lastUnlockHardcore ? "UNLOCKED  [HARDCORE]" : "UNLOCKED");
+  }
 
   playNextButtonSound();
+}
+
+// Micro-poll of /status/retroachievements/event (~60 B payload). This is the
+// latency tier between the server's log tailer (<1 s) and the full 30/60 s
+// status fetch: when the monotonic counter moves, the full fetch runs at
+// once and arms the popup. Baseline absorption stays in getRAStatus(), so a
+// reboot never pops a stale unlock through this path either.
+// Schedules the two RA polls (full status fetch + 5 s event micro-poll). No
+// drawing, so it is safe to call from any mode; used by both the screensaver
+// path and the page path. getRAStatus()/pollRAEvent() arm the popup inside.
+void pollRA() {
+  unsigned long raInterval = (currentPage == 6 && !showingCoreImage)
+                             ? RA_FETCH_INTERVAL_ACTIVE
+                             : RA_FETCH_INTERVAL_IDLE;
+  if (connected && millis() - lastRAFetch > raInterval) {
+    getRAStatus();
+    lastRAFetch = millis();
+    if (currentPage == 6 && !showingCoreImage) needsRedraw = true;
+  }
+  if (connected && millis() - lastRAEventPoll > RA_EVENT_POLL_INTERVAL) {
+    pollRAEvent();
+    lastRAEventPoll = millis();
+  }
+}
+
+// Services the unlock popup lifecycle: paints the armed popup as an overlay
+// (no full-screen wipe) and, after 5 s, restores whatever was underneath — a
+// page via needsRedraw, the fullscreen artwork via the same idiom the 30 s
+// rotation uses. Called from TWO sites in loop(): the screensaver path ABOVE
+// the `if (showingCoreImage) return;` early-return (so it can paint over the
+// image) and the page path AFTER the page render. The raPopupDrawn guard
+// means each arming paints exactly once, and every loop reaches only one of
+// the two sites.
+void serviceRAPopup() {
+  if (raPopupUntil == 0) return;
+  if (millis() < raPopupUntil) {
+    if (!raPopupDrawn) {
+      showAchievementUnlock();
+      raPopupDrawn = true;
+      lastRotationTime = millis();   // hold image rotation while popup is up
+    }
+  } else {
+    raPopupUntil = 0;
+    raPopupDrawn = false;
+    if (showingCoreImage) {
+      if (showingGameImage && currentGame.length() > 0) {
+        showGameImageScreen(currentCore, currentGame);
+      } else {
+        showCoreImageScreenWithAutoDownload(currentCore);
+      }
+      coreImageStartTime = millis();
+    } else {
+      needsRedraw = true;
+    }
+  }
+}
+
+void pollRAEvent() {
+  if (ESP.getFreeHeap() < 40000) return;
+
+  String url = String("http://") + misterIP + ":8081/status/retroachievements/event";
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(3000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+
+  int code = http.GET();
+  if (code != 200) { http.end(); return; }
+  String response = http.getString();
+  http.end();
+  if (response.length() > 300) response = response.substring(0, 300);
+
+  int counter = extractIntValue(response, "event_counter");
+  if (raLastSeenEventCounter < 0 || counter > raLastSeenEventCounter) {
+    getRAStatus();               // owns popup arming + baseline absorption
+    lastRAFetch = millis();
+    if (currentPage == 6 && !showingCoreImage) needsRedraw = true;
+  }
+}
+
+// Fetch one page of the trophy list (flat a{i}_* fields, <= RA_LIST_PER_PAGE
+// rows). Called from the touch handler right before the redraw, so by the
+// time displayRAList() runs the buffer matches raSubPage. The server answers
+// from its progress cache: zero extra RA API calls, tens of ms locally.
+void getRAList(int listPage) {
+  raListValid = false;
+  if (ESP.getFreeHeap() < 45000) {
+    Serial.printf("[RA] Low memory (%d), skipping list fetch\n", ESP.getFreeHeap());
+    return;
+  }
+
+  String url = String("http://") + misterIP +
+               ":8081/status/retroachievements/achievements?page=" +
+               String(listPage) + "&per=" + String(RA_LIST_PER_PAGE);
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(5000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+
+  int code = http.GET();
+  if (code != 200) {
+    Serial.printf("[RA] list HTTP %d\n", code);
+    http.end();
+    return;
+  }
+  String response = http.getString();
+  http.end();
+  if (response.length() > 8000) response = response.substring(0, 8000);
+
+  if (extractStringValue(response, "status") != "ok") return;
+
+  raListPages = extractIntValue(response, "pages");
+  raListCount = extractIntValue(response, "count");
+  if (raListCount > RA_LIST_PER_PAGE) raListCount = RA_LIST_PER_PAGE;
+  if (raListCount < 0) raListCount = 0;
+
+  for (int i = 0; i < raListCount; i++) {
+    String p = "a" + String(i);
+    raListTitle[i]    = extractStringValue(response, p + "_title");
+    raListDesc[i]     = extractStringValue(response, p + "_desc");
+    raListPoints[i]   = extractIntValue(response,    p + "_points");
+    raListUnlocked[i] = extractBoolValue(response,   p + "_unlocked");
+    raListHardcore[i] = extractBoolValue(response,   p + "_hardcore");
+    if (raListTitle[i] == "N/A") raListTitle[i] = "";
+    if (raListDesc[i]  == "N/A") raListDesc[i]  = "";
+  }
+  raListPage  = listPage;
+  raListValid = true;
+  Serial.printf("[RA] list page %d/%d: %d rows\n",
+                listPage, raListPages, raListCount);
+}
+
+// Word-wraps `text` into at most maxLines lines of ~charsPerLine chars,
+// printed downward from (x, y) at text size 1 (6 px/char). Breaks on spaces
+// where possible; the last allowed line gets an ellipsis if text remains.
+// Returns the y just below the last line drawn.
+int drawWrappedText(const String& text, int x, int y, int charsPerLine,
+                    int maxLines, uint16_t color) {
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(color, THEME_BLACK);
+  Lcd.setTextSize(1);
+  String rest = text;
+  rest.trim();
+  int lines = 0;
+  while (rest.length() > 0 && lines < maxLines) {
+    String line;
+    if ((int)rest.length() <= charsPerLine) {
+      line = rest;
+      rest = "";
+    } else {
+      int cut = rest.lastIndexOf(' ', charsPerLine);
+      if (cut <= 0) cut = charsPerLine;      // no space: hard break
+      line = rest.substring(0, cut);
+      rest = rest.substring(cut);
+      rest.trim();
+    }
+    if (lines == maxLines - 1 && rest.length() > 0) {
+      if ((int)line.length() > charsPerLine - 3)
+        line = line.substring(0, charsPerLine - 3);
+      line += "...";
+    }
+    Lcd.setCursor(x, y);
+    Lcd.print(line);
+    y += 11;
+    lines++;
+  }
+  return y;
+}
+
+// Description overlay for the achievement at raDetailRow: title, full
+// description, points and state, drawn over the content band. Dismissed by
+// any tap (handleTouch clears raDetailShown). Guards the row index in case
+// the buffer changed under it.
+void displayRADetail() {
+  Lcd.fillRect(0, 35, 320, 170, THEME_BLACK);
+  const int bx = 8, by = 40, bw = 304, bh = 162;
+  Lcd.drawRect(bx, by, bw, bh, THEME_YELLOW);
+  Lcd.drawRect(bx + 1, by + 1, bw - 2, bh - 2, THEME_YELLOW);
+
+  int i = raDetailRow;
+  if (!raListValid || i < 0 || i >= raListCount) {
+    drawRAMessage("NO DETAIL", "Tap to go back", THEME_GRAY);
+    return;
+  }
+
+  uint16_t stateColor;
+  const char* stateLabel;
+  if (raListHardcore[i])      { stateColor = THEME_RED;   stateLabel = "UNLOCKED - HARDCORE"; }
+  else if (raListUnlocked[i]) { stateColor = THEME_GREEN; stateLabel = "UNLOCKED"; }
+  else                        { stateColor = THEME_GRAY;  stateLabel = "LOCKED"; }
+
+  const int tx = bx + 10;
+  int y = by + 12;
+
+  // Title (up to 2 lines, ~47 chars per line at size 1)
+  y = drawWrappedText(raListTitle[i], tx, y, 47, 2, THEME_YELLOW);
+  y += 4;
+
+  // Points + state
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(stateColor, THEME_BLACK);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(tx, y);
+  Lcd.printf("%d pts   %s", raListPoints[i], stateLabel);
+  y += 18;
+
+  // Separator rule
+  Lcd.drawFastHLine(tx, y, bw - 20, THEME_GRAY);
+  y += 8;
+
+  // Description (up to 5 lines)
+  String d = raListDesc[i];
+  d.trim();
+  if (d.length() == 0) d = "(No description provided.)";
+  drawWrappedText(d, tx, y, 47, 5, THEME_CYAN);
+
+  // Close hint, bottom-right inside the card
+  Lcd.setTextColor(THEME_GRAY, THEME_BLACK);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(bx + bw - 78, by + bh - 14);
+  Lcd.print("tap to close");
+}
+
+// Subpage indicator, top-right of the page-6 title row — same affordance and
+// hitbox contract as the GAME INFO "1/2>>" toggle. Shows "k/N>>" where k=1
+// is the progress panel and 2..N are the list pages; tapping the content
+// band advances and wraps. Drawn white as the press feedback, cyan at rest.
+void drawRAPageIndicator(bool pressed) {
+  if (!raStatus.valid || raStatus.status != "ok" || raStatus.total <= 0) return;
+  int listPages = (raStatus.total + RA_LIST_PER_PAGE - 1) / RA_LIST_PER_PAGE;
+  String ind = String(raSubPage + 1) + "/" + String(listPages + 1) + ">>";
+  int x = 310 - (int)ind.length() * 12;    // right-aligned, size 2 = 12 px/char
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(pressed ? THEME_WHITE : THEME_CYAN, THEME_BLACK);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(x, 44);
+  Lcd.print(ind);
+}
+
+// Page-6 subpage renderer: one page of the trophy list. Row format:
+//   [H] title ......................... 25p   hardcore unlock (red mark)
+//   [*] title ......................... 10p   softcore unlock (green mark)
+//   [ ] title .........................  5p   locked (gray, dim title)
+// Rows y = 90..180 step 30 (4 per page); the footer band (y>=205) stays untouched.
+void displayRAList() {
+  Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
+
+  // Same title-row geometry as the progress panel, so the indicator sits in
+  // exactly the same spot while cycling through subpages.
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(10, 44);
+  {
+    String t = raStatus.gameTitle;
+    if (t.length() > 17) t = t.substring(0, 17);
+    Lcd.print(t);
+  }
+  drawRAPageIndicator(false);
+
+  if (!raListValid || raListPage != raSubPage) {
+    drawRAMessage("LIST UNAVAILABLE", "Tap to advance and retry", THEME_GRAY);
+    return;
+  }
+
+  Lcd.setTextSize(1);
+  for (int i = 0; i < raListCount; i++) {
+    int y = 90 + i * 30;   // 4 rows, wider pitch for finger use
+
+    const char* mark;
+    uint16_t markColor;
+    if (raListHardcore[i])      { mark = "[H]"; markColor = THEME_RED;   }
+    else if (raListUnlocked[i]) { mark = "[*]"; markColor = THEME_GREEN; }
+    else                        { mark = "[ ]"; markColor = THEME_GRAY;  }
+
+    Lcd.setTextColor(markColor, THEME_BLACK);
+    Lcd.setCursor(10, y);
+    Lcd.print(mark);
+
+    String t = raListTitle[i];
+    if (t.length() > 36) t = t.substring(0, 36);   // 40 + 36*6 = 256 < 268
+    Lcd.setTextColor(raListUnlocked[i] ? THEME_WHITE : THEME_GRAY, THEME_BLACK);
+    Lcd.setCursor(40, y);
+    Lcd.print(t);
+
+    Lcd.setTextColor(raListUnlocked[i] ? THEME_CYAN : THEME_GRAY, THEME_BLACK);
+    Lcd.setCursor(268, y);
+    Lcd.printf("%3dp", raListPoints[i]);
+  }
 }
 
 void updateDisplay() {
@@ -5233,7 +5882,10 @@ void updateDisplay() {
     case 3: displayNetworkTerminal(); break;
     case 4: displayDeviceScanner();   break;
     case 5: displayGameInfo();        break;
-    case 6: displayRetroAchievements(); break;
+    case 6: if (raSubPage == 0)      displayRetroAchievements();
+            else if (raDetailShown)  displayRADetail();
+            else                     displayRAList();
+            break;
   }
 
   drawFooter();
@@ -5255,7 +5907,7 @@ void displayMainHUD() {
   
   // Core name with scroll for long names. Window of 14 chars at size 3 fits
   // comfortably between x=20 and x=290 logical (plenty of margin).
-  String coreNormalized = currentCore;
+  String coreNormalized = foldForDisplay(currentCore);   // display-only fold; currentCore stays raw
   if (coreNormalized.equalsIgnoreCase("arcade")) {
     coreNormalized = "Arcade";
   }
@@ -5854,6 +6506,44 @@ static char foldLatin1(uint16_t cp) {
 }
 
 // -----------------------------------------------------------------------------
+// foldForDisplay() — render-time fold of a RAW UTF-8 string to the ASCII the
+// stock GLCD font can draw. Used ONLY for the core/game name shown on screen
+// (ACTIVE CORE box, C:/G: footer). It must NEVER touch currentCore/currentGame
+// themselves: those stay raw UTF-8 so SD cache folders (sanitizeCoreFilename)
+// and ScreenScraper searches keep matching what the server sent. Folding the
+// stored value would fork the cache ('/cores/mgt sam coup?/' vs '.../coupe/').
+//
+// Unlike jsonUnescapeAndFold(), the input here is already-decoded UTF-8 bytes
+// (the server now emits ensure_ascii=false), not JSON \uXXXX escapes — so this
+// decodes the 2- and 3-byte UTF-8 sequences to a codepoint, then reuses
+// foldLatin1() for the actual glyph mapping. Malformed bytes are dropped.
+// -----------------------------------------------------------------------------
+String foldForDisplay(const String &in) {
+  String out;
+  out.reserve(in.length());
+  int i = 0, n = (int)in.length();
+  while (i < n) {
+    unsigned char c = (unsigned char)in[i];
+    uint16_t cp;
+    if (c < 0x80) {                       // plain ASCII
+      cp = c; i += 1;
+    } else if ((c & 0xE0) == 0xC0 && i + 1 < n) {   // 2-byte UTF-8
+      cp = ((c & 0x1F) << 6) | ((unsigned char)in[i + 1] & 0x3F);
+      i += 2;
+    } else if ((c & 0xF0) == 0xE0 && i + 2 < n) {   // 3-byte UTF-8 (curly quotes, dashes)
+      cp = ((c & 0x0F) << 12) | (((unsigned char)in[i + 1] & 0x3F) << 6)
+                              |  ((unsigned char)in[i + 2] & 0x3F);
+      i += 3;
+    } else {                              // stray/continuation byte: skip it
+      i += 1; continue;
+    }
+    char fc = foldLatin1(cp);
+    if (fc) out += fc;                    // foldLatin1 returns 0 to DROP (inverted !/?)
+  }
+  return out;
+}
+
+// -----------------------------------------------------------------------------
 // decodeHtmlEntity() — resolve one HTML entity starting at in[i] (which is '&').
 // On success writes the Unicode code point to `cp` and returns the index just
 // past the ';'. On failure returns -1 and the caller emits a literal '&'.
@@ -5998,7 +6688,7 @@ bool fetchGameMetadataJSON(String gameId, String coreName,
     }
     url += "&systemeid=" + systemId;
     url += "&romtype=rom";
-    url += "&romnom=" + urlEncode(romDetails.filename);
+    url += "&romnom=" + urlEncode(ssRomnomFor(romDetails));
     url += "&crc=" + romDetails.crc32;
     url += "&romtaille=" + String(romDetails.filesize);
     url += "&md5=" + romDetails.md5;
@@ -6654,7 +7344,7 @@ String getPageSubtitle() {
     case 3: return "TERMINAL";
     case 4: return "SCANNER";
     case 5: return "NOW PLAYING";
-    case 6: return "RA TROPHIES";
+    case 6: return raSubPage == 0 ? "RA TROPHIES" : "TROPHY LIST";
     default: return "ONLINE";
   }
 }
@@ -6990,7 +7680,30 @@ String sanitizeCoreFilename(String name) {
 
 // ========== MISTER TO SCREENSCRAPER SYSTEM MAPPING ==========
 
+// -----------------------------------------------------------------------------
+// getScreenScraperSystemId() — resolution chain, raw CORENAME first.
+//
+// currentCoreRaw only applies when the question is about the core we are
+// actually tracking (coreName == currentCore): several call sites pass copies
+// (currentCoreForCrc and friends), and those match; a query about an arbitrary
+// name must not be answered with the current core's raw.
+//
+// An unmapped raw falls through to the friendly name. That fallback carries
+// three real cases: arcade (raw is the specific rbf, friendly 'Arcade' -> 75),
+// older servers (no core_raw in the snapshot), and the legacy /status/core
+// path (which clears the raw on purpose).
+// -----------------------------------------------------------------------------
 String getScreenScraperSystemId(String coreName) {
+  if (currentCoreRaw.length() > 0 && coreName == currentCore) {
+    String viaRaw = mapCoreToScreenScraperId(currentCoreRaw);
+    if (viaRaw.length() > 0) {
+      return viaRaw;
+    }
+  }
+  return mapCoreToScreenScraperId(coreName);
+}
+
+String mapCoreToScreenScraperId(String coreName) {
   String core = coreName;
   
   Serial.printf("Mapping MiSTer core '%s' to ScreenScraper system ID\n", core.c_str());
@@ -7156,6 +7869,16 @@ String getScreenScraperSystemId(String coreName) {
   if (coreLower == "amigacd32") return "130";
   if (coreLower == "c64" || coreLower == "commodore64" || coreLower == "c128") return "66";
   if (coreLower == "ao486" || coreLower == "pc dos" || coreLower == "pcxt") return "135";
+  // Raw CORENAMEs that reached this table only through their friendly names
+  // until core_raw existed. The raw chain must be self-sufficient for them:
+  // without these, "raw-first" silently degrades to friendly-only exactly on
+  // the cores the whole feature was built for.
+  if (coreLower == "atari800") return "43";        // Atari 8bit family
+  if (coreLower == "coco3") return "144";          // TRS-80 Color Computer 3
+  if (coreLower == "colecovision") return "48";
+  if (coreLower == "gameboy2p") return "10";       // shares GBC artwork
+  if (coreLower == "odyssey2") return "104";       // Videopac G7000/Odyssey 2
+  if (coreLower == "svi328") return "218";         // Spectravideo SVI-328
   if (coreLower == "amstrad" || coreLower == "cpc") return "65";
   if (coreLower == "sam" || coreLower == "samcoupe") return "213";
   if (coreLower == "x68000") return "79";
@@ -8061,6 +8784,19 @@ void showGameImageScreenCorrected(String coreName, String gameName) {
     }
   }
   
+  // Container image (boot.vhd, msdos622.vhd): a whole DOS environment, not a
+  // game — there is no artwork to miss. Present it exactly like "core loaded
+  // without game". The flag is set inside the first download pass (which also
+  // marks the search exhausted), so this branch owns every redraw after it and
+  // keeps the NOT-IN-SS banner — semantically false here — from ever firing.
+  // A user-supplied local image still wins: it displays above, before this.
+  if (shouldDownload && g_currentGameIsContainer) {
+    Serial.println("Container image - core-only presentation");
+    lastGameImageOK = false;
+    showCoreImageScreen(coreName);
+    return;
+  }
+
   // AUTO-DOWNLOAD with SAFE STREAMING
   if (shouldDownload && ENABLE_AUTO_DOWNLOAD && WiFi.status() == WL_CONNECTED && !downloadInProgress) {
     // Two different "don't retry" reasons, deliberately kept apart:
@@ -8500,7 +9236,7 @@ GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
   url += "&sspassword=" + urlEncode(String(SCREENSCRAPER_PASS));
   url += "&systemeid=" + systemId;
   url += "&romtype=rom";
-  url += "&romnom=" + urlEncode(romDetails.filename);
+  url += "&romnom=" + urlEncode(ssRomnomFor(romDetails));
   url += "&crc=" + romDetails.crc32;
   url += "&romtaille=" + String(romDetails.filesize);
   url += "&md5=" + romDetails.md5;
@@ -8817,6 +9553,19 @@ bool tryNameSearchFallback(String coreName, String gameName, RomDetails romDetai
                                                         : gameName;
   Serial.printf("Name-search fallback for '%s' (server hint: %s)\n",
                 cleanName.c_str(), romDetails.nameSearchHint ? "YES" : "NO");
+
+  // The server sets this when search_name denotes a container image rather
+  // than a game (boot.vhd, BOOT-DOS98.vhd, Shareware Pack-fbit.vhd).
+  // jeuRecherche has no "no match": it answers with a fuzzy hit (observed:
+  // id 170580 for 'boot'), i.e. confident-looking wrong artwork. Gate HERE so
+  // both call legs are covered, and on containerImage — not nameSearchHint —
+  // because a DOS pack CHD with a valid-but-unindexed CRC reaches the second
+  // leg with hint=NO and must still be searched. Returning false lets the
+  // caller mark the search exhausted, stopping further ScreenScraper traffic.
+  if (romDetails.containerImage) {
+    Serial.println("Container image, not a game - skipping name search");
+    return false;
+  }
   showDownloadProgress(40, "Name search...");
 
   // Snapshot the diagnostic code the CRC path produced. jeuRecherche answers
@@ -8828,6 +9577,20 @@ bool tryNameSearchFallback(String coreName, String gameName, RomDetails romDetai
   GameInfo gameInfo = searchWithJeuRechercheJSON(coreName, cleanName);
   if (!(gameInfo.found && gameInfo.boxartUrl.length() > 0)) {
     Serial.println("Name search found no results");
+    if (romDetails.noRomOnDisk && !gameInfo.found && g_lastSSHttpCode == 200) {
+      // SAM name-only entry: no rom file on disk means the CRC route never
+      // existed, so this clean jeuRecherche miss (HTTP 200, zero results) IS
+      // the definitive verdict — the title is not in ScreenScraper. Present
+      // it with the stable card and mark the search exhausted so SAM redraws
+      // stop re-querying SS for this game. The verdict comes from the search
+      // itself, not from any name heuristic: commercial Amiga titles that DO
+      // exist in SS were found above and never reach this branch. A transient
+      // error (429, timeout, 5xx) leaves a different code and keeps the
+      // normal retry path. found-but-no-boxart is excluded (!gameInfo.found):
+      // that means catalogued-without-media, a different message.
+      lastGameSearchExhausted = true;
+      ssNotifyOnce(coreName + "|" + gameName, "GAME NOT IN SS DATABASE", cleanName);
+    }
     // Restore the CRC path's diagnostic on a clean 200-but-empty miss. A real
     // error from the name search (429, -1, ...) is newer and more relevant, so
     // it is kept.
@@ -8913,7 +9676,23 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
   // STEP 1: JSON-based precise search (much simpler than XML streaming)
   Serial.printf("STEP 1: JSON precise search with CRC...\n");
   RomDetails romDetails = getCurrentRomDetails();
-  
+
+  // Presentation flag for every screen from here on: container images get
+  // core-only treatment (see g_currentGameIsContainer). Assignment, not |=,
+  // so it also self-clears if the server's verdict changes for this game.
+  g_currentGameIsContainer = romDetails.containerImage;
+  if (g_currentGameIsContainer) {
+    // Bail out here rather than letting the container fall through to the
+    // name-search gate: reaching the tail with success=false lands in the
+    // generic failure branch, which paints "Download failed" and blocks for
+    // delay(6000). Nothing failed — there is simply no artwork to fetch for a
+    // whole-environment image. Marking the search exhausted also stops the
+    // 10 s recurrent from re-entering on every tick.
+    Serial.println("Container image per server - no artwork to fetch, core-only presentation");
+    lastGameSearchExhausted = true;
+    return false;                 // DownloadFlagGuard clears downloadInProgress
+  }
+
   Serial.printf("ROM Details check:\n");
   Serial.printf("  Available: %s\n", romDetails.available ? "YES" : "NO");
   Serial.printf("  Hash calculated: %s\n", romDetails.hashCalculated ? "YES" : "NO");
@@ -8979,14 +9758,23 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
       }
     } else {
       Serial.println("First JSON search found no results");
-      
-      // SECOND TRY: Retry CRC search with longer delay  
-      Serial.printf("ATTEMPTING SECOND CRC SEARCH...\n");
-      showDownloadProgress(35, "Retrying CRC search...");
+
+      // A 404 from jeuInfos is ScreenScraper's definitive "nothing matches these
+      // parameters", not a transient failure. The retry re-issues a byte-identical
+      // URL, so it can only receive the identical 404: skipping it saves one API
+      // call and 10 s of dead screen per unmatchable game. Every other outcome
+      // (timeout, -1, 5xx, 429) may still be transient and keeps the retry.
+      const bool ssDefinitiveMiss = (g_lastSSHttpCode == 404);
+
+      // SECOND TRY: Retry CRC search with longer delay
+      Serial.printf(ssDefinitiveMiss
+                    ? "ScreenScraper 404 (definitive no-match) - skipping second CRC search\n"
+                    : "ATTEMPTING SECOND CRC SEARCH...\n");
+      if (!ssDefinitiveMiss) showDownloadProgress(35, "Retrying CRC search...");
       
       // WDT-safe wait: yields to OS in 100ms slices instead of blocking 10s
-      Serial.printf("Waiting 10s before CRC retry (WDT-safe, yielding every 100ms)...\n");
-      {
+      if (!ssDefinitiveMiss) {
+        Serial.printf("Waiting 10s before CRC retry (WDT-safe, yielding every 100ms)...\n");
         unsigned long _waitStart = millis();
         while (millis() - _waitStart < 10000) {
           Board.update();
@@ -8996,7 +9784,34 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
       }
       
       // Check memory before second attempt
-      if (ESP.getFreeHeap() < 90000) {
+      if (ssDefinitiveMiss) {
+        // Nothing to retry: an identical URL can only return the identical 404.
+        //
+        // But this shortcut must finish the job the retry branch below would
+        // have done, because that branch is the only other owner of the
+        // exhaustion flag on the CRC path. Two things were being skipped:
+        //
+        //  1. The name-search fallback (F4). A 404 on the CRC query says the
+        //     hash is unknown to ScreenScraper; it says nothing about whether
+        //     the title is findable by name. Allowlisted systems still get
+        //     their one text search.
+        //  2. lastGameSearchExhausted. A definitive 404 with no name-search
+        //     rescue IS "clean response, not in the DB". Leaving the flag
+        //     false made gameInfoAvailable() fall through to lastRomHasCrc —
+        //     true here, since the CRC is exactly what got the 404 — so the
+        //     GAME INFO button stayed up for a game that can never fill it.
+        //     It also left processCrcRecurrent re-asking every 10 s for an
+        //     answer ScreenScraper had already given.
+        if (isNameSearchSystem(systemId)) {
+          success = tryNameSearchFallback(coreName, gameName, romDetails);
+        }
+        if (!success) {
+          lastGameSearchExhausted = true;
+          Serial.println("ScreenScraper 404 on CRC, no name-search rescue - marked search as exhausted");
+        }
+      } else if (ESP.getFreeHeap() < 90000) {
+        // Transient: memory pressure, not a ScreenScraper verdict. Deliberately
+        // leaves the search NOT exhausted so the 10 s recurrent retries later.
         Serial.printf("Low memory for second attempt (%d bytes), skipping retry\n", ESP.getFreeHeap());
       } else {
         Serial.printf("Second attempt: Calling searchWithJeuInfosPreciseJSON()...\n");
@@ -9071,9 +9886,17 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
     Serial.println("ROM CRC not available for JSON search");
 
     // Hash-less fallback (F4, first leg): no usable CRC on an allowlisted
-    // system. The allowlist is the guardian — on CRC-capable systems a
-    // transient hash failure keeps behaving exactly as before.
-    if (isNameSearchSystem(systemId)) {
+    // system OR a server-confirmed name-only game. The per-system allowlist
+    // is the guardian for CRC-capable systems: a transient hash failure
+    // there keeps behaving exactly as before (no fuzzy search, no wrong-
+    // artwork risk). no_rom_on_disk is the per-GAME equivalent: the server
+    // verified this entry has no rom file at all (SAM name-only: Amiga
+    // MegaAGS demos and titles), so a hash can never exist and the name
+    // search is the only possible route — same guarantee, entry-scoped.
+    // Field log that motivated this: Amiga is NOT allowlisted, so SAM
+    // name-only games skipped the search entirely and flashed the generic
+    // failure on every redraw (nothing ever marked the search exhausted).
+    if (isNameSearchSystem(systemId) || romDetails.noRomOnDisk) {
       success = tryNameSearchFallback(coreName, gameName, romDetails);
       if (!success) {
         // Clean miss on a name-search system: stop the 10 s hammering.
@@ -9083,6 +9906,21 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
     }
   }
   
+  if (!success && romDetails.noRomOnDisk && lastGameSearchExhausted &&
+      g_lastSSHttpCode == 200) {
+    // g_lastSSHttpCode == 200 pins this to the clean-miss case where the
+    // NOT-IN-SS card was actually presented. A transient error (429,
+    // timeout) keeps its honest HUD message from the ladder below.
+    // tryNameSearchFallback() already presented the definitive NOT-IN-SS card
+    // for this name-only entry (and set the exhausted flag: it cannot be
+    // stale — startCrcRecurrentForGame() clears it on every new game and the
+    // caller gate never re-enters while it is set). Nothing failed: skip the
+    // generic "Download failed" + 6 s block.
+    Serial.printf("Final result: FAILED (name-only, not in SS - already presented)\n");
+    Serial.println("=== JSON DOWNLOAD COMPLETE ===\n");
+    return false;
+  }
+
   if (!success) {
     Serial.println("JSON method failed");
     // Game catalogued in ScreenScraper but with ZERO artwork of any configured
