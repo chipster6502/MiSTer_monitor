@@ -7865,7 +7865,9 @@ String mapCoreToScreenScraperId(String coreName) {
   if (coreLower == "atari7800") return "41";
   if (coreLower == "atarilynx") return "28";   // Camputers Lynx is "lynx48"
   if (coreLower == "atarist") return "42";
-  if (coreLower == "amiga" || coreLower == "minimig") return "64";
+  if (coreLower == "amiga" || coreLower == "minimig" ||
+      coreLower == "amiga500" || coreLower == "amiga500hd" ||
+      coreLower == "amiga600hd" || coreLower == "commodore amiga") return "64";
   if (coreLower == "amigacd32") return "130";
   if (coreLower == "c64" || coreLower == "commodore64" || coreLower == "c128") return "66";
   if (coreLower == "ao486" || coreLower == "pc dos" || coreLower == "pcxt") return "135";
