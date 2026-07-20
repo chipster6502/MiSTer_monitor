@@ -1,0 +1,37 @@
+name: Validate server
+
+# The bot's mapping PR is edited in GitHub's web editor, which has no syntax
+# check — and nothing else validates a PR before merge. This is that gate: it
+# refuses to let mister_status_server.py reach main unless it still imports and
+# its CORE_NAME_MAPPING table is intact. The server ships to every MiSTer via
+# db.json.zip, so a slip here breaks the monitor for everyone.
+#
+# It LOADS the module rather than parsing it with a regex, on purpose: a missing
+# closing quote can yield valid Python whose table is silently mangled (a value
+# swallows the next line). Only executing the file and inspecting the real dict
+# catches that — py_compile and a regex parse both wave it through.
+
+on:
+  pull_request:
+    paths:
+      - 'MiSTer/Scripts/.config/mister_monitor/mister_status_server.py'
+      - 'tools/check_server.py'
+  push:
+    branches: [main]
+    paths:
+      - 'MiSTer/Scripts/.config/mister_monitor/mister_status_server.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Server imports and CORE_NAME_MAPPING is intact
+        run: python3 tools/check_server.py
