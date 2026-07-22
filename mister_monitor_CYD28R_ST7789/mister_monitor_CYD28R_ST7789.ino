@@ -223,12 +223,29 @@ int    raGameId = 0;            // resolved RA game id — subpage reset key
 // holds exactly one server page, fetched on demand from the touch handler.
 const int RA_LIST_PER_PAGE = 4;
 
-// Trophy-row touch calibration — TOUCH space, not draw space. The CYD
-// resistive panel's Y does not read 1:1 with the display, so the row hit
-// bands cannot reuse the draw positions (y = 70 + i*22). Row i is centred at
-// RA_ROW_TOUCH_TOP + i*RA_ROW_TOUCH_PITCH in raw touch Y. Calibrate from the
-// serial line the page-6 handler prints on every tap: on a FULL (4-row) list
-// page, tap the centre of the top row and the centre of the bottom row, then
+// Trophy-row touch calibration — TOUCH space, not draw space, and BOARD
+// SPECIFIC. displayRAList() draws the rows at y = 90 + i*30, so their centres
+// sit at 94 + i*30 (94/124/154/184) — which is deliberately NOT what the two
+// constants below say. This board's touch Y does not read 1:1 with the
+// display: working back from the values hardware testing confirmed land on
+// the right row, it reports roughly
+//     touchY ~= 1.333 * drawY - 51
+// so 74/40 is correct here and the "obvious" 94/30 would be wrong.
+//
+// The root cause is the TS_RAW_* range in board_hal.h not matching this
+// panel. It is left alone on purpose: every other hit target has a hitbox
+// generous enough to absorb the error (the only visible symptom is that the
+// bottom ~13 px of the content band behaves as footer), and re-calibrating
+// would mean re-validating every button on all 7 pages for no user-visible
+// gain.
+//
+// CONSEQUENCE: these two numbers encode THIS board's calibration error, not a
+// house convention. Never copy them to another port — each board derives its
+// own from its own draw geometry and then verifies on hardware.
+//
+// To re-calibrate, use the serial line the page-6 handler prints on every
+// tap: on a FULL (4-row) list page, tap the centre of the top row and the
+// centre of the bottom row, then
 //   RA_ROW_TOUCH_TOP   = <top reading>
 //   RA_ROW_TOUCH_PITCH = (<bottom reading> - <top reading>) / 3
 int RA_ROW_TOUCH_TOP   = 74;   // raw touch Y at centre of the FIRST row
@@ -5822,7 +5839,10 @@ void drawRAPageIndicator(bool pressed) {
 //   [H] title ......................... 25p   hardcore unlock (red mark)
 //   [*] title ......................... 10p   softcore unlock (green mark)
 //   [ ] title .........................  5p   locked (gray, dim title)
-// Rows y = 90..180 step 30 (4 per page); the footer band (y>=205) stays untouched.
+// Rows y = 90..180 step 30 (4 per page); the footer band (y>=205) stays
+// untouched. Changing this layout means recomputing RA_ROW_TOUCH_TOP/PITCH
+// through this board's touch transform (see their declaration) — the two are
+// NOT in the same coordinate space here.
 void displayRAList() {
   Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
 

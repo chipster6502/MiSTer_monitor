@@ -223,16 +223,27 @@ int    raGameId = 0;            // resolved RA game id — subpage reset key
 // holds exactly one server page, fetched on demand from the touch handler.
 const int RA_LIST_PER_PAGE = 4;
 
-// Trophy-row touch bands. The GT911 capacitive panel reports coordinates
-// 1:1 with the display, so — unlike the resistive CYD28R — the hit bands can
-// sit directly on the draw positions: rows are drawn at y = 100 + i*40 (see
-// displayRAList()), so row i is centred at 106 + i*40 in touch Y. Verify with
-// the serial line the page-6 handler prints on every tap: on a FULL (4-row)
-// list page the four row centres should read ~106 / 146 / 186 / 226; adjust
-// only if the panel disagrees:
+// Trophy-row touch bands, DERIVED from the draw geometry rather than
+// measured. displayRAList() draws the rows at y = 100 + i*40 with a 12 px
+// glyph, so their centres are at 106 + i*40 (106/146/186/226) and the bands
+// below reproduce exactly that.
+//
+// Touch here is an XPT2046 resistive panel read through LovyanGFX's
+// Touch_XPT2046 driver, so what reaches handleTouch() is already display
+// coordinates — PROVIDED the x_min/x_max/y_min/y_max range in board_hal.h is
+// right for the unit. offset_rotation has been confirmed on hardware; the ADC
+// range has not, and those values are still starting estimates.
+//
+// Verify with the serial line the page-6 handler prints on every tap: on a
+// FULL (4-row) list page the four row centres should read ~106/146/186/226.
+// The +/-20 px bands absorb a realistic calibration error, so a few px of
+// deviation is harmless. If the readings are off by a consistent and growing
+// amount, that is a panel-scale error: the fix belongs in board_hal.h's
+// x_min/x_max, NOT here. Override these two only if the panel is otherwise
+// well calibrated and the rows still miss:
 //   RA_ROW_TOUCH_TOP   = <first-row centre reading>
 //   RA_ROW_TOUCH_PITCH = (<last-row reading> - <first-row reading>) / 3
-int RA_ROW_TOUCH_TOP   = 106;  // touch Y at centre of the FIRST row (1:1 draw space)
+int RA_ROW_TOUCH_TOP   = 106;  // touch Y at centre of the FIRST row (= draw centre)
 int RA_ROW_TOUCH_PITCH = 40;   // touch Y between consecutive row centres
 int  raSubPage   = 0;
 int  raListPage  = 0;                    // which page the buffer holds
@@ -5470,8 +5481,8 @@ void drawRAPageIndicator(bool pressed) {
 //   [*] title ......................... 10p   softcore unlock (green mark)
 //   [ ] title .........................  5p   locked (gray, dim title)
 // Rows y = 100..220 step 40 (4 per page); the footer band (y>=270) stays
-// untouched. Row hit bands live in RA_ROW_TOUCH_TOP/PITCH (draw space on
-// this capacitive panel).
+// untouched. Row hit bands live in RA_ROW_TOUCH_TOP/PITCH, derived from these
+// draw positions — keep the two in step if this layout ever changes.
 void displayRAList() {
   Lcd.fillRect(0, 44, 480, 226, THEME_BLACK);
 
