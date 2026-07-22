@@ -25,6 +25,26 @@ struct RomDetails {
   unsigned long timestamp;
   String searchName;       // clean title from the server for name-based search (S6)
   bool   nameSearchHint;   // server says the CRC route cannot work for this container
+  bool   noHash;           // server says the CRC can NEVER arrive (unindexable, mutable
+                           // container). Distinct from !hashCalculated, which is also
+                           // true while a slow hash is still in flight.
+  bool   containerImage;   // search_name denotes a container image, not a game
+                           // (boot.vhd, BOOT-DOS98.vhd). Never text-search these.
+  String ssRomnom;         // server-resolved romnom override ('mslug2.zip'), or "".
+                           // NeoGeo ships .neo containers that ScreenScraper does
+                           // not index, so its CRC can never match and the lookup
+                           // falls back to fuzzy-matching the filename — which
+                           // misses whenever the pack's title differs from SS's
+                           // (48 of 281 romsets carry a subtitle). The romset id
+                           // matches exactly instead. "" = use filename, i.e. the
+                           // previous behaviour.
+  bool   noRomOnDisk;      // server says this game has a NAME but NO rom file on
+                           // disk (SAM name-only content: Amiga demos, WHDLoad,
+                           // some MGL). The name search may still run, but if it
+                           // misses the firmware shows a stable NOT-IN-DATABASE
+                           // card instead of the DOWNLOADING->failed flash.
+                           // Added last so existing positional initializers
+                           // (which stop before ssRomnom) stay valid.
 };
 
 // GAME INFO panel — metadata for the currently loaded game, extracted from
@@ -41,6 +61,31 @@ struct GameMeta {
   String rating;           // note.text + "/20"
   String genre;            // up to two genre names, "A / B"
   String synopsis;         // ASCII-folded, whitespace-collapsed, capped
+};
+
+// RETROACHIEVEMENTS panel — flat mirror of /status/retroachievements.
+// Every field is a scalar; the endpoint JSON is deliberately flat so the
+// firmware's extract*Value() helpers can parse it without ArduinoJson.
+struct RAStatus {
+  bool    enabled;             // server has ra_credentials.ini
+  bool    supported;           // active core maps to an RA console
+  bool    gameMatched;         // hash or corroborated fallback resolved a game
+  String  status;              // "ok" | "not_configured" | "core_not_supported"
+                               // | "no_game_loaded" | "rom_not_recognized" | ...
+  String  matchMethod;         // "index" | "lastgame"
+  String  gameTitle;
+  int     total;               // achievements in the set
+  int     unlocked;            // earned (soft or hardcore)
+  int     unlockedHardcore;    // earned in hardcore
+  int     pointsEarned;
+  int     pointsTotal;
+  int     pointsHardcore;
+  String  core;                // friendly core name (for status messages)
+  int     eventCounter;        // monotonic unlock counter (popup trigger)
+  String  lastUnlockTitle;
+  int     lastUnlockPoints;
+  bool    lastUnlockHardcore;
+  bool    valid;               // last fetch parsed successfully
 };
 
 

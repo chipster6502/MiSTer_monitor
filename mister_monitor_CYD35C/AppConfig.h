@@ -43,6 +43,10 @@ struct AppConfig {
   int    infoSynopsisMax = 2000;   // synopsis memory cap (chars, clamped 200-2000)
   int    infoScrollStepMs = 2000;  // synopsis auto-scroll: ms per line (clamped 200-8000)
   bool   infoScrollAuto   = true;  // false = hold synopsis still, no auto-scroll
+  bool   infoInRotation   = false; // true = GAME INFO joins the image rotation
+                                   // as a third slide (game -> info -> core).
+                                   // Off by default: existing configs keep the
+                                   // two-slide rotation they have today.
 
   // --- Image paths -----------------------------------------------------------
   String coreImagesPath    = "/cores";
@@ -178,6 +182,7 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "use_https")              { cfg.ssUseHttps = parseBool(val); }
     // [gameinfo]
     else if (key == "info_lang")              { cfg.infoLang = val; }
+    else if (key == "info_in_rotation")       { cfg.infoInRotation = parseBool(val); }
     else if (key == "info_synopsis_max")      { cfg.infoSynopsisMax = val.toInt(); }
     else if (key == "info_scroll_step_ms")    { cfg.infoScrollStepMs = val.toInt(); }
     else if (key == "info_scroll_auto")       { cfg.infoScrollAuto = parseBool(val); }
