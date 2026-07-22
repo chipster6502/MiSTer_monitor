@@ -1,20 +1,18 @@
 name: MiSTer ecosystem watch
 
-# Two scans that answer different questions, reported together once a week.
+# One scan, one question: "has a core appeared in any of the 92 databases
+# Update_All indexes that we have never triaged?" (audit_cores.py). New cores
+# in the databases eventually need a CORE_NAME_MAPPING entry in the server.
 #
-#   audit_cores.py  — "has a core appeared in any of the 92 databases Update_All
-#                      indexes that we have never triaged?"
-#   scan_github.py  — "has someone published a MiSTer core that is in no
-#                      database at all?"  (this is the z386 case: created
-#                      2026-04-26, reached us as a user report months later)
+# GitHub discovery moved out: unofficial-core discovery and installation live
+# in chipster6502/MiSTer_unofficial_cores, and generic ecosystem watching in
+# chipster6502/MiSTer_ecosystem. Both consume this repo's triage lists.
 #
-# Neither reads any hardware. This never sees a user's MiSTer: the runtime log
-# at /status/unknown_cores stays on the device and is only ever shared if its
-# owner chooses to paste it.
+# This never sees a user's MiSTer: the runtime log at /status/unknown_cores
+# stays on the device and is only ever shared if its owner chooses to paste it.
 #
-# Everything here yields LEADS. A repo name is not a CORENAME, and neither is a
-# .rbf filename — ZX-Spectrum.rbf announces itself as 'Spectrum'. Confirm before
-# mapping.
+# Everything here yields LEADS. A .rbf filename is not a CORENAME —
+# ZX-Spectrum.rbf announces itself as 'Spectrum'. Confirm before mapping.
 
 on:
   schedule:
@@ -55,80 +53,38 @@ jobs:
           echo "found=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
           set -e
 
-      - name: Scan GitHub for cores that are in no database
-        id: gh
-        env:
-          # Lifts search from 10 req/min to 30. The default token is enough:
-          # this only reads public search results.
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set +e
-          python3 tools/scan_github.py \
-            --days 8 \
-            --baseline tools/known_repos.json \
-            --json /tmp/github_report.json \
-            | tee /tmp/github.txt
-          echo "found=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
-          set -e
-
-      - name: Keep both reports for 90 days
+      - name: Keep the report for 90 days
         uses: actions/upload-artifact@v4
         with:
           name: ecosystem-watch
           path: |
             /tmp/core_report.json
-            /tmp/github_report.json
             /tmp/audit.txt
-            /tmp/github.txt
           retention-days: 90
 
       - name: Report to the tracking issue
-        if: steps.dbs.outputs.found == '1' || steps.gh.outputs.found == '1'
+        if: steps.dbs.outputs.found == '1'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const read = p => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } };
 
-            const dbsNew = '${{ steps.dbs.outputs.found }}' === '1';
-            const ghNew  = '${{ steps.gh.outputs.found }}' === '1';
-
             const parts = [];
-
-            if (ghNew) {
-              // Actionable and rare (~1-2 a week), so it leads and stays open.
-              parts.push('### Published on GitHub, in no database');
-              parts.push('```');
-              parts.push(read('/tmp/github.txt').slice(0, 25000));
-              parts.push('```');
-              parts.push('');
-            }
-
-            if (dbsNew) {
-              // Usually a longer list, so it is folded away: the issue stays
-              // scannable and the detail is one click down.
-              parts.push('<details><summary><b>Databases: cores not yet triaged</b></summary>');
-              parts.push('');
-              parts.push('```');
-              parts.push(read('/tmp/audit.txt').slice(0, 25000));
-              parts.push('```');
-              parts.push('</details>');
-              parts.push('');
-            }
-
+            parts.push('### Databases: cores not yet triaged');
+            parts.push('```');
+            parts.push(read('/tmp/audit.txt').slice(0, 25000));
+            parts.push('```');
             parts.push('---');
-            parts.push('A repo name and a `.rbf` name are both **leads, not CORENAMEs**.');
-            parts.push('Get the literal string from `/status/unknown_cores` on a machine');
-            parts.push('running the core before adding any mapping.');
-            parts.push('');
-            parts.push('Once triaged, record it so it stops being reported:');
-            parts.push('`tools/known_cores.json` (databases) · `tools/known_repos.json` (GitHub).');
+            parts.push('A `.rbf` name is a **lead, not a CORENAME**. Get the literal string');
+            parts.push('from `/status/unknown_cores` on a machine running the core before');
+            parts.push('adding any mapping. Once triaged, record it in `tools/known_cores.json`');
+            parts.push('so it stops being reported.');
             parts.push('');
             parts.push(`_[Run log](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) · full JSON in the run artifacts._`);
 
             const body = parts.join('\n');
 
-            // Reuse one open issue rather than filing a new one every Monday.
             const open = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
