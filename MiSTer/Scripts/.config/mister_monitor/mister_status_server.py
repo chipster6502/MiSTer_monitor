@@ -332,6 +332,32 @@ _unknown_cores_lock = threading.Lock()
 _unknown_cores_loaded = False
 
 
+def _core_resolves(name):
+    """
+    True when `name` already yields a friendly name through the same chain the
+    evaluator uses to fill the HUD.
+
+    Single source of truth for 'is this core known?', so the diagnostic log can
+    never disagree with what the screen actually shows. It used to: the log
+    tested membership only, while the evaluator additionally falls back to the
+    MGL/setname prefix. 'X68K-Algarna' therefore displayed correctly as
+    'Sharp X68000' and was reported as unknown at the same time — a false
+    finding, and per-game setnames generate an unbounded number of them.
+
+    RA_ is not stripped here: the caller passes the already-stripped
+    lookup_name, matching the evaluator.
+    """
+    if not name:
+        return True
+    if name in CORE_NAME_MAPPING or name.lower() in CORE_NAME_MAPPING_LOWER:
+        return True
+    if '-' in name:
+        prefix = name.split('-', 1)[0]
+        if prefix in CORE_NAME_MAPPING or prefix.lower() in CORE_NAME_MAPPING_LOWER:
+            return True
+    return False
+
+
 def _load_unknown_cores():
     """Restore the log so counts survive a restart. Corruption is not fatal."""
     global _unknown_cores, _unknown_cores_loaded
@@ -344,6 +370,20 @@ def _load_unknown_cores():
         if isinstance(data.get('cores'), dict):
             _unknown_cores = data['cores']
             print(f"📋 Unknown-core log restored: {len(_unknown_cores)} entries")
+            # Entries are recorded when a core has no name, but the log is
+            # persistent and mappings keep arriving: a core resolved by a later
+            # update stayed listed forever, and the endpoint filled with work
+            # already done. Measured on a real machine, 6 of 10 entries were
+            # already mapped. Dropping them is safe — 'seen once, unnamed' has
+            # no value once the core has a name.
+            resolved = [k for k in _unknown_cores if _core_resolves(k)]
+            if resolved:
+                for k in resolved:
+                    del _unknown_cores[k]
+                print(f"🧹 Unknown-core log: dropped {len(resolved)} entries now "
+                      f"covered by CORE_NAME_MAPPING ({', '.join(resolved[:5])}"
+                      f"{'...' if len(resolved) > 5 else ''})")
+                _save_unknown_cores_locked()
     except FileNotFoundError:
         pass
     except Exception as e:
@@ -390,7 +430,7 @@ def _note_unknown_core(raw_corename):
     name = (raw_corename or '').strip()
     if not name or name.upper() == 'MENU':
         return
-    if name.lower() in CORE_NAME_MAPPING_LOWER or name in CORE_NAME_MAPPING:
+    if _core_resolves(name):
         return
 
     now = int(time.time())
