@@ -16,8 +16,11 @@ name: MiSTer ecosystem watch
 
 on:
   schedule:
-    - cron: '17 5 * * 1'     # Mondays 05:17 UTC; the odd minute avoids the
-                             # top-of-hour rush on GitHub's shared runners
+    - cron: '17 15 * * 5'    # Fridays 15:17 UTC = 17:17 CEST / 16:17 CET, so it
+                             # lands mid-afternoon in Spain year round without
+                             # chasing DST (cron is UTC and never shifts). The
+                             # odd minute avoids the top-of-hour rush on
+                             # GitHub's shared runners.
   workflow_dispatch:
 
 permissions:

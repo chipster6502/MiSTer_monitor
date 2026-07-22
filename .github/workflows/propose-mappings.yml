@@ -17,7 +17,7 @@ name: Propose core mappings
 
 on:
   schedule:
-    - cron: '41 5 * * 1'     # Mondays, same day as ecosystem-watch. Safe to run
+    - cron: '41 15 * * 5'    # Fridays, same slot as ecosystem-watch. Safe to run
                              # weekly because an already-open proposal PR makes
                              # the job a no-op (see the guard below): a new core
                              # is picked up within days instead of within a month.
