@@ -4063,13 +4063,15 @@ int jpegDrawCallback(JPEGDRAW *pDraw) {
       finalY + pDraw->iHeight <= IMAGE_AREA_HEIGHT) {
     // Use M5.Display directly (not Lcd) for image rendering
     M5.Display.pushImage(finalX, finalY, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels);
+  } else if (finalY + pDraw->iHeight > IMAGE_AREA_HEIGHT &&
+             finalX >= 0 && finalX + pDraw->iWidth <= TARGET_WIDTH) {
+    // Expected: block clips into the footer band. Silenced — not an error.
+    // Taller-than-area images legitimately lose their bottom rows here,
+    // matching the CYD boards' behaviour.
   } else {
-    // Log if trying to draw outside allowed area
+    // True out-of-bounds (wrong X or negative Y): log for diagnosis.
     Serial.printf("jpegDrawCallback: Block outside bounds at (%d,%d) size %dx%d\n",
                   finalX, finalY, pDraw->iWidth, pDraw->iHeight);
-    if (finalY + pDraw->iHeight > IMAGE_AREA_HEIGHT) {
-      Serial.printf("  Would overlap footer (footer at Y=%d)\n", IMAGE_AREA_HEIGHT);
-    }
   }
   
   return 1; // Continue decoding
