@@ -7459,6 +7459,9 @@ String mapCoreToScreenScraperId(String coreName) {
   
   // Apple
   if (core == "Apple II") return "86";
+  // The IIgs runs Apple II software, but ScreenScraper catalogues it as its
+  // OWN system: a IIgs disk queried under 86 misses. Keep them distinct.
+  if (core == "Apple IIgs" || core == "Apple 2GS") return "217";
   if (core == "Macintosh Plus" || core == "Mac OS") return "146";
   
   // Misc consoles / handhelds
@@ -7541,6 +7544,11 @@ String mapCoreToScreenScraperId(String coreName) {
   if (coreLower == "gameboy2p") return "10";       // shares GBC artwork
   if (coreLower == "odyssey2") return "104";       // Videopac G7000/Odyssey 2
   if (coreLower == "svi328") return "218";         // Spectravideo SVI-328
+  // Apple. CORENAMEs straight from each core's CONF_STR, so the raw leg stands
+  // on its own: a names.txt entry renaming either core cannot cost it artwork
+  // by shadowing the friendly lookup above.
+  if (coreLower == "apple-iigs" || coreLower == "appleiigs") return "217";
+  if (coreLower == "apple-ii" || coreLower == "apple2") return "86";
   if (coreLower == "amstrad" || coreLower == "cpc") return "65";
   if (coreLower == "sam" || coreLower == "samcoupe") return "213";
   if (coreLower == "x68000") return "79";
