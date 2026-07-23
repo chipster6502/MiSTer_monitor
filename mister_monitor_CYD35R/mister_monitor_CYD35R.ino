@@ -692,6 +692,7 @@ String serverErrorType = "";
 
 void showCoreNotFoundScreen(String coreName);
 bool isErrorCore(String core);
+bool isBootRomName(const String& gameName);
 bool isArcadeCore(String coreName);
 bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* mediaType, const char* mediaName);
 bool tryMediaTypeWithRegions(String baseUrl, String savePath, const char* mediaBase, const char* mediaLabel, bool includeGeneric = true);
@@ -4327,6 +4328,16 @@ bool getStateSnapshot() {
   newGame.trim();
   newCoreRaw.trim();
 
+  // "Console (autoboot)" runs a splash animation, not a game. Blanking the name
+  // HERE — at the single point where the snapshot enters the firmware — is what
+  // makes the whole rest of the system behave: artwork, footers, GAME INFO and
+  // the CRC search all already have a correct "no game loaded" path, and this
+  // hands them that state instead of teaching each one about boot ROMs.
+  if (isBootRomName(newGame)) {
+    Serial.printf("Boot ROM '%s' detected - presenting core only\n", newGame.c_str());
+    newGame = "";
+  }
+
   if (newCore.length() == 0) {
     // /status/snapshot always carries "core"; an empty value means a
     // malformed body, not a Menu state. Let the legacy path decide.
@@ -4484,6 +4495,37 @@ void getCurrentCore() {
   http.end();
 }
 
+// -----------------------------------------------------------------------------
+// isBootRomName() — true for the auto-boot animation ROMs behind the
+// "Console (autoboot)" menu category (uberyoji's mister-boot-roms, installed
+// by update_all). Those .mgl entries load a ROM whose only job is to play a
+// MiSTer splash animation before handing the console over, so the MiSTer
+// reports a loaded "game" that is not one. Left alone it costs a guaranteed
+// ScreenScraper miss, a footer naming a file instead of the console that was
+// actually booted, a GAME INFO button with nothing behind it, and a CRC hunt
+// for a ROM no database will ever list.
+//
+// Every asset in that project shares one base name — mister-boot.<ext>
+// (.nes .sfc .md .sms .gb .gba .pce .32x .chd …) — with mister-demo.chd kept
+// as the older PSX boot disc. Matching the BASE NAME therefore also covers the
+// cores that project adds later, with no further firmware change. Hyphen and
+// underscore fold together because both spellings circulate in the wild.
+// -----------------------------------------------------------------------------
+bool isBootRomName(const String& gameName) {
+  String n = gameName;
+  n.trim();
+  n.toLowerCase();
+  n.replace('_', '-');
+
+  // Drop a trailing extension if the server sent a filename rather than a bare
+  // title. Only a short tail counts, so a real title carrying a dot
+  // ("Dr. Robotnik's Mean Bean Machine") is left intact.
+  int dot = n.lastIndexOf('.');
+  if (dot > 0 && (int)(n.length() - dot) <= 5) n = n.substring(0, dot);
+
+  return (n == "mister-boot" || n == "mister-demo");
+}
+
 bool isErrorCore(String core) {
   /**
    * Helper function to check if a core name represents an error state
@@ -4515,7 +4557,15 @@ void getCurrentGame() {
     response.trim();
     
     Serial.printf("DEBUG: Raw response: '%s'\n", response.c_str());
-    
+
+    // Same boot-ROM filter as the snapshot path: this legacy endpoint writes
+    // currentGame directly, so it needs the guard too or a server old enough to
+    // lack /status/snapshot would still show the animation as a game.
+    if (isBootRomName(response)) {
+      Serial.printf("Boot ROM '%s' detected - presenting core only\n", response.c_str());
+      response = "";
+    }
+
     previousGame = currentGame;
     currentGame = response;
     
