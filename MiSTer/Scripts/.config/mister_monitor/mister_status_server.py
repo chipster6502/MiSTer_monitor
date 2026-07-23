@@ -59,7 +59,13 @@ NAMES_TXT = _load_names_txt()
 # System constants — moved to module level for access by _update_state()
 # ---------------------------------------------------------------------------
 
-KNOWN_NON_ARCADE_SYSTEMS = [
+# Membership is tested with `corename.lower() in KNOWN_NON_ARCADE_SYSTEMS`, so
+# every entry here MUST already be lowercase — a capitalised addition would sit
+# in the set and never match anything. A frozenset rather than a list because
+# the old list carried 60 duplicates (three batches pasted in over the years,
+# some entries present in two capitalisations) and its only consumer rebuilt a
+# lowercased copy of all 216 on every single call.
+KNOWN_NON_ARCADE_SYSTEMS = frozenset({
     'nes', 'nintendo', 'famicom', 'snes', 'super nintendo', 'n64', 'nintendo64',
     'gameboy', 'gbc', 'gba', 'fds', 'sgb',
     'genesis', 'megadrive', 'sega', 'mastersystem', 'sms', 'gamegear', 'gg',
@@ -77,26 +83,22 @@ KNOWN_NON_ARCADE_SYSTEMS = [
     'vic20', 'c64', 'c128', 'c16', 'plus4', 'pet2001', 'ti99', 'trs80', 'coco', 'dragon', 'mc10',
     'trs80coco2', 'coleco', 'adam', 'apple2', 'applei', 'macplus',
     'svi318', 'fmtowns', 'amiga', 'ao486', 'pcxt', 'z386',
-    'amiga', 'amigacd32', 'ao486', 'atari2600', 'atari5200', 'atari7800',
-    'atarilynx', 'c64', 'fds', 'gb', 'gbc', 'gba', 'genesis', 'megacd',
-    'n64', 'neogeo', 's32x', 'saturn', 'sms', 'snes', 'tgfx16', 'tgfx16cd',
-    'psx', 'x68k',
-    'APOGEE', 'ARCHIE', 'AY-3-8500', 'AcornElectron', 'Adam', 'Altair8800',
-    'Amstrad PCW', 'BBCMicro', 'BK0011M', 'Casio_PV-2000', 'COCO3', 'CoCo2',
-    'EDSAC', 'EpochGalaxyII', 'Galaksija', 'Interact', 'Laser', 'Lynx48', 'Lynx48/96K',
-    'MultiComp', 'ORAO', 'Ondra_SPO186', 'Oric', 'PMD85', 'RX78', 'Sord M5',
-    'SuperVision', 'TI-99_4A', 'TRS-80', 'TSConf', 'TatungEinstein',
-    'TomyScramble', 'UK101', 'VECTOR06', 'Homelab', 'BBCBridgeCompanion',
-    'PocketChallengeV2', 'MyVision', 'SuperVision8000', 'VT52', 'CreatiVision',
-    'Atari2600', 'ATARI5200', 'ATARI7800', 'ATARI800', 'AtariST',
-    'WonderSwan', 'WonderSwanColor', 'Saturn', 'FDS', 'SGB',
-    'VECTREX', 'Coleco', 'Intellivision', 'ODYSSEY2', 'ChannelF',
-    'Astrocade', 'Gamate', 'PokemonMini', 'SG1000', 'SG-1000', 'TomyTutor',
-    'SCV', 'SuperGrafx', 'PDP1',
-    'C64', 'C16', 'C128', 'VIC20', 'Amiga', 'AO486', 'PCXT', 'Amstrad',
-    'Spectrum', 'ZX81', 'ZXNext', 'zx48', 'MSX', 'MSX1', 'X68000',
-    'Apple-II', 'Apple-IIgs', 'APPLE-I', 'MACPLUS', 'SAM', 'SAMCOUPE',
-]
+    'amigacd32',
+    'gb',
+    'neogeo',
+    'x68k',
+    'apogee', 'archie', 'ay-3-8500', 'acornelectron', 'altair8800',
+    'amstrad pcw', 'bk0011m', 'casio_pv-2000', 'coco3', 'coco2',
+    'edsac', 'epochgalaxyii', 'galaksija', 'interact', 'laser', 'lynx48', 'lynx48/96k',
+    'multicomp', 'orao', 'ondra_spo186', 'pmd85', 'rx78', 'sord m5',
+    'ti-99_4a', 'trs-80', 'tsconf', 'tatungeinstein',
+    'tomyscramble', 'uk101', 'vector06', 'homelab', 'bbcbridgecompanion',
+    'pocketchallengev2', 'myvision', 'supervision8000', 'vt52',
+    'sg-1000', 'tomytutor',
+    'scv', 'pdp1',
+    'spectrum', 'zxnext',
+    'apple-ii', 'apple-iigs', 'apple-i', 'sam',
+})
 
 CORE_NAME_MAPPING = {
     'NES': 'Nintendo NES/Famicom',
@@ -600,7 +602,7 @@ def _ensure_watched_files():
 
 def _is_known_non_arcade(corename):
     """Returns True if corename belongs to a known non-arcade system."""
-    return (corename.lower() in [s.lower() for s in KNOWN_NON_ARCADE_SYSTEMS])
+    return corename.lower() in KNOWN_NON_ARCADE_SYSTEMS
 
 
 def _read_file(path):
