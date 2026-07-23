@@ -95,7 +95,7 @@ KNOWN_NON_ARCADE_SYSTEMS = [
     'SCV', 'SuperGrafx', 'PDP1',
     'C64', 'C16', 'C128', 'VIC20', 'Amiga', 'AO486', 'PCXT', 'Amstrad',
     'Spectrum', 'ZX81', 'ZXNext', 'zx48', 'MSX', 'MSX1', 'X68000',
-    'Apple-II', 'APPLE-I', 'MACPLUS', 'SAM', 'SAMCOUPE',
+    'Apple-II', 'Apple-IIgs', 'APPLE-I', 'MACPLUS', 'SAM', 'SAMCOUPE',
 ]
 
 CORE_NAME_MAPPING = {
