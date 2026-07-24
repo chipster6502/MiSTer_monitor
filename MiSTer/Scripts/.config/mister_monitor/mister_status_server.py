@@ -492,6 +492,12 @@ _state = {
                                    # firmware that understands it; display and SD paths never use it. Empty
                                    # when unknown (legacy paths) — consumers must fall back to 'core'.
     'system_name':       'Menu',   # alias of 'core' (same value); kept for backward compatibility
+    'game_system':       '',       # the GAME's real system when a backwards-compatible core is running
+                                   # something older than itself (a Master System cartridge in the
+                                   # MegaDrive core, a 2600 cartridge in the Atari 7800 core). Empty
+                                   # whenever the game belongs to the core that opened it. 'core' stays
+                                   # the machine on screen; this is what consumers that must key off the
+                                   # GAME use — the RA console lookup above all.
     'game':              '',       # game name (filename without extension)
     'game_path':         '',       # absolute path to ROM file
     'is_arcade':         False,    # True if current core is arcade
@@ -534,7 +540,26 @@ def _atari_78_or_26(game_path):
     return 'Atari 2600'
 
 
-def _commit_state(core, game, game_path, is_arcade, event, core_raw=''):
+def _md_or_sms(game_path):
+    """Real system of a game loaded through the MegaDrive core (plays both).
+    Unlike the Atari case no header sniffing is needed: the core exposes two
+    SEPARATE file slots in its CONF_STR ("FS1,BINGENMD " and "FS2,SMS"), so a
+    .sms could only ever have come through the Master System slot. Anything
+    else is a Mega Drive title. ZIP-internal paths carry the real extension at
+    the end, so endswith() covers them too.
+
+    Returning the very same string the stock SMS core resolves to
+    (CORE_NAME_MAPPING['SMS']) is the whole point: artwork, the game-image
+    cache folder and ra_status._friendly_to_key() all key off this name, so the
+    game behaves identically whichever core opened it — including the RA
+    console lookup, which otherwise stays on Mega Drive ([1]) and can never
+    find a Master System set ([11, 15])."""
+    if game_path.lower().endswith('.sms'):
+        return 'Sega Master System'
+    return 'Sega Genesis/Mega Drive'
+
+
+def _commit_state(core, game, game_path, is_arcade, event, core_raw='', game_system=''):
     """
     Atomically commits a derived state. Bumps 'seq' and invalidates the
     rom-details cache ONLY when the identity actually changed, so a spurious
@@ -551,6 +576,11 @@ def _commit_state(core, game, game_path, is_arcade, event, core_raw=''):
         # 'PC Dos' on purpose, and a raw-only flip must not bump seq or wipe a
         # rom_details hash computed for the very same game.
         _state['core_raw'] = core_raw
+        # Derived from the same game_path that produced this identity, so it
+        # can never disagree with an unchanged state — refreshed unconditionally
+        # alongside core_raw for the same reason: a stale value would be a bug,
+        # an identical rewrite is free.
+        _state['game_system'] = game_system
         if changed:
             _state['core']              = core
             _state['system_name']       = core
@@ -1453,11 +1483,22 @@ def _update_state():
         
         print(f"🎮 Non-arcade: core={corename} game={game_name}")
 
-    # Atari7800 core plays both 2600 and 7800: resolve the game's real system
-    # so artwork (ScreenScraper 26 vs 41) and the RA panel key off the game,
-    # not the core. Core-only (no game) stays 'Atari 7800'.
-    if not is_arcade and friendly_name == 'Atari 7800' and game_path:
-        friendly_name = _atari_78_or_26(game_path)
+    # Backwards-compatible cores run software older than themselves: the Atari
+    # 7800 takes 2600 cartridges, the MegaDrive takes Master System ones. The
+    # CORE NAME deliberately stays what is actually loaded, so the panel reads
+    # like the hardware on the desk — a Master System with a Game Gear cartridge
+    # in it, which is exactly what the SMS core already does. The game's real
+    # system travels in its own field instead, for the consumers that must key
+    # off the GAME: the RetroAchievements console lookup cannot find a Master
+    # System set while it is asking Mega Drive's console list.
+    game_system = ''
+    if not is_arcade and game_path:
+        if friendly_name == 'Atari 7800':
+            game_system = _atari_78_or_26(game_path)
+        elif friendly_name == 'Sega Genesis/Mega Drive':
+            game_system = _md_or_sms(game_path)
+        if game_system == friendly_name:
+            game_system = ''      # the game belongs to its own core: nothing to say
 
     # Arcade is excluded on purpose: those cores are addressed by .mra and
     # are deliberately absent from CORE_NAME_MAPPING, so logging them would
@@ -1471,7 +1512,7 @@ def _update_state():
     _commit_state('Arcade' if is_arcade else friendly_name,
                   game_name, game_path, is_arcade,
                   event='load' if game_name else 'core',
-                  core_raw=corename)
+                  core_raw=corename, game_system=game_system)
 
 _SETTLE_SECONDS      = 0.4   # quiet time after the last event before evaluating
 _SAFETY_POLL_SECONDS = 15.0  # idle re-check; heals watcher restarts / lost events
@@ -1728,6 +1769,16 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         """Returns the currently active core friendly name from centralized state."""
         with _state_lock:
             return _state['core']
+
+    def get_game_system(self):
+        """The system the loaded GAME belongs to, which is the running core in
+        every ordinary case and its predecessor when a backwards-compatible core
+        opened something older (Master System cartridge in the MegaDrive core,
+        2600 cartridge in the Atari 7800 core). Consumers that must follow the
+        game rather than the machine use this; everything that describes what is
+        on screen keeps using get_current_core()."""
+        with _state_lock:
+            return _state['game_system'] or _state['core']
         
     def get_state_snapshot(self):
         """
@@ -1743,6 +1794,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 'core':              _state['core'],
                 'core_raw':          _state['core_raw'],
                 'system_name':       _state['system_name'],
+                'game_system':       _state['game_system'],
                 'game':              _state['game'],
                 'game_path':         _state['game_path'],
                 'is_arcade':         _state['is_arcade'],

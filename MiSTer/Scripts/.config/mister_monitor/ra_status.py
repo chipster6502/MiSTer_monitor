@@ -464,9 +464,16 @@ def _get_active_rom(handler):
     """
     core = ""
     try:
-        core = handler.get_current_core() or ""
+        # Key off the GAME's system, not the machine running it: a Master System
+        # cartridge in the MegaDrive core has to resolve to the SMS console list
+        # ([11, 15]) instead of Mega Drive's ([1]), or its set can never be
+        # found. get_game_system() returns the core name in every ordinary case,
+        # so this is a no-op for all but the backwards-compatible cores.
+        # getattr keeps this working against a server that predates the field.
+        getter = getattr(handler, 'get_game_system', None) or handler.get_current_core
+        core = getter() or ""
     except Exception as e:
-        print(f"[RA] get_current_core failed: {e}")
+        print(f"[RA] core resolution failed: {e}")
 
     if not core or core.strip().lower() == "menu":
         return core, None, None, ""
