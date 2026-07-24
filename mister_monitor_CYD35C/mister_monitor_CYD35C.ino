@@ -633,7 +633,10 @@ void tickGameInfoSynScroll();
 bool backgroundLoaded = false;  // For frame02.jpg (interface screens)
 bool bootFrameLoaded = false;   // For frame01.jpg (boot/connection screens)
 
-GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails);
+GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails,
+                                       String systemIdOverride = "");
+String ssSystemForRom(const String& coreName, const RomDetails& rd,
+                      String* altOut = nullptr);
 bool isNameSearchSystem(const String& systemId);
 GameInfo searchWithJeuRechercheJSON(String coreName, String cleanName);
 bool tryNameSearchFallback(String coreName, String gameName, RomDetails romDetails);
@@ -6343,7 +6346,11 @@ bool fetchGameMetadataJSON(String gameId, String coreName,
   if (gameId.length() > 0) {
     url += "&gameid=" + gameId;
   } else {
-    String systemId = getScreenScraperSystemId(coreName);
+    // Same extension-aware resolution as the artwork search: this CRC branch
+    // runs when GAME INFO is opened for a game whose artwork was already
+    // cached, so no search resolved a gameid for it. Asking under the core's
+    // own system would miss for a predecessor's title (see ssSystemForRom).
+    String systemId = ssSystemForRom(coreName, romDetails);
     if (systemId.length() == 0) {
       Serial.printf("META: core '%s' not mapped, skipping\n", coreName.c_str());
       metaFetchInProgress = false;
@@ -7361,6 +7368,93 @@ String getScreenScraperSystemId(String coreName) {
     }
   }
   return mapCoreToScreenScraperId(coreName);
+}
+
+// -----------------------------------------------------------------------------
+// ssSystemForRom() — the ScreenScraper system to query for THIS file.
+//
+// Some cores run their predecessor's software: the Atari 7800 takes 2600
+// cartridges, the Apple IIgs boots Apple II disks through its 5.25" slot. The
+// core — and therefore CORENAME, and therefore getScreenScraperSystemId() —
+// is the same either way, so a 2600 game launched from the 7800 core used to
+// be searched under system 41, where its CRC simply does not exist. The
+// loaded file's extension is the signal that says which library it belongs to.
+//
+// Keyed on the RESOLVED system id rather than the core name: that survives a
+// names.txt rename and behaves identically whether the raw or the friendly leg
+// of the chain produced the id.
+//
+// altOut, when supplied, receives the sibling system worth a second query if
+// the first one misses. Some extensions are genuinely undecidable and no table
+// can settle them:
+//   .bin              is the classic 2600 extension, but the 7800 core accepts
+//                     raw 7800 dumps under it too;
+//   .po / .2mg / .woz are ProDOS-order and WOZ images, written by both eras.
+// For those the first choice keeps today's behaviour — the core's own system —
+// and the sibling turns what used to be a dead end into one cheap extra query.
+// The decisive extensions (.a26, .a78, .dsk/.do/.nib, .hdv) need no sibling.
+// -----------------------------------------------------------------------------
+String ssSystemForRom(const String& coreName, const RomDetails& rd, String* altOut) {
+  if (altOut) *altOut = "";
+
+  String base = getScreenScraperSystemId(coreName);
+  if (base.length() == 0) return base;
+
+  // Extension of the loaded file, lowercased, without the dot. Fall back to
+  // the path when the server sent no filename.
+  String name = rd.filename.length() > 0 ? rd.filename : rd.path;
+  int slash = name.lastIndexOf('/');
+  if (slash >= 0) name = name.substring(slash + 1);
+  int dot = name.lastIndexOf('.');
+  if (dot < 0) return base;              // no extension: nothing to decide on
+  String ext = name.substring(dot + 1);
+  ext.toLowerCase();
+
+  // --- Atari 7800 (41) also runs Atari 2600 (26) cartridges ------------------
+  if (base == "41") {
+    if (ext == "a26") { if (altOut) *altOut = "41";  return "26"; }
+    if (ext == "a78") {                              return "41"; }  // headered 7800 dump
+    if (ext == "bin") { if (altOut) *altOut = "26";  return "41"; }
+  }
+
+  // --- Genesis / Mega Drive (1) can be handed a Master System ROM -----------
+  // Field-confirmed: a .sms can be picked from the Genesis core's own OSD file
+  // browser. Its CONF_STR declares only "BINGENMD" and neither the source nor
+  // the README mentions Mark III support, so whether the core actually RUNS
+  // the cartridge is not something this firmware can know — but the MiSTer
+  // reports it as the loaded game either way, and a .sms is a Master System
+  // title regardless of which core opened it. Decisive, so no sibling.
+  if (base == "1") {
+    if (ext == "sms") return "2";    // Master System
+  }
+
+  // --- Sega Master System (2) also runs Game Gear and SG-1000/SC-3000 -------
+  // The SMS core declares two file slots (see its CONF_STR): "SMS SG SC" and
+  // "GG". All three foreign extensions are decisive — nothing else loads them
+  // — so no sibling is needed. Note the Genesis core is NOT part of this
+  // family: its single slot takes BIN/GEN/MD only and the source carries no
+  // Master System support at all, so a Mark III cartridge cannot reach it.
+  if (base == "2") {
+    // .gg gets a sibling: the core's own README warns that a number of dumps
+    // ship with a .gg extension while actually being Master System games (the
+    // SMSpower SMS-GG list), so a miss on Game Gear is worth re-asking as SMS.
+    if (ext == "gg") { if (altOut) *altOut = "2"; return "21"; }   // Game Gear
+    if (ext == "sg") return "109";   // SG-1000
+    if (ext == "sc") return "109";   // SC-3000, filed with SG-1000 upstream
+  }
+
+  // --- Apple IIgs (217) also boots Apple II (86) software --------------------
+  // The core exposes four slots (see its CONF_STR): two hard drives taking
+  // HDV/PO/2MG, a 3.5" taking WOZ/PO/2MG, and a 5.25" taking WOZ/DSK/DO/PO/
+  // NIB/2MG. DSK, DO and NIB only ever appear on that 5.25" slot and are the
+  // Apple II era's own formats, so they are decisive.
+  if (base == "217") {
+    if (ext == "dsk" || ext == "do" || ext == "nib") { if (altOut) *altOut = "217"; return "86"; }
+    if (ext == "hdv") {                                                    return "217"; }
+    if (ext == "po" || ext == "2mg" || ext == "woz") { if (altOut) *altOut = "86";  return "217"; }
+  }
+
+  return base;
 }
 
 String mapCoreToScreenScraperId(String coreName) {
@@ -8872,7 +8966,8 @@ String getScrolledText(ScrollTextState* state) {
   }
 }
 
-GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
+GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails,
+                                       String systemIdOverride) {
   GameInfo result;
   result.found = false;
 
@@ -8889,11 +8984,18 @@ GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails) {
     return result;
   }
 
-  String systemId = getScreenScraperSystemId(coreName);
+  // Extension-aware: a 2600 cartridge loaded on the 7800 core has to be asked
+  // for under 2600. systemIdOverride is how the caller re-asks on the sibling
+  // system after a first miss.
+  String systemId = systemIdOverride.length() > 0
+                    ? systemIdOverride
+                    : ssSystemForRom(coreName, romDetails);
   if (systemId.length() == 0) {
     Serial.printf("System '%s' not supported by ScreenScraper\n", coreName.c_str());
     return result;
   }
+  Serial.printf("Querying ScreenScraper system %s for '%s'\n",
+                systemId.c_str(), romDetails.filename.c_str());
 
   // Build URL
   String url = "https://api.screenscraper.fr/api2/jeuInfos.php";
@@ -9374,6 +9476,24 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
     
     Serial.printf("Calling searchWithJeuInfosPreciseJSON()...\n");
     GameInfo gameInfo = searchWithJeuInfosPreciseJSON(coreName, romDetails);
+
+    // Backwards-compatible core, undecidable extension: ask the sibling system.
+    // Gated on a CLEAN answer (404 = definitive no-match, 200 = answered but no
+    // usable game) so a timeout or a 429 does not burn an extra call on a
+    // question the network never delivered. Unlike the transient retry further
+    // down, this URL differs from the first one — different systemeid — so a
+    // 404 on the primary is exactly the reason to ask it.
+    if (!gameInfo.found &&
+        (g_lastSSHttpCode == 404 || g_lastSSHttpCode == 200)) {
+      String altSystem;
+      ssSystemForRom(coreName, romDetails, &altSystem);
+      if (altSystem.length() > 0) {
+        Serial.printf("Not found on primary system - retrying on compatible system %s\n",
+                      altSystem.c_str());
+        showDownloadProgress(28, "Compatible system...");
+        gameInfo = searchWithJeuInfosPreciseJSON(coreName, romDetails, altSystem);
+      }
+    }
     
     Serial.printf("JSON search result:\n");
     Serial.printf("  Found: %s\n", gameInfo.found ? "YES" : "NO");
