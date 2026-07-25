@@ -6097,7 +6097,7 @@ void displayRetroAchievements() {
     M5.Display.setCursor(60, 170);  M5.Display.print("To enable RetroAchievements:");
     M5.Display.setTextColor(THEME_WHITE, THEME_BLACK);
     M5.Display.setCursor(60, 230);  M5.Display.print("1. Get a Web API key at retroachievements.org");
-    M5.Display.setCursor(60, 280);  M5.Display.print("2. On the MiSTer create ra_credentials.ini");
+    M5.Display.setCursor(60, 280);  M5.Display.print("2. On the MiSTer edit ra_credentials.ini");
     M5.Display.setCursor(60, 330);  M5.Display.print("3. Add username + api_key");
     M5.Display.setCursor(60, 380);  M5.Display.print("4. Restart the monitor server");
     return;

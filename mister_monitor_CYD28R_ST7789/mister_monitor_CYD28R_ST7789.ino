@@ -5528,7 +5528,7 @@ void displayRetroAchievements() {
     Lcd.setTextColor(THEME_WHITE);
     Lcd.setCursor(20, 96);   Lcd.print("1. Get a Web API key at");
     Lcd.setCursor(32, 108);  Lcd.print("retroachievements.org");
-    Lcd.setCursor(20, 124);  Lcd.print("2. On the MiSTer create");
+    Lcd.setCursor(20, 124);  Lcd.print("2. On the MiSTer edit");
     Lcd.setCursor(32, 136);  Lcd.print("ra_credentials.ini");
     Lcd.setCursor(20, 152);  Lcd.print("3. Add username + api_key");
     Lcd.setCursor(20, 168);  Lcd.print("4. Restart the monitor server");

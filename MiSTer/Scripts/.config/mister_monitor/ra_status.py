@@ -63,6 +63,30 @@ _BASE_DIR   = "/media/fat/Scripts/.config/mister_monitor"
 _CRED_PATH  = os.path.join(_BASE_DIR, "ra_credentials.ini")
 _CACHE_DIR  = os.path.join(_BASE_DIR, "ra_cache")
 
+# Written verbatim by _ensure_credentials_template() when no credentials file
+# exists. Everything above the section header is comments, which the parser in
+# _load_credentials() already skips, so the file is valid as shipped.
+_CRED_TEMPLATE = """; RetroAchievements credentials for MiSTer Monitor.
+;
+; 1. Sign in at https://retroachievements.org
+; 2. Open Settings -> Keys and copy your WEB API KEY
+;    (this is NOT your website password)
+; 3. Replace the two placeholder values below
+; 4. Restart the monitor server
+;
+; The monitor only ever READS your account: the achievement set for the
+; running game, and your own unlock progress. It never writes anything.
+
+[retroachievements]
+username=YourRAUsername
+api_key=YourWebAPIKey
+"""
+
+# The values above, lowercased. An untouched template must keep reporting
+# "not_configured" so the page goes on showing its setup tutorial instead of
+# an authentication error — see _load_credentials().
+_CRED_PLACEHOLDERS = frozenset({"yourrausername", "yourwebapikey"})
+
 _INDEX_TTL_SECONDS    = 7 * 24 * 3600   # console hash index refresh
 _PROGRESS_TTL_SECONDS = 30              # progress aggregate cache
 _NEGATIVE_TTL_SECONDS = 120             # retry window for unresolved dumps
@@ -265,6 +289,29 @@ def _unlocks_are_tracked():
 
 # --- Credentials ---------------------------------------------------------------
 
+def _ensure_credentials_template():
+    """Drop an editable ra_credentials.ini in place when none exists.
+
+    Saves the user a rename: the file arrives with the right name, and the
+    steps are in comments right where they will be read. An existing file is
+    never touched, whatever it contains, so a working configuration survives
+    every update.
+
+    Failures are logged and swallowed: a read-only SD card or a missing
+    directory must not stop the RA layer from starting. Without the file the
+    behaviour is simply what it was before this existed.
+    """
+    if os.path.exists(_CRED_PATH):
+        return
+    try:
+        os.makedirs(_BASE_DIR, exist_ok=True)
+        with open(_CRED_PATH, "w") as f:
+            f.write(_CRED_TEMPLATE)
+        print(f"[RA] created credentials template at {_CRED_PATH}")
+    except OSError as e:
+        print(f"[RA] could not create credentials template: {e}")
+
+
 def _load_credentials():
     if not os.path.exists(_CRED_PATH):
         return None, None
@@ -287,6 +334,13 @@ def _load_credentials():
     except OSError:
         return None, None
     if not user or not key:
+        return None, None
+    # An untouched template is not a configuration. Rejecting it here keeps the
+    # page on its setup tutorial rather than reporting an auth failure the user
+    # can do nothing about, and keeps the API from being called with a name
+    # that is not an account.
+    if (user.lower() in _CRED_PLACEHOLDERS
+            or key.lower() in _CRED_PLACEHOLDERS):
         return None, None
     return user, key
 
@@ -930,6 +984,7 @@ def start_ra_polling(state_getter):
     if _poll_started:
         return
     _poll_started = True
+    _ensure_credentials_template()
     threading.Thread(target=_ra_poll_thread, daemon=True).start()
     threading.Thread(target=_live_watch_thread, daemon=True).start()
 
