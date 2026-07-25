@@ -31,6 +31,7 @@
 
 import hashlib
 import os
+import re
 import sys
 import time
 import zipfile
@@ -67,6 +68,7 @@ CORE_HASH_METHOD = {
     'atari7800':    '7800',   # A78 header skipped when present; raw otherwise
     'atari2600':    '7800',   # same handler: headerless dumps hash raw
     's32x':         'raw',
+    'neogeo':       'arcade',  # hashes the romset id, not the .neo contents
 }
 
 # Extensions we refuse per method (format needs conversion we don't do yet)
@@ -273,7 +275,7 @@ _HASHERS = {
 
 # --- Public entry point ---------------------------------------------------------
 
-def compute_ra_hash(core_name, path, internal_path=None):
+def compute_ra_hash(core_name, path, internal_path=None, romset_id=None):
     """
     Compute the RetroAchievements MD5 for the active ROM.
 
@@ -281,6 +283,8 @@ def compute_ra_hash(core_name, path, internal_path=None):
         core_name:     canonical MiSTer core name (after CORE_NAME_MAPPING)
         path:          filesystem path to the ROM file or to a .zip container
         internal_path: name of the ROM inside the ZIP, or None for plain files
+        romset_id:     arcade romset id ('mslug2' or 'mslug2.zip'), required by
+                       the 'arcade' method and ignored by every other one
 
     Returns a dict:
         {"hash": "<32 hex chars>" | None,
@@ -296,6 +300,26 @@ def compute_ra_hash(core_name, path, internal_path=None):
         result["error"] = f"core '{core_name}' not supported for RA hashing"
         return result
     result["method"] = method
+
+    # Arcade is the one method that never reads the file. rc_hash identifies an
+    # arcade game by the MD5 of its romset name, so the container is irrelevant
+    # — which is exactly why MiSTer's .neo files can resolve at all. Short-
+    # circuit before _open_rom(): opening a 7 MB member inside a 4 GB pack zip
+    # to then ignore every byte would be pure waste.
+    if method == 'arcade':
+        stem = os.path.splitext((romset_id or '').strip())[0].lower()
+        # splitext('.zip') returns ('.zip', '') — a leading dot is part of the
+        # basename, not an extension — so a degenerate id would otherwise be
+        # hashed as literal garbage. Demand something that actually looks like
+        # a MAME romset id; a wrong hash is worse than no hash, because it
+        # would silently show another game's achievements.
+        if not re.match(r'^[a-z0-9][a-z0-9_-]*$', stem):
+            result["error"] = ("arcade romset id unavailable or malformed "
+                               "(romsets.xml missing or name unconfirmed)")
+            return result
+        result["hash"] = hashlib.md5(stem.encode('utf-8')).hexdigest().upper()
+        result["note"] = f"arcade: MD5 of romset id '{stem}' (file not read)"
+        return result
 
     rom_name = internal_path if internal_path else path
     ext = os.path.splitext(rom_name)[1].lower()

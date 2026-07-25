@@ -156,6 +156,7 @@ _FRIENDLY_RULES = [
     (("mastersystem", "gamegear", "sms"),              "sms"),
     (("atari7800",),                                   "atari7800"),
     (("atari2600",),                                   "atari2600"),
+    (("neogeo",),                                      "neogeo"),
     # CD systems: no local hasher (is_core_supported() is False for these).
     # They resolve via the odelot log hash or the corroborated LastGameID
     # fallback — see the resolution block in get_ra_status().
@@ -188,6 +189,9 @@ CORE_TO_CONSOLE_IDS = {
     'atari7800':    [51, 25],
     'atari2600':    [25, 51],  # sniffed 2600 game: 2600 index first
     's32x':         [10],
+    # Neo Geo MVS/AES is not its own RA platform: its sets live under Arcade,
+    # which is also where roughly a quarter of all arcade sets come from.
+    'neogeo':       [27],
     # CD systems (log-hash / LastGameID resolution only):
     'psx':          [12],
     'saturn':       [39],
@@ -578,7 +582,10 @@ def _titles_match(local_name, ra_title):
 
 def _get_active_rom(handler):
     """
-    Returns (core_friendly, resolved_path, internal_path, search_name).
+    Returns (core_friendly, resolved_path, internal_path, search_name,
+    romset_id). romset_id is the server's already-validated NeoGeo romnom
+    ('mslug2.zip'), or '' — it is checked against the core's romsets.xml in
+    _neogeo_ss_romnom(), so an unconfirmed name never reaches the hasher.
     All path/state logic stays in the server (get_current_core /
     get_rom_details); we only consume its resolved fields.
     """
@@ -596,29 +603,30 @@ def _get_active_rom(handler):
         print(f"[RA] core resolution failed: {e}")
 
     if not core or core.strip().lower() == "menu":
-        return core, None, None, ""
+        return core, None, None, "", ""
 
     try:
         details = handler.get_rom_details()
     except Exception as e:
         print(f"[RA] get_rom_details failed: {e}")
-        return core, None, None, ""
+        return core, None, None, "", ""
 
     if not isinstance(details, dict) or not details.get("available"):
-        return core, None, None, ""
+        return core, None, None, "", ""
 
     search_name = str(details.get("search_name", "") or "")
+    romset_id   = str(details.get("ss_romnom", "") or "")
 
     zip_path = details.get("resolved_zip_path") or details.get("zip_path")
     internal = details.get("internal_path")
     if zip_path and internal:
-        return core, zip_path, internal, search_name
+        return core, zip_path, internal, search_name, romset_id
 
     plain = details.get("path") or ""
     if plain and os.path.exists(plain):
-        return core, plain, None, search_name
+        return core, plain, None, search_name, romset_id
 
-    return core, None, None, search_name
+    return core, None, None, search_name, romset_id
 
 
 def _read_seq():
@@ -1070,7 +1078,8 @@ def get_ra_status(handler):
         return out
     out["enabled"] = True
 
-    core_friendly, rom_path, internal, search_name = _get_active_rom(handler)
+    core_friendly, rom_path, internal, search_name, romset_id = \
+        _get_active_rom(handler)
     out["core"] = core_friendly
 
     ra_key = _friendly_to_key(core_friendly)
@@ -1115,7 +1124,7 @@ def get_ra_status(handler):
         ra_hash_hex = ""
         hash_err    = ""
         if hashable:
-            hres = compute_ra_hash(ra_key, rom_path, internal)
+            hres = compute_ra_hash(ra_key, rom_path, internal, romset_id)
             if hres["error"] or not hres["hash"]:
                 hash_err = hres["error"] or "no hash produced"
             else:
