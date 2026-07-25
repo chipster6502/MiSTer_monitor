@@ -6164,6 +6164,18 @@ void displayRetroAchievements() {
     return;
   }
 
+  // The game resolved on RetroAchievements but carries no published set.
+  // Without this the panel would render POINTS 0/0 next to MATCHED and the
+  // subpage cycler would refuse to advance (listPages = 0 collapses the
+  // modulo to 0), which reads as a malfunction rather than as the stated
+  // outcome it is. Common on CD systems, where many titles are catalogued
+  // long before anyone writes achievements for them.
+  if (raStatus.total == 0) {
+    drawRAMessage("SET NOT PUBLISHED YET",
+                  "No achievements exist for this game yet", THEME_YELLOW);
+    return;
+  }
+
   // ---- status == "ok": full progress panel ---------------------------------
 
   drawRATitleRow();
