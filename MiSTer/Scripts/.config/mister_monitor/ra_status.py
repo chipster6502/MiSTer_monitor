@@ -528,8 +528,37 @@ def _get_progress_cached(gid, user, key):
 
 # --- Title corroboration (LastGameID fallback) --------------------------------
 
+# Articles that ROM-naming conventions relocate. Kept small on purpose: every
+# entry is a word that can legitimately START a title, so stripping it from
+# both ends is safe only because it is applied symmetrically to both operands.
+_ARTICLES = ('the', 'a', 'an', 'le', 'la', 'les', 'los', 'las',
+             'el', 'il', 'der', 'die', 'das')
+_ART_ALT = '|'.join(_ARTICLES)
+_RE_ART_TRAIL = re.compile(r'^(.*?),\s*(?:' + _ART_ALT + r')\s*$')
+_RE_ART_LEAD  = re.compile(r'^(?:' + _ART_ALT + r')\s+(.*)$')
+
+
+def _strip_article(s):
+    """
+    Remove a relocated leading article from either end.
+
+    No-Intro / Redump write "Legend of Zelda, The"; the RA API writes "The
+    Legend of Zelda". Normalizing both to "legend of zelda" lets the
+    containment test in _titles_match() see them as the same game without
+    making that test any more permissive than it already is.
+    """
+    t = (s or '').strip().lower()
+    m = _RE_ART_TRAIL.match(t)
+    if m:
+        t = m.group(1)
+    m = _RE_ART_LEAD.match(t)
+    if m:
+        t = m.group(1)
+    return t.strip()
+
+
 def _norm_title(s):
-    return re.sub(r'[^a-z0-9]', '', (s or '').lower())
+    return re.sub(r'[^a-z0-9]', '', _strip_article(s))
 
 
 def _titles_match(local_name, ra_title):
