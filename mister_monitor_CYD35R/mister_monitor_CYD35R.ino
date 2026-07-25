@@ -216,6 +216,9 @@ const unsigned long RA_EVENT_POLL_INTERVAL = 5000;
 
 String raLastUnlockDesc = "";   // last_unlock_description (log tailer fills it)
 int    raGameId = 0;            // resolved RA game id — subpage reset key
+int    raBannerShownFor = 0;   // game id the READY banner has already fired for,
+                               // so arming can wait for the fork heartbeat to go
+                               // live in a later fetch without ever repeating
 
 // --- Trophy-list subpages (page 6) -------------------------------------------
 // raSubPage 0 = progress panel; 1..N = paginated list, cycled by tapping the
@@ -624,6 +627,7 @@ bool gameInfoRotationReady();
 
 // --- RETROACHIEVEMENTS panel (page 6) ---
 void getRAStatus();
+bool raCoreRecordsUnlocks();
 void pollRAEvent();
 void serviceRAPopup();
 void pollRA();
@@ -5008,6 +5012,31 @@ void getNetworkAndSession() {
   http.end();
 }
 
+// -----------------------------------------------------------------------------
+// raCoreRecordsUnlocks() — can the running core actually bank an achievement?
+//
+// The RetroAchievements toolkit (odelot's Main_MiSTer fork) loads its adapted
+// cores through MGLs whose <setname> prefixes the stock name with 'RA_'
+// (RA_SNES, RA_MegaDrive, ...), and the server forwards CORENAME verbatim in
+// core_raw, so the prefix is the signal. On a stock core the panel still shows
+// the set and your account's progress — that is a cloud lookup keyed on the
+// ROM hash, true wherever you play — but nothing new will ever unlock.
+//
+// An empty core_raw (the legacy /status/core path, which clears it on purpose)
+// reads as "cannot tell", and cannot-tell is treated as NO: the banner is a
+// promise, and a promise that cannot be verified should not be made.
+// -----------------------------------------------------------------------------
+bool raCoreRecordsUnlocks() {
+  // The server owns the verdict: only it can see whether odelot's fork is
+  // installed and whether its debug log is beating right now, and that
+  // heartbeat is written by the FORK, so it holds for both installation
+  // routes. The prefix check survives underneath it for the one case the
+  // server cannot see — a toolkit install whose fork runs without debug=1,
+  // where there is no log at all — and it also keeps this working against a
+  // server that predates the field (absent -> false -> previous behaviour).
+  return raStatus.unlocksTracked || currentCoreRaw.startsWith("RA_");
+}
+
 void getRAStatus() {
   if (ESP.getFreeHeap() < 45000) {
     Serial.printf("[RA] Low memory (%d), skipping fetch\n", ESP.getFreeHeap());
@@ -5049,6 +5078,7 @@ void getRAStatus() {
   raStatus.pointsTotal        = extractIntValue(response, "points_total");
   raStatus.pointsHardcore     = extractIntValue(response, "points_hardcore");
   raStatus.core               = extractStringValue(response, "core");
+  raStatus.unlocksTracked     = extractBoolValue(response, "unlocks_tracked");
   raStatus.eventCounter       = extractIntValue(response, "event_counter");
   raStatus.lastUnlockTitle    = extractStringValue(response, "last_unlock_title");
   raStatus.lastUnlockPoints   = extractIntValue(response, "last_unlock_points");
@@ -5059,18 +5089,29 @@ void getRAStatus() {
   // New game resolved: the trophy-list buffer belongs to the old one.
   int gid = extractIntValue(response, "game_id");
   if (gid != raGameId) {
-    // Announce only a real, playable RA set: a resolved game id whose status
-    // is ok and that actually ships achievements. gid 0 (unloaded, or not
-    // recognized) and 0-achievement matches stay silent. Both fields are
-    // parsed above, so they already describe THIS response.
-    if (gid != 0 && raStatus.status == "ok" && raStatus.total > 0) {
-      raBannerPending = true;
-    }
+    // A new game: reset the per-game view state. The banner is handled apart,
+    // below, since whether it may fire does not depend only on this edge.
     raGameId    = gid;
     raSubPage   = 0;
     raListValid = false;
     raDetailShown = false;
   }
+
+  // READY banner: fire the first time a game both is a real, playable RA set
+  // AND runs on a core that can actually bank the unlock. Two independent facts
+  // with different timing — the game resolves on the first fetch, but the fork
+  // heartbeat proving the core can record often only goes live a fetch or two
+  // later — so this is deliberately NOT gated on the game_id edge above.
+  // raBannerShownFor makes it fire once per game and re-arm on the next. gid 0
+  // and 0-achievement sets stay silent; a stock core stays silent too, with the
+  // panel saying why in its place.
+  if (gid != 0 && gid != raBannerShownFor &&
+      raStatus.status == "ok" && raStatus.total > 0 &&
+      raCoreRecordsUnlocks()) {
+    raBannerPending  = true;
+    raBannerShownFor = gid;
+  }
+
   raStatus.valid = true;
 
   response = "";
@@ -5204,7 +5245,12 @@ void displayRetroAchievements() {
            raStatus.pointsEarned, raStatus.pointsTotal);
   drawMiniPanel(10, 136, 225, 46, "POINTS", String(pointsVal), THEME_GREEN);
 
-  if (raStatus.unlockedHardcore > 0) {
+  // Top priority in this slot: on a stock core nothing here will ever
+  // move, and that single fact changes how the whole panel reads. The
+  // hardcore tally and the match method are diagnostics by comparison.
+  if (!raCoreRecordsUnlocks()) {
+    drawMiniPanel(245, 136, 225, 46, "UNLOCKS", "NOT RECORDED", THEME_YELLOW);
+  } else if (raStatus.unlockedHardcore > 0) {
     char hcVal[24];
     snprintf(hcVal, sizeof(hcVal), "%d (%dpt)",
              raStatus.unlockedHardcore, raStatus.pointsHardcore);
@@ -5236,6 +5282,19 @@ void displayRetroAchievements() {
     Lcd.setTextSize(1.5f);
     Lcd.setCursor(10, 198);
     Lcd.print("No achievements earned yet");
+  }
+
+  // Fixed advisory, stock cores only: the mini-panel above states that unlocks
+  // are not being recorded, this line says what to do about it. Everything else
+  // on the page stays valid — the set and your progress are a cloud read keyed
+  // on the ROM hash, true wherever the game is played — so this informs rather
+  // than warns. Guarded on total > 0 because a set with no achievements has
+  // nothing to record in the first place.
+  if (!raCoreRecordsUnlocks() && raStatus.total > 0) {
+    Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+    Lcd.setTextSize(1.5f);
+    Lcd.setCursor(10, 224);
+    Lcd.print("Use an RA-enabled core to record unlocks");
   }
 }
 

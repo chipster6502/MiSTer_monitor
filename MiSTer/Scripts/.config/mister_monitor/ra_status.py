@@ -76,6 +76,8 @@ _LIST_DESC_MAX         = 120            # server-side cap for row descriptions
 
 _RA_LOG_PATH         = "/tmp/ra_debug.log"   # odelot fork, debug=1
 _OSD_FLAG_PATH       = "/tmp/OSD_VISIBLE"    # fork, MiSTer.ini log_file_entry=1
+_FORK_CFG_PATH       = "/media/fat/retroachievements.cfg"   # odelot fork config
+_RA_LIVE_TTL_SECONDS = 15                    # ra_debug.log heartbeat window
 _LOG_POLL_SECONDS    = 0.5                   # tail/OSD watch cadence
 _LOG_READ_CHUNK      = 65536                 # max bytes per incremental read
 _LOG_GUARD_BYTES     = 8 * 1024 * 1024       # RAM guard threshold (tmpfs)
@@ -224,6 +226,41 @@ _log_state = {           # odelot debug-log tailer findings (guarded by _ra_lock
     "md5_path": "",      # path from the preceding 'Hashing ROM:' line
     "md5_ts": 0.0,
 }
+
+
+def _unlocks_are_tracked():
+    """True when an achievement earned right now would actually be banked.
+
+    Two facts, checked in order:
+
+      1. /media/fat/retroachievements.cfg — odelot's fork config. Without it
+         the fork is not installed, and nothing can ever unlock whatever core
+         is loaded.
+
+      2. /tmp/ra_debug.log read as a HEARTBEAT rather than as a trace. The fork
+         polls an adapted core about once per frame and writes a line each time
+         ("A2600 poll=... frame=..."), so while one is running the file's mtime
+         is never more than a moment old. A stock core writes nothing: the file
+         does not exist at all before the session's first RA core, and it stops
+         growing the moment you leave one. Freshness therefore answers "is an
+         RA-adapted core running RIGHT NOW", and answers it identically for
+         both installation routes — unlike the RA_ CORENAME prefix, which is
+         added by MiSTer Companion's MGLs and is absent when the binaries come
+         straight from odelot's forks (their CONF_STR name is the stock one).
+
+    Returns False when the fork's config has no debug=1, since then there is no
+    log to read at all. The firmware falls back to the CORENAME prefix in that
+    case, which still covers every toolkit install; a direct install without
+    debug=1 is the one blind spot, and enabling debug=1 closes it.
+
+    Costs two stat() calls per status fetch.
+    """
+    if not os.path.exists(_FORK_CFG_PATH):
+        return False
+    try:
+        return (time.time() - os.path.getmtime(_RA_LOG_PATH)) < _RA_LIVE_TTL_SECONDS
+    except OSError:
+        return False
 
 
 # --- Credentials ---------------------------------------------------------------
@@ -922,6 +959,7 @@ def get_ra_status(handler):
         "last_unlock_description": "",
         "polling": _poll_started,
         "log_tail": False,
+        "unlocks_tracked": False,
         "ssl_verified": _SSL_VERIFIED,
         "timestamp": now,
     }
@@ -929,7 +967,10 @@ def get_ra_status(handler):
     # Events are attached to every response so the firmware can watch the
     # counter from any page, whatever the resolution outcome below.
     def _attach_events():
+        # stat() outside the lock: this is file I/O, the lock guards state.
+        tracked = _unlocks_are_tracked()
         with _ra_lock:
+            out["unlocks_tracked"]      = tracked
             out["event_counter"]        = _events["counter"]
             out["last_unlock_title"]    = _events["last_title"]
             out["last_unlock_points"]   = _events["last_points"]

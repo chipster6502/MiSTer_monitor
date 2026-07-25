@@ -86,6 +86,11 @@ struct RAStatus {
   String  lastUnlockTitle;
   int     lastUnlockPoints;
   bool    lastUnlockHardcore;
+  bool    unlocksTracked;      // the running core can actually bank an unlock:
+                               // odelot's fork is installed AND its debug log is
+                               // beating right now. False also when the fork runs
+                               // without debug=1, where the firmware falls back to
+                               // the RA_ CORENAME prefix instead.
   bool    valid;               // last fetch parsed successfully
 };
 
