@@ -72,6 +72,8 @@ String _ss_user_str;
 String _ss_pass_str;
 String _boxart_region_str       = "wor";
 String _info_lang_str           = "en";   // [gameinfo] info_lang
+GameMeta g_metaLangFallback;              // cached meta kept when a language re-fetch fails
+bool     g_metaLangFallbackValid = false;
 int    _info_synopsis_max       = 900;    // [gameinfo] info_synopsis_max
 String _core_images_path_str    = "/cores";
 String _default_core_image_str  = "/cores/menu.jpg";
@@ -309,7 +311,14 @@ unsigned long gameInfoSynScrollTime = 0;  // last scroll step / pause start
 unsigned long gameInfoSynCycledTime = 0;  // when the text finished scrolling
 bool gameInfoSynPaused   = true;          // pausing at top or bottom
 bool gameInfoSynCycled   = false;         // a full scroll cycle has completed
-const unsigned long GAMEINFO_SYN_STEP_MS  = 1200;  // one line per 1.2 s
+// Synopsis auto-scroll cadence and mode. Both come from [gameinfo] in
+// config.ini (info_scroll_step_ms / info_scroll_auto) and are applied in
+// setup(). STEP is no longer a compile-time constant so the user can slow the
+// synopsis down; AUTO=false freezes it and the panel then dwells for
+// GAMEINFO_SYN_FIT_MS (the "fits without scrolling" path) before returning to
+// the image.
+unsigned long GAMEINFO_SYN_STEP_MS = 2000;  // ms per line (configurable, default 2s)
+bool          gameInfoSynAuto      = true;  // false = hold still, no auto-scroll
 const unsigned long GAMEINFO_SYN_PAUSE_MS = 4000;  // hold at top and bottom
 // Tail spent frozen on the LAST lines before leaving the panel. Added to the
 // 4 s bottom hold (GAMEINFO_SYN_PAUSE_MS), that is ~13 s of reading time on
@@ -1596,10 +1605,16 @@ RomDetails getCurrentRomDetails() {
         break;
       }
 
-      if (!details.available || details.fileTooLarge) {
-        Serial.printf("ROM details: definitive negative (available=%s, tooLarge=%s) - stopping\n",
+      // Definitive negative: no ROM, file can't be hashed, or the server has
+      // determined the CRC can NEVER arrive (no_hash: unindexable, mutable
+      // container like .vhd). Stop polling — for no_hash this saves the full
+      // retry budget on every 0MHz load, and the name-search fallback (or the
+      // container gate) takes over immediately.
+      if (!details.available || details.fileTooLarge || details.noHash) {
+        Serial.printf("ROM details: definitive negative (available=%s, tooLarge=%s, noHash=%s) - stopping\n",
                       details.available ? "YES" : "NO",
-                      details.fileTooLarge ? "YES" : "NO");
+                      details.fileTooLarge ? "YES" : "NO",
+                      details.noHash ? "YES" : "NO");
         break;
       }
 
@@ -1702,10 +1717,14 @@ RomDetails getCurrentRomDetailsForced() {
         break;
       }
 
-      if (!details.available || details.fileTooLarge) {
-        Serial.printf("Forced ROM details: definitive negative (available=%s, tooLarge=%s) - stopping\n",
+      // Definitive negative: no ROM, file can't be hashed, or the server has
+      // determined the CRC can NEVER arrive (no_hash). Same rationale as the
+      // non-forced loop.
+      if (!details.available || details.fileTooLarge || details.noHash) {
+        Serial.printf("Forced ROM details: definitive negative (available=%s, tooLarge=%s, noHash=%s) - stopping\n",
                       details.available ? "YES" : "NO",
-                      details.fileTooLarge ? "YES" : "NO");
+                      details.fileTooLarge ? "YES" : "NO",
+                      details.noHash ? "YES" : "NO");
         break;
       }
 
@@ -2049,6 +2068,7 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
   
   DownloadFlagGuard dlGuard;
   g_lastSSHttpCode = 0;
+  g_mediaAttemptCount = 0;
   bool success = false;
   
   Serial.printf("\n=== ENHANCED CORE IMAGE DOWNLOAD ===\n");
@@ -2950,6 +2970,10 @@ void setup() {
   _info_synopsis_max      = appConfig.infoSynopsisMax;
   if (_info_synopsis_max < 200)  _info_synopsis_max = 200;
   if (_info_synopsis_max > 2000) _info_synopsis_max = 2000;
+  GAMEINFO_SYN_STEP_MS = (unsigned long) appConfig.infoScrollStepMs;
+  if (GAMEINFO_SYN_STEP_MS < 200)  GAMEINFO_SYN_STEP_MS = 200;
+  if (GAMEINFO_SYN_STEP_MS > 8000) GAMEINFO_SYN_STEP_MS = 8000;
+  gameInfoSynAuto = appConfig.infoScrollAuto;
   _core_images_path_str   = appConfig.coreImagesPath;
   _default_core_image_str = appConfig.defaultCoreImage;
 
@@ -3621,8 +3645,12 @@ if (oldGame != currentGame && sdCardAvailable) {
         } else {
           tickGameInfoSynScroll();
           if (gameInfoSynCycled) {
-            unsigned long dwell = gameInfoSynNeedsScroll() ? GAMEINFO_SYN_EXIT_MS
-                                                           : GAMEINFO_SYN_FIT_MS;
+            // Manual mode (info_scroll_auto=false) always uses the long FIT dwell
+            // (15 s) so the reader has time on a synopsis that never scrolled.
+            // Auto mode keeps the original choice: the short EXIT tail when it
+            // scrolled, the long FIT dwell when it fit without scrolling.
+            unsigned long dwell = (!gameInfoSynAuto || !gameInfoSynNeedsScroll())
+                                  ? GAMEINFO_SYN_FIT_MS : GAMEINFO_SYN_EXIT_MS;
             if (millis() - gameInfoSynCycledTime >= dwell) {
               Serial.println("GAME INFO: synopsis finished — returning to image");
               gameInfoForceExit = true;
@@ -7339,7 +7367,8 @@ bool loadGameMeta(const String &metaPath, GameMeta &m) {
     if (eq < 1) continue;
     String key = line.substring(0, eq);
     String val = line.substring(eq + 1);
-    if      (key == "year")      m.year      = val;
+    if      (key == "lang")      m.lang      = val;
+    else if (key == "year")      m.year      = val;
     else if (key == "developer") m.developer = jsonUnescapeAndFold(val);
     else if (key == "publisher") m.publisher = jsonUnescapeAndFold(val);
     else if (key == "players")   m.players   = val;
@@ -8046,6 +8075,16 @@ void drawGameInfoSynopsis() {
 void tickGameInfoSynScroll() {
   if (gameInfoSynCycled) return;            // finished: frozen at the bottom
 
+  // Manual mode: the reader controls the pace, so never auto-advance. Freeze at
+  // the top immediately; the panel's exit logic then applies GAMEINFO_SYN_FIT_MS
+  // (15 s) — the same dwell used by a synopsis that needs no scrolling — before
+  // returning to the image.
+  if (!gameInfoSynAuto) {
+    gameInfoSynCycled     = true;
+    gameInfoSynCycledTime = millis();
+    return;
+  }
+
   // The line cache MUST be current before maxTop is computed. handleTouch()
   // runs earlier in the loop than this block, so a tap on the subpage toggle
   // lands here in the same iteration — before any redraw has had the chance to
@@ -8131,6 +8170,24 @@ void displayGameInfo() {
     if (findGameImageExact(currentCore, currentGame, imgPath)) {
       loadGameMeta(getMetaPathFromImagePath(imgPath), currentMeta);
     }
+
+    // Language mismatch: the sidecar was fetched in a different language than
+    // the one now configured. Drop it so the lazy-fetch block below re-queries
+    // ScreenScraper in the new language and overwrites the sidecar. A sidecar
+    // with no lang (written by pre-lang firmware) counts as a mismatch and is
+    // refreshed once. If that re-fetch cannot run (no CRC / no network), the
+    // block leaves currentMeta unloaded and the cached copy is reloaded just
+    // below — a synopsis in the wrong language beats no synopsis at all.
+    if (currentMeta.loaded && currentMeta.lang != _info_lang_str) {
+      Serial.printf("META: language changed (%s -> %s), refreshing\n",
+                    currentMeta.lang.c_str(), _info_lang_str.c_str());
+      GameMeta wrongLang = currentMeta;    // keep as fallback
+      currentMeta = GameMeta();
+      currentMeta.forGame = currentGame;
+      metaFetchAttemptedFor = "";          // allow the fetch below to run
+      g_metaLangFallback = wrongLang;      // stashed for the fallback step
+      g_metaLangFallbackValid = true;
+    }
   }
 
   // ---- 2. no sidecar: one lazy fetch attempt per game -------------------------
@@ -8154,7 +8211,11 @@ void displayGameInfo() {
       GameMeta m;
       if (fetchGameMetadataJSON("", currentCore, rd, m)) {   // "" = identify by CRC
         m.forGame = currentGame;
+        m.lang    = _info_lang_str;   // stamp language so sidecar and in-memory
+                                      // copy agree; else the next visit sees a
+                                      // mismatch and re-fetches in a loop
         currentMeta = m;
+        g_metaLangFallbackValid = false;   // fresh copy in the right language wins
         String imgPath2;
         if (findGameImageExact(currentCore, currentGame, imgPath2)) {
           saveGameMeta(getMetaPathFromImagePath(imgPath2), m);
@@ -8162,6 +8223,16 @@ void displayGameInfo() {
       }
       M5.Display.fillRect(0, 0, 1280, 646, THEME_BLACK);     // redraw clean
     }
+  }
+
+  // ---- language re-fetch failed: fall back to the cached (wrong-language) copy
+  if (haveGame && !currentMeta.loaded && g_metaLangFallbackValid &&
+      g_metaLangFallback.forGame == currentGame) {
+    Serial.println("META: language re-fetch unavailable, keeping cached copy");
+    currentMeta = g_metaLangFallback;
+  }
+  if (g_metaLangFallbackValid && g_metaLangFallback.forGame != currentGame) {
+    g_metaLangFallbackValid = false;   // stale: user moved on to another game
   }
 
   // ---- header: game title (scrolls horizontally when too long) ----------------
@@ -8913,7 +8984,9 @@ String mapCoreToScreenScraperId(String coreName) {
   if (coreLower == "atari7800") return "41";
   if (coreLower == "atarilynx") return "28";   // Camputers Lynx is "lynx48"
   if (coreLower == "atarist") return "42";
-  if (coreLower == "amiga" || coreLower == "minimig") return "64";
+  if (coreLower == "amiga" || coreLower == "minimig" ||
+      coreLower == "amiga500" || coreLower == "amiga500hd" ||
+      coreLower == "amiga600hd" || coreLower == "commodore amiga") return "64";
   if (coreLower == "amigacd32") return "130";
   if (coreLower == "c64" || coreLower == "commodore64" || coreLower == "c128") return "66";
   if (coreLower == "ao486" || coreLower == "pc dos" || coreLower == "pcxt") return "135";
@@ -8945,8 +9018,6 @@ String mapCoreToScreenScraperId(String coreName) {
   if (coreLower == "ngp") return "25";
   if (coreLower == "ngpc") return "82";
   if (coreLower == "gba2p") return "12";
-  if (coreLower == "scv") return "67";
-  if (coreLower == "jaguar") return "27";
   if (coreLower == "scv") return "67";
   if (coreLower == "jaguar") return "27";
   if (coreLower == "menu" || coreLower == "main") return "";
@@ -10706,6 +10777,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
   
   DownloadFlagGuard dlGuard;
   g_lastSSHttpCode = 0;
+  g_mediaAttemptCount = 0;
   bool success = false;
   bool gameWasFound = false;   // a jeu was resolved (id present), media may still be missing
 
