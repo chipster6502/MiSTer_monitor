@@ -1059,6 +1059,40 @@ def _neogeo_games_dir(rom_path):
     return None
 
 
+def _resolve_neogeo_probe(mister_path):
+    """
+    Filesystem path for a MiSTer-relative path like 'games/NEOGEO/x/sonicwi2'.
+
+    Only used to answer "is this a romset folder?" from the naming code, which
+    runs outside the request handler and so cannot call its resolver.
+    """
+    if not mister_path:
+        return ''
+    if mister_path.startswith('/'):
+        return mister_path
+    return os.path.join('/media/fat', mister_path)
+
+
+def _neogeo_romset_dir(path, corename):
+    """
+    The romset id when `path` is an unzipped Darksoft romset folder, else ''.
+
+    Gated twice on purpose: the NeoGeo core, and the folder name appearing in
+    the core's own romsets.xml. Path resolution is shared by every core, and a
+    looser "a directory is fine" rule would turn clean failures elsewhere into
+    absurd paths.
+    """
+    if (corename or '').strip().lower() not in _NEOGEO_CORENAMES:
+        return ''
+    if not path or not os.path.isdir(path):
+        return ''
+    name = os.path.basename(path.rstrip('/')).strip().lower()
+    if not name:
+        return ''
+    names = _load_romset_names(_neogeo_games_dir(path))
+    return name if name in names else ''
+
+
 def _neogeo_ss_romnom(rom_path, filename, corename):
     """
     ScreenScraper romnom for a NeoGeo ROM: '<romset>.zip', or '' when unknown.
@@ -1260,6 +1294,21 @@ def _enrich_rom_result(result, detection_method=None):
     search_name = _clean_search_name(result.get('filename') or game_for_name)
     corename_raw = _read_corename_raw()
     no_hash = _is_no_hash(ext, corename_raw)
+    # A romset folder has no single file to hash, so the CRC can never arrive.
+    # Saying so here is what stops the firmware spending its whole retry budget
+    # waiting for one.
+    if not no_hash and _neogeo_romset_dir(
+            result.get('path') or path_for_name, corename_raw):
+        no_hash = True
+        # The folder's basename is the romset id ('cyberlip'), which is useless
+        # as a ScreenScraper text search. _state['game'] holds the title the
+        # core resolved from romsets.xml ('Cyber-Lip') — search on that.
+        # Used verbatim: _clean_search_name() is built for FILENAMES — it starts
+        # with os.path.basename(), which would truncate
+        # 'Metal Slug 2: Super Vehicle-001/II' to 'II' — and strips extensions
+        # and parenthesised tags a curated XML title does not carry.
+        if game_for_name:
+            search_name = ' '.join(game_for_name.split())
 
     result['search_name']      = search_name
     result['no_hash']          = bool(no_hash)
@@ -1474,6 +1523,21 @@ def _update_state():
               activegame_ts >= corename_ts - 30):
             game_name = _game_name_from_path(activegame)
             game_path = activegame
+            # NeoGeo Darksoft layout: ACTIVEGAME carries the romset id
+            # ('sonicwi2') while CURRENTPATH carries the title the core just
+            # resolved from romsets.xml ('Aero Fighters 2'). Show the title —
+            # it is also what ScreenScraper needs to search on. The path stays
+            # on ACTIVEGAME, which is the thing that actually exists on disk.
+            if (currentpath and currentpath != game_name and
+                    _neogeo_romset_dir(_resolve_neogeo_probe(activegame),
+                                       corename)):
+                print(f"🎯 NeoGeo romset folder: showing title "
+                      f"'{currentpath}' instead of romset id '{game_name}'")
+                # Used verbatim, NOT through _game_name_from_path(): CURRENTPATH
+                # here is already a bare title, and romsets.xml titles can carry
+                # a slash ('Metal Slug 2: Super Vehicle-001/II'), which any
+                # path-aware helper would truncate to the last segment.
+                game_name = currentpath.strip()
         elif currentpath and not currentpath.lower().endswith('.ini'):
             game_name = _game_name_from_path(currentpath)
             game_path = currentpath
@@ -2707,6 +2771,15 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                                 chosen = os.path.join(final_path, matches[0])
                                 print(f"✅ Disc image found in folder ({source_name}): {chosen}")
                                 return chosen
+                        # NeoGeo Darksoft layout: the romset IS the folder,
+                        # holding loose ROM parts rather than a disc image.
+                        # Confirmed against romsets.xml so only a real romset
+                        # folder can take this path.
+                        _rs = _neogeo_romset_dir(final_path, _read_corename_raw())
+                        if _rs:
+                            print(f"✅ NeoGeo romset folder ({source_name}): "
+                                  f"{final_path} -> romset '{_rs}'")
+                            return final_path
                         print(f"❌ No disc image inside directory: {final_path}")
                         print(f"❌ Direct file not found: {final_path}")
                     else:
@@ -2940,7 +3013,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             # CRC+MD5+SHA1 on the ARM entirely — same outcome as file_too_large.
             _ext      = os.path.splitext(filename)[1].lower()
             _corename = _read_corename_raw()
-            skip_hash = _is_no_hash(_ext, _corename)
+            skip_hash = (_is_no_hash(_ext, _corename)
+                         or bool(_neogeo_romset_dir(rom_path, _corename)))
 
             if skip_hash:
                 _why = ("unindexable, mutable container" if _ext in _NO_HASH_EXTS
