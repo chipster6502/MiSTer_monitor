@@ -697,6 +697,7 @@ String ssSystemForRom(const String& coreName, const RomDetails& rd,
                       String* altOut = nullptr);
 bool isNameSearchSystem(const String& systemId);
 GameInfo searchWithJeuRechercheJSON(String coreName, String cleanName);
+bool tryRomnomLookup(String coreName, String gameName, RomDetails romDetails);
 bool tryNameSearchFallback(String coreName, String gameName, RomDetails romDetails);
 bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName);
 
@@ -5193,7 +5194,12 @@ void showRAReadyBanner() {
   // Same footer band (Y=620..720) and hold-then-restore shape as
   // showReconnectBanner(). "READY FOR RETROACHIEVEMENTS!" is 28 chars =
   // 504 px at size 3, so it fits centred on one line.
-  const char* msg = "READY FOR RETROACHIEVEMENTS!";
+  // View-only fires when the server resolved the game but the fork could
+  // not: the set is real and worth reading, it just cannot be earned on this
+  // core. 29 chars vs 28, so the centring math below still fits the band.
+  const char* msg = raStatus.forkLoadFailed
+                    ? "VIEW ONLY - CORE CANNOT AWARD"
+                    : "READY FOR RETROACHIEVEMENTS!";
   int tw = (int)strlen(msg) * 18;                 // 18 px/char at size 3
 
   M5.Display.fillRect(0, 620, 1280, 100, THEME_YELLOW);
@@ -6008,6 +6014,7 @@ void getRAStatus() {
   raStatus.pointsHardcore     = extractIntValue(response, "points_hardcore");
   raStatus.core               = extractStringValue(response, "core");
   raStatus.unlocksTracked     = extractBoolValue(response, "unlocks_tracked");
+  raStatus.forkLoadFailed     = extractBoolValue(response, "fork_load_failed");
   raStatus.eventCounter       = extractIntValue(response, "event_counter");
   raStatus.lastUnlockTitle    = extractStringValue(response, "last_unlock_title");
   // Same sentinel handling as last_unlock_description and the trophy-list
@@ -6164,18 +6171,6 @@ void displayRetroAchievements() {
     return;
   }
 
-  // The game resolved on RetroAchievements but carries no published set.
-  // Without this the panel would render POINTS 0/0 next to MATCHED and the
-  // subpage cycler would refuse to advance (listPages = 0 collapses the
-  // modulo to 0), which reads as a malfunction rather than as the stated
-  // outcome it is. Common on CD systems, where many titles are catalogued
-  // long before anyone writes achievements for them.
-  if (raStatus.total == 0) {
-    drawRAMessage("SET NOT PUBLISHED YET",
-                  "No achievements exist for this game yet", THEME_YELLOW);
-    return;
-  }
-
   // ---- status == "ok": full progress panel ---------------------------------
 
   drawRATitleRow();
@@ -6216,7 +6211,12 @@ void displayRetroAchievements() {
   // Top priority in this slot: on a stock core nothing here will ever
   // move, and that single fact changes how the whole panel reads. The
   // hardcore tally and the match method are diagnostics by comparison.
-  if (!raCoreRecordsUnlocks()) {
+  if (raStatus.forkLoadFailed) {
+    // Highest priority: the fork IS running here, it just never
+    // resolved this game, so nothing on this page can be earned.
+    // Without this the panel would read as if the set were live.
+    drawRAStatPanel(660, 200, 580, 104, "UNLOCKS", "VIEW ONLY", THEME_ORANGE);
+  } else if (!raCoreRecordsUnlocks()) {
     drawRAStatPanel(660, 200, 580, 104, "UNLOCKS", "NOT RECORDED", THEME_YELLOW);
   } else if (raStatus.unlockedHardcore > 0) {
     char hcVal[24];
@@ -10696,6 +10696,53 @@ GameInfo searchWithJeuRechercheJSON(String coreName, String cleanName) {
 // the artwork, prefetch GAME INFO metadata. Mirrors the CRC success path.
 // Runs inside downloadGameBoxartStreamingSafeJSON: the DownloadFlagGuard of
 // the caller keeps downloadInProgress set for the whole attempt.
+// Precise ScreenScraper lookup driven by the romset id, for games that have no
+// CRC and never will. jeuInfos matches on romnom alone; the CRC path's own URL
+// already carries romnom, so this is that same request with one parameter
+// empty — an exact hit, not the fuzzy title search below.
+//
+// Mirrors tryNameSearchFallback() step for step on purpose: same progress
+// stages, same save path, same metadata prefetch hook. Only the identifying
+// query differs.
+bool tryRomnomLookup(String coreName, String gameName, RomDetails romDetails) {
+  Serial.printf("Romnom lookup for '%s' (no CRC, server-confirmed romset)\n",
+                romDetails.ssRomnom.c_str());
+  showDownloadProgress(40, "Romset lookup...");
+
+  GameInfo gameInfo = searchWithJeuInfosPreciseJSON(coreName, romDetails);
+  if (!(gameInfo.found && gameInfo.boxartUrl.length() > 0)) {
+    Serial.println("Romnom lookup found nothing");
+    return false;
+  }
+  Serial.printf("ROMNOM CHOSE: '%s' (id %s)\n",
+                gameInfo.gameName.c_str(), gameInfo.gameId.c_str());
+
+  String exactFileName = getExactFileName(gameName);
+  String searchCore = coreName;
+  searchCore.toLowerCase();
+  String savePath = getSavePath(exactFileName, searchCore);
+
+  showDownloadProgress(60, "Downloading image...");
+  bool ok = downloadImageFromMediaJeu(gameInfo.boxartUrl, savePath);
+  Serial.printf("Romnom MediaJeu download: %s\n", ok ? "SUCCESS" : "FAILED");
+
+  if (ok) {
+    // GAME INFO panel: metadata prefetch, same hook as the CRC path.
+    String metaPath = getMetaPathFromImagePath(savePath);
+    if (!SD.exists(metaPath)) {
+      showDownloadProgress(92, "Fetching game info...");
+      GameMeta meta;
+      if (fetchGameMetadataJSON(gameInfo.gameId, coreName, romDetails, meta)) {
+        saveGameMeta(metaPath, meta);
+        if (gameName == currentGame) { meta.forGame = gameName; currentMeta = meta; }
+      }
+    }
+    showDownloadProgress(100, "Romset lookup complete!");
+    delay(1500);
+  }
+  return ok;
+}
+
 bool tryNameSearchFallback(String coreName, String gameName, RomDetails romDetails) {
   String cleanName = romDetails.searchName.length() > 0 ? romDetails.searchName
                                                         : gameName;
@@ -11062,7 +11109,15 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
     // Field log that motivated this: Amiga is NOT allowlisted, so SAM
     // name-only games skipped the search entirely and flashed the generic
     // failure on every redraw (nothing ever marked the search exhausted).
-    if (isNameSearchSystem(systemId) || romDetails.noRomOnDisk) {
+    // Exact route first: a server-confirmed romset id identifies the game
+    // outright, where the name search below can only guess. Requires noHash so
+    // a merely transient hash failure still waits for the real CRC through the
+    // recurrent search instead of settling for a weaker identifier.
+    if (romDetails.noHash && romDetails.ssRomnom.length() > 0) {
+      success = tryRomnomLookup(coreName, gameName, romDetails);
+    }
+
+    if (!success && (isNameSearchSystem(systemId) || romDetails.noRomOnDisk)) {
       success = tryNameSearchFallback(coreName, gameName, romDetails);
       if (!success) {
         // Clean miss on a name-search system: stop the 10 s hammering.
