@@ -91,6 +91,11 @@ struct RAStatus {
                                // beating right now. False also when the fork runs
                                // without debug=1, where the firmware falls back to
                                // the RA_ CORENAME prefix instead.
+  bool    forkLoadFailed;      // the fork hashed this game and RA answered 404,
+                               // so nothing here can ever be earned on the
+                               // running core. Distinct from unlocksTracked,
+                               // which only says the fork is alive: on Neo Geo
+                               // the fork is alive AND cannot identify the game.
   bool    valid;               // last fetch parsed successfully
 };
 
