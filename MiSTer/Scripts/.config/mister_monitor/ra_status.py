@@ -203,6 +203,11 @@ CORE_TO_CONSOLE_IDS = {
 # _ra_lock guards context, events and the progress/resolution caches.
 # The two locks are never nested.
 
+# The hash get_ra_status() computed for the running game, so _attach_events()
+# can compare it against the fork's without changing its signature — it is
+# called from early-return paths that have no hash of their own.
+_server_hash_for_mismatch = ""
+
 _index_maps = {}
 _index_lock = threading.Lock()
 
@@ -253,6 +258,14 @@ _log_state = {           # odelot debug-log tailer findings (guarded by _ra_lock
     "md5": "",           # last 'ROM MD5:' seen this fork session
     "md5_path": "",      # path from the preceding 'Hashing ROM:' line
     "md5_ts": 0.0,
+    "fork_hash": "",       # the MD5 the fork announced for the game IT loaded.
+                           # Compared against the server's own hash to catch a
+                           # fork that succeeded on the WRONG game.
+    "fork_hash_ts": 0.0,
+    "load_failed": False,  # the fork hashed the game and RA answered 404.
+                           # Positive evidence only: never inferred, so a core
+                           # whose log says nothing about loading keeps the
+                           # pre-existing behaviour.
 }
 
 
@@ -671,6 +684,16 @@ _RE_LOG_UNLOCK = re.compile(
     r'ACHIEVEMENT TRIGGERED:\s*(?:\[(\d+)\]\s*)?(.*?)\s*\*{0,3}\s*$')
 _RE_LOG_MD5   = re.compile(r'ROM MD5:\s*([0-9a-fA-F]{32})\s*$')
 _RE_LOG_HASHP = re.compile(r'Hashing ROM:\s*(.+?)\s*(?:\(\d+\s*bytes\))?\s*$')
+# The fork's own game-identification verdict. Seen verbatim on hardware:
+#   RA: GAME LOAD FAILED: result=-29 error=Unknown game
+#   RA: rcheevos: Load failed (-29): Unknown game
+# and the attempt that precedes either of them:
+#   RA: Game MD5 available, loading game: 4daf63ae4a31eff2251ce01123c6138e
+_RE_LOG_LOADFAIL = re.compile(r'GAME LOAD FAILED|rcheevos:\s*Load failed')
+_RE_LOG_LOADTRY  = re.compile(r'loading game(?:\s+by\s+MD5)?:\s*[0-9a-fA-F]{32}')
+# The hash the fork itself decided on, in the three wordings seen on hardware.
+_RE_LOG_FORKHASH = re.compile(
+    r'(?:loading game(?:\s+by\s+MD5)?:|Generated hash)\s*([0-9a-fA-F]{32})')
 
 
 def _same_rom(log_path, rom_path, internal):
@@ -691,6 +714,10 @@ def _log_fire_unlock(aid, title, desc):
     title/description; points and hardcore mode arrive seconds later when the
     woken cloud poll backfills them (matched via pending_backfill)."""
     with _ra_lock:
+        # An unlock is proof the fork resolved the game, whatever an earlier
+        # load line claimed. Clear the flag so a stale verdict cannot keep the
+        # UI in view-only mode.
+        _log_state["load_failed"] = False
         _events["counter"] += 1
         _events["last_title"]    = _flat_str(title, 96) or "Achievement unlocked"
         _events["last_desc"]     = _flat_str(desc, 120)
@@ -725,6 +752,21 @@ def _log_handle_line(line):
         return
     if "GAME COMPLETED!" in line:
         _log_fire_unlock(0, "GAME COMPLETED!", "Congratulations!")
+        return
+    if _RE_LOG_LOADFAIL.search(line):
+        with _ra_lock:
+            _log_state["load_failed"] = True
+        print("[RA] \U0001f4dc fork could not identify the game "
+              "(achievements are view-only on this core)")
+        return
+    m = _RE_LOG_FORKHASH.search(line)
+    if m:
+        # A fresh identification supersedes any earlier verdict, and records
+        # which game the fork actually settled on.
+        with _ra_lock:
+            _log_state["load_failed"] = False
+            _log_state["fork_hash"] = m.group(1).lower()
+            _log_state["fork_hash_ts"] = time.time()
         return
     m = _RE_LOG_MD5.search(line)
     if m:
@@ -809,6 +851,9 @@ class _LogTailer:
                 _log_state["md5"] = ""
                 _log_state["md5_path"] = ""
                 _log_state["md5_ts"] = 0.0
+                _log_state["load_failed"] = False
+                _log_state["fork_hash"] = ""
+                _log_state["fork_hash_ts"] = 0.0
 
         while self.offset < size:
             want = min(_LOG_READ_CHUNK, size - self.offset)
@@ -1070,6 +1115,14 @@ def get_ra_status(handler):
             out["last_unlock_date"]     = _events["last_date"]
             out["last_unlock_description"] = _events["last_desc"]
             out["log_tail"]             = bool(_log_state["active"])
+            out["fork_load_failed"]     = bool(_log_state["load_failed"])
+            # The fork loaded a game, but not this one. Reported only with both
+            # hashes in hand: no fork hash means it never loaded (already
+            # covered by fork_load_failed), and no server hash means we cannot
+            # judge — CD systems never produce one, so they never trip this.
+            _fh = _log_state["fork_hash"]
+            out["fork_game_mismatch"] = bool(
+                _fh and _server_hash_for_mismatch and _fh != _server_hash_for_mismatch)
 
     user, key = _load_credentials()
     if not user or not key:
@@ -1189,6 +1242,8 @@ def get_ra_status(handler):
                 "err": hash_err, "ts": now_f,
             })
 
+    global _server_hash_for_mismatch
+    _server_hash_for_mismatch = ra_hash_hex or ""
     out["ra_hash"] = ra_hash_hex
 
     if gid == 0:
