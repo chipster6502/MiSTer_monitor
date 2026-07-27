@@ -5204,24 +5204,43 @@ void displayRetroAchievements() {
   }
 
   if (raStatus.status == "rom_not_recognized") {
+    // Nothing resolved: not the hash index (which by construction lists only
+    // games that HAVE a set), not the fork's logged hash, not the corroborated
+    // LastGameID. Two causes are indistinguishable from here — the game may
+    // carry no set at all, or this dump may not be one of the linked ones — so
+    // the copy asserts neither. The previous text promised achievements that
+    // may not exist and blamed the dump, which is especially misleading on CD
+    // systems, where a non-standard image is rarely the reason.
     Lcd.setTextColor(THEME_YELLOW);
     Lcd.setTextSize(2);
     Lcd.setCursor(20, 56);
-    Lcd.print("ROM NOT LINKED");
+    Lcd.print("GAME NOT IDENTIFIED");
     Lcd.setTextColor(THEME_CYAN);
     Lcd.setTextSize(1.5f);
-    Lcd.setCursor(20, 92);   Lcd.print("This game has achievements,");
-    Lcd.setCursor(20, 112);  Lcd.print("but this exact dump is not");
-    Lcd.setCursor(20, 132);  Lcd.print("linked on RetroAchievements.");
+    Lcd.setCursor(20, 92);   Lcd.print("RetroAchievements could not");
+    Lcd.setCursor(20, 112);  Lcd.print("identify this game from its");
+    Lcd.setCursor(20, 132);  Lcd.print("ROM or disc contents.");
     Lcd.setTextColor(THEME_WHITE);
-    Lcd.setCursor(20, 162);  Lcd.print("A standard (USA / JU) dump");
-    Lcd.setCursor(20, 182);  Lcd.print("would be recognised.");
+    Lcd.setCursor(20, 162);  Lcd.print("Either no set exists for it,");
+    Lcd.setCursor(20, 182);  Lcd.print("or this dump is not linked.");
     return;
   }
 
   if (raStatus.status != "ok") {
     // hash_error / progress_unavailable / anything unexpected
     drawRAMessage("RA UNAVAILABLE", "Could not read progress", THEME_RED);
+    return;
+  }
+
+  // The game resolved on RetroAchievements but carries no published set.
+  // Without this the panel would render POINTS 0/0 next to MATCHED and the
+  // subpage cycler would refuse to advance (listPages = 0 collapses the
+  // modulo to 0), which reads as a malfunction rather than as the stated
+  // outcome it is. Common on CD systems, where many titles are catalogued
+  // long before anyone writes achievements for them.
+  if (raStatus.total == 0) {
+    drawRAMessage("SET NOT PUBLISHED YET",
+                  "No achievements exist for this game yet", THEME_YELLOW);
     return;
   }
 
