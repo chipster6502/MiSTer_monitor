@@ -1082,7 +1082,15 @@ def _neogeo_romset_dir(path, corename):
     looser "a directory is fine" rule would turn clean failures elsewhere into
     absurd paths.
     """
-    if (corename or '').strip().lower() not in _NEOGEO_CORENAMES:
+    # The RA_ prefix is stripped here rather than trusted to every caller: the
+    # RetroAchievements toolkit ships the core as RA_NeoGeo, and while the path
+    # and romnom call sites pass an already-stripped name, the display-name one
+    # passes the raw CORENAME. Normalising inside the gate means no caller can
+    # get it wrong.
+    core = (corename or '').strip()
+    if core.upper().startswith('RA_'):
+        core = core[3:]
+    if core.lower() not in _NEOGEO_CORENAMES:
         return ''
     if not path or not os.path.isdir(path):
         return ''
