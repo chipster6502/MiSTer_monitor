@@ -1092,9 +1092,17 @@ def _neogeo_romset_dir(path, corename):
         core = core[3:]
     if core.lower() not in _NEOGEO_CORENAMES:
         return ''
-    if not path or not os.path.isdir(path):
+    if not path:
         return ''
-    name = os.path.basename(path.rstrip('/')).strip().lower()
+    if os.path.isdir(path):
+        name = os.path.basename(path.rstrip('/')).strip().lower()
+    elif path.lower().endswith('.zip') and os.path.isfile(path):
+        # A zipped Darksoft romset. Its members are generic — crom0, fpga,
+        # m1rom, prom, srom — so there is no ROM to find inside; the archive
+        # itself is the romset, exactly as the folder is.
+        name = os.path.splitext(os.path.basename(path))[0].strip().lower()
+    else:
+        return ''
     if not name:
         return ''
     names = _load_romset_names(_neogeo_games_dir(path))
@@ -3155,6 +3163,26 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             filename, file_size, zip_crc = self.get_zip_file_info_enhanced(resolved_zip_path, internal_path)
             
             if not filename:
+                # A NeoGeo Darksoft ZIP has no ROM member to find: the archive
+                # IS the romset. Same shape as the folder layout — valid,
+                # unhashable, identified by its name.
+                _rs = _neogeo_romset_dir(resolved_zip_path, _read_corename_raw())
+                if _rs:
+                    print(f"✅ NeoGeo romset ZIP: "
+                          f"{os.path.basename(resolved_zip_path)} -> romset '{_rs}'")
+                    return _enrich_rom_result({
+                        "filename": os.path.basename(resolved_zip_path),
+                        "size": os.path.getsize(resolved_zip_path),
+                        "crc32": "", "md5": "", "sha1": "",
+                        "path": resolved_zip_path,
+                        "available": True,
+                        "hash_calculated": False,
+                        "file_too_large": False,
+                        "zip_path": resolved_zip_path,
+                        "resolved_zip_path": resolved_zip_path,
+                        "internal_path": "",
+                    }, getattr(self, '_last_detection_method', None))
+
                 error_msg = f"File not found inside ZIP: {internal_path}"
                 print(f"❌ {error_msg}")
                 
