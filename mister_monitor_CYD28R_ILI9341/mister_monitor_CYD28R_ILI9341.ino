@@ -4619,7 +4619,7 @@ void showRAReadyBanner() {
   // Same two-line geometry either way. View-only fires when the server
   // resolved the game but the fork could not: the set is real and worth
   // reading, it just cannot be earned on this core.
-  const bool viewOnly = raStatus.forkLoadFailed;
+  const bool viewOnly = raStatus.forkLoadFailed || raStatus.forkGameMismatch;
   const char* l1 = viewOnly ? "VIEW ONLY"         : "READY FOR";
   const char* l2 = viewOnly ? "CORE CANNOT AWARD" : "RETROACHIEVEMENTS!";
   int w1 = (int)strlen(l1) * 12;             // 12 px/char at size 2
@@ -5444,6 +5444,7 @@ void getRAStatus() {
   raStatus.core               = extractStringValue(response, "core");
   raStatus.unlocksTracked     = extractBoolValue(response, "unlocks_tracked");
   raStatus.forkLoadFailed     = extractBoolValue(response, "fork_load_failed");
+  raStatus.forkGameMismatch   = extractBoolValue(response, "fork_game_mismatch");
   raStatus.eventCounter       = extractIntValue(response, "event_counter");
   raStatus.lastUnlockTitle    = extractStringValue(response, "last_unlock_title");
   raStatus.lastUnlockPoints   = extractIntValue(response, "last_unlock_points");
@@ -5613,7 +5614,7 @@ void displayRetroAchievements() {
   // Top priority in this slot: on a stock core nothing here will ever
   // move, and that single fact changes how the whole panel reads. The
   // hardcore tally and the match method are diagnostics by comparison.
-  if (raStatus.forkLoadFailed) {
+  if (raStatus.forkLoadFailed || raStatus.forkGameMismatch) {
     // Highest priority: the fork IS running here, it just never
     // resolved this game, so nothing on this page can be earned.
     // Without this the panel would read as if the set were live.

@@ -91,6 +91,10 @@ struct RAStatus {
                                // beating right now. False also when the fork runs
                                // without debug=1, where the firmware falls back to
                                // the RA_ CORENAME prefix instead.
+  bool    forkGameMismatch;    // the fork loaded a DIFFERENT game than the one
+                               // running: its hash and the server's disagree.
+                               // Distinct from forkLoadFailed — nothing failed,
+                               // the fork is simply crediting somewhere else.
   bool    forkLoadFailed;      // the fork hashed this game and RA answered 404,
                                // so nothing here can ever be earned on the
                                // running core. Distinct from unlocksTracked,
