@@ -1074,6 +1074,13 @@ def start_ra_polling(state_getter):
 # --- Public entry point ----------------------------------------------------------
 
 def get_ra_status(handler):
+    # Cleared on entry: _attach_events() reads this through a module global and
+    # is also called from early returns, which never reach the line that sets
+    # it. Leaving the previous call's value there made a request that resolved
+    # nothing compare a stale hash against the fork's current one.
+    global _server_hash_for_mismatch
+    _server_hash_for_mismatch = ""
+
     now = int(time.time())
     out = {
         "enabled": False,
@@ -1242,7 +1249,6 @@ def get_ra_status(handler):
                 "err": hash_err, "ts": now_f,
             })
 
-    global _server_hash_for_mismatch
     _server_hash_for_mismatch = ra_hash_hex or ""
     out["ra_hash"] = ra_hash_hex
 
