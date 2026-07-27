@@ -7600,6 +7600,14 @@ String mapCoreToScreenScraperId(String coreName) {
   if (core == "Atari 5200") return "40";
   if (core == "Atari 7800") return "41";
   if (core == "Atari Lynx") return "28";
+  // The 2-player Lynx core is Atari Lynx with two ComLynx pads: same .lnx
+  // library (its games live under games/AtariLynx/), same ScreenScraper
+  // system. It is a distinct CORENAME, not a back-compat case for a foreign
+  // library, so it belongs here as system 28 rather than going through the
+  // game_system / ssSystemForRom path — there is no second system to decide
+  // between. Without this entry getScreenScraperSystemId() returns empty and
+  // artwork is impossible while the stock Lynx works.
+  if (core == "Atari Lynx (2P)") return "28";
   if (core == "Atari Jaguar" || core == "Jaguar") return "27";
   if (core == "Atari ST/STE" || core == "Atari ST") return "42";
   if (core == "Atari 8bit") return "43";
@@ -7711,6 +7719,7 @@ String mapCoreToScreenScraperId(String coreName) {
   if (coreLower == "atari5200") return "40";
   if (coreLower == "atari7800") return "41";
   if (coreLower == "atarilynx") return "28";   // Camputers Lynx is "lynx48"
+  if (coreLower == "atarilynx2p") return "28"; // 2-player Lynx, same system as above
   if (coreLower == "atarist") return "42";
   if (coreLower == "amiga" || coreLower == "minimig" ||
       coreLower == "amiga500" || coreLower == "amiga500hd" ||
