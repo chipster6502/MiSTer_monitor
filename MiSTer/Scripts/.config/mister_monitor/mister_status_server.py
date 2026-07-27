@@ -1073,20 +1073,20 @@ def _resolve_neogeo_probe(mister_path):
     return os.path.join('/media/fat', mister_path)
 
 
-def _neogeo_romset_dir(path, corename):
+def _neogeo_romset_label(path, corename):
     """
-    The romset id when `path` is an unzipped Darksoft romset folder, else ''.
+    The romset id when the path's own name IS the romset id, else ''.
 
-    Gated twice on purpose: the NeoGeo core, and the folder name appearing in
-    the core's own romsets.xml. Path resolution is shared by every core, and a
-    looser "a directory is fine" rule would turn clean failures elsewhere into
-    absurd paths.
+    Covers all three shapes the core accepts: an unzipped Darksoft folder
+    (`mslug2/`), a zipped one (`mslug2.zip`), and a `.neo` named after the
+    romset (`sonicwi2.neo`). Says nothing about whether the thing can be
+    hashed — that is _neogeo_romset_dir()'s job, and the two questions only
+    looked like one until bare-romset `.neo` files turned up: those hash fine
+    but still need the title looked up.
+
+    Returns '' for `Aero Fighters 2 (sonicwi2).neo`, and rightly so: that stem
+    is not a romset id, and the filename already carries the title.
     """
-    # The RA_ prefix is stripped here rather than trusted to every caller: the
-    # RetroAchievements toolkit ships the core as RA_NeoGeo, and while the path
-    # and romnom call sites pass an already-stripped name, the display-name one
-    # passes the raw CORENAME. Normalising inside the gate means no caller can
-    # get it wrong.
     core = (corename or '').strip()
     if core.upper().startswith('RA_'):
         core = core[3:]
@@ -1096,10 +1096,7 @@ def _neogeo_romset_dir(path, corename):
         return ''
     if os.path.isdir(path):
         name = os.path.basename(path.rstrip('/')).strip().lower()
-    elif path.lower().endswith('.zip') and os.path.isfile(path):
-        # A zipped Darksoft romset. Its members are generic — crom0, fpga,
-        # m1rom, prom, srom — so there is no ROM to find inside; the archive
-        # itself is the romset, exactly as the folder is.
+    elif os.path.isfile(path):
         name = os.path.splitext(os.path.basename(path))[0].strip().lower()
     else:
         return ''
@@ -1107,6 +1104,29 @@ def _neogeo_romset_dir(path, corename):
         return ''
     names = _load_romset_names(_neogeo_games_dir(path))
     return name if name in names else ''
+
+
+def _neogeo_romset_dir(path, corename):
+    """
+    The romset id when `path` is a romset CONTAINER — an unzipped Darksoft
+    folder or a zipped one — else ''.
+
+    Narrower than _neogeo_romset_label() on purpose: this one drives no_hash
+    and the hashing short circuit, and a container has no single file to hash
+    while a plain `.neo` does.
+    """
+    if not path:
+        return ''
+    is_container = (os.path.isdir(path) or
+                    (path.lower().endswith('.zip') and os.path.isfile(path)))
+    if not is_container:
+        return ''
+    return _neogeo_romset_label(path, corename)
+    # The RA_ prefix is stripped here rather than trusted to every caller: the
+    # RetroAchievements toolkit ships the core as RA_NeoGeo, and while the path
+    # and romnom call sites pass an already-stripped name, the display-name one
+    # passes the raw CORENAME. Normalising inside the gate means no caller can
+    # get it wrong.
 
 
 def _neogeo_ss_romnom(rom_path, filename, corename):
@@ -1313,18 +1333,23 @@ def _enrich_rom_result(result, detection_method=None):
     # A romset folder has no single file to hash, so the CRC can never arrive.
     # Saying so here is what stops the firmware spending its whole retry budget
     # waiting for one.
-    if not no_hash and _neogeo_romset_dir(
-            result.get('path') or path_for_name, corename_raw):
+    _ng_path = result.get('path') or path_for_name
+
+    # Whenever the path's name is a romset id ('cyberlip', 'sonicwi2'), that id
+    # is useless as a ScreenScraper text search — search the title the core
+    # resolved from romsets.xml instead. Independent of hashability: a bare
+    # '.neo' hashes perfectly well and still needs this.
+    #
+    # Used verbatim: _clean_search_name() is built for FILENAMES — it starts
+    # with os.path.basename(), which would truncate
+    # 'Metal Slug 2: Super Vehicle-001/II' to 'II' — and strips extensions and
+    # parenthesised tags a curated XML title does not carry.
+    if game_for_name and _neogeo_romset_label(_ng_path, corename_raw):
+        search_name = ' '.join(game_for_name.split())
+
+    # A romset CONTAINER (folder or Darksoft zip) has no single file to hash.
+    if not no_hash and _neogeo_romset_dir(_ng_path, corename_raw):
         no_hash = True
-        # The folder's basename is the romset id ('cyberlip'), which is useless
-        # as a ScreenScraper text search. _state['game'] holds the title the
-        # core resolved from romsets.xml ('Cyber-Lip') — search on that.
-        # Used verbatim: _clean_search_name() is built for FILENAMES — it starts
-        # with os.path.basename(), which would truncate
-        # 'Metal Slug 2: Super Vehicle-001/II' to 'II' — and strips extensions
-        # and parenthesised tags a curated XML title does not carry.
-        if game_for_name:
-            search_name = ' '.join(game_for_name.split())
 
     result['search_name']      = search_name
     result['no_hash']          = bool(no_hash)
@@ -1545,7 +1570,7 @@ def _update_state():
             # it is also what ScreenScraper needs to search on. The path stays
             # on ACTIVEGAME, which is the thing that actually exists on disk.
             if (currentpath and currentpath != game_name and
-                    _neogeo_romset_dir(_resolve_neogeo_probe(activegame),
+                    _neogeo_romset_label(_resolve_neogeo_probe(activegame),
                                        corename)):
                 print(f"🎯 NeoGeo romset folder: showing title "
                       f"'{currentpath}' instead of romset id '{game_name}'")
