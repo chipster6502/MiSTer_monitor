@@ -115,6 +115,8 @@ CORE_NAME_MAPPING = {
     'GAMEBOY2P': 'Nintendo Game Boy Color',
     'Genesis': 'Sega Genesis/Mega Drive',
     'MegaDrive': 'Sega Genesis/Mega Drive',
+    'PapriumMD': 'Paprium (Mega Drive)',
+    'MegaVGMDrive': 'Genesis / Mega Drive VGM Player',
     'SMS': 'Sega Master System',
     'GG': 'Sega Game Gear',
     'Saturn': 'Sega Saturn',
@@ -134,6 +136,7 @@ CORE_NAME_MAPPING = {
     'ATARI5200': 'Atari 5200',
     'ATARI7800': 'Atari 7800',
     'AtariLynx': 'Atari Lynx',
+    'AtariLynx2P': 'Atari Lynx (2P)',
     'ATARI800': 'Atari 8bit',
     'AtariST': 'Atari ST/STE',
     'MAME': 'Arcade',
@@ -1597,11 +1600,22 @@ def _update_state():
     # off the GAME: the RetroAchievements console lookup cannot find a Master
     # System set while it is asking Mega Drive's console list.
     game_system = ''
-    if not is_arcade and game_path:
-        if friendly_name == 'Atari 7800':
-            game_system = _atari_78_or_26(game_path)
-        elif friendly_name == 'Sega Genesis/Mega Drive':
-            game_system = _md_or_sms(game_path)
+    if not is_arcade:
+        # The 2-player Lynx core is Atari Lynx in every way that matters to the
+        # rest of the stack: it loads the same .lnx files (they live under
+        # games/AtariLynx/), so its real system is fixed, not game-dependent.
+        # Firmware maps game_system to the ScreenScraper system id, and without
+        # this the 2P core reaches neither AtariLynx2P nor 'Atari Lynx (2P)' in
+        # that table and artwork is impossible — while the stock Lynx (id 28)
+        # works. Set unconditionally (no game_path guard): the mapping holds
+        # even with the core sitting empty in the menu.
+        if friendly_name == 'Atari Lynx (2P)':
+            game_system = 'Atari Lynx'
+        elif game_path:
+            if friendly_name == 'Atari 7800':
+                game_system = _atari_78_or_26(game_path)
+            elif friendly_name == 'Sega Genesis/Mega Drive':
+                game_system = _md_or_sms(game_path)
         if game_system == friendly_name:
             game_system = ''      # the game belongs to its own core: nothing to say
 
