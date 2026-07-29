@@ -160,12 +160,15 @@ Two components work together:
 
 ## 2,8" Cheap Yellow Display (CYD) Screenshots (320x240)
 
+> These are captured at the panel's native 320x240 and upscaled 2x for this
+> page. The softness is an artefact of that scaling — text and artwork are
+> noticeably crisper on the display itself.
+
 ![Screensaver](images/CYD-2432S028R/01_menu.png)
 ![System Monitor - CPU and Memory](images/CYD-2432S028R/08_main_HUD.png)
-![System Monitor - Storage](images/CYD-2432S028R/10_storage.png)
-![System Monitor - Arcade subsystem artwork](images/CYD-2432S028R/03.2_arcade_game_subsystem.png)
-![System Monitor - Arcade game artwork](images/CYD-2432S028R/02_arcade_game_fanart.png)
 ![Artwork download in progress](images/CYD-2432S028R/11_download.png)
+![System Monitor - Console core artwork](images/CYD-2432S028R/11.2_console-core.png)
+![System Monitor - Console game artwork](images/CYD-2432S028R/11.3_console-game.png)
 ![Game Info - fields](images/CYD-2432S028R/12_game-info1.png)
 ![Game Info - synopsis](images/CYD-2432S028R/13_game-info2.png)
 ![RetroAchievements - progress](images/CYD-2432S028R/14_RA1.png)
