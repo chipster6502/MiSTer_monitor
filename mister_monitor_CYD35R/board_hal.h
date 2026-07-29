@@ -1,5 +1,5 @@
 // MiSTer Monitor
-// Copyright (C) 2025-2026 Adolfo Fernández (chipster6502)
+// Copyright (C) 2025-2026 chipster6502
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // ============================================================================

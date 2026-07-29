@@ -2,7 +2,7 @@
 
 The name **"MiSTer Monitor"**, the project logo, and the official
 screenshots and demo videos identify this project and its author,
-Adolfo Fernández (chipster6502). They are unregistered (common-law)
+chipster6502. They are unregistered (common-law)
 identifiers, and this policy exists for one reason: so that nobody is
 misled into paying for something believing it is official, endorsed,
 or supported by this project when it is not.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # MiSTer Monitor — MiSTer-side server
-# Copyright (C) 2025-2026 Adolfo Fernández (chipster6502)
+# Copyright (C) 2025-2026 chipster6502
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # This program is free software: you can redistribute it and/or modify
