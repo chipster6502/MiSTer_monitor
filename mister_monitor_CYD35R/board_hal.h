@@ -1,3 +1,7 @@
+// MiSTer Monitor
+// Copyright (C) 2025-2026 Adolfo Fernández (chipster6502)
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // ============================================================================
 //  Compatibility layer for the ESP32-3248S035R ("CYD" 3.5" RESISTIVE)
 //

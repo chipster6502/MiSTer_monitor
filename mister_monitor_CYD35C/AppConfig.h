@@ -1,3 +1,7 @@
+// MiSTer Monitor
+// Copyright (C) 2025-2026 Adolfo Fernández (chipster6502)
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // =============================================================================
 // AppConfig.h  —  Configuration loader for MiSTer Monitor
 // =============================================================================
