@@ -641,7 +641,7 @@ void displayRAList();
 void displayRADetail();
 void drawRAPageIndicator(bool pressed);
 int  drawWrappedText(const String& text, int x, int y, int charsPerLine,
-                     int maxLines, uint16_t color);
+                     int maxLines, uint16_t color, float size, int pitch);
 void displayRetroAchievements();
 void drawRAMessage(const String &title, const String &subtitle, uint16_t color);
 void showAchievementUnlock();
@@ -5713,13 +5713,14 @@ void showAchievementUnlock() {
 
   // Title: up to 2 wrapped lines.
   int y = drawWrappedText(raStatus.lastUnlockTitle, tx, by + 34, CHARS, 2,
-                          THEME_WHITE);
+                          THEME_WHITE, 1.0f, 11);
 
   // Description — the server's log tailer fills it instantly (title AND
   // description travel in the fork's log line); cloud-poll-only unlocks
   // leave it empty and the block is simply skipped.
   if (raLastUnlockDesc.length() > 0) {
-    y = drawWrappedText(raLastUnlockDesc, tx, y + 3, CHARS, 3, THEME_CYAN);
+    y = drawWrappedText(raLastUnlockDesc, tx, y + 3, CHARS, 3, THEME_CYAN,
+                        1.0f, 11);
   }
 
   // A log-fired popup reaches the screen before the cloud confirms the
@@ -5872,14 +5873,21 @@ void getRAList(int listPage) {
 }
 
 // Word-wraps `text` into at most maxLines lines of ~charsPerLine chars,
-// printed downward from (x, y) at text size 1 (6 px/char). Breaks on spaces
-// where possible; the last allowed line gets an ellipsis if text remains.
-// Returns the y just below the last line drawn.
+// printed downward from (x, y) at `size` (6*size px/char), advancing `pitch`
+// px per line. Breaks on spaces where possible; the last allowed line gets an
+// ellipsis if text remains. Returns the y just below the last line drawn.
+//
+// size/pitch are parameters rather than the old hardcoded 1/11 because this
+// wrapper serves two very different surfaces: the unlock popup, a 5-second
+// toast that must stay compact, and the detail card, which is the reading
+// view and wants a larger face. charsPerLine is NOT derived from size here —
+// the caller knows its own box width, and deriving it would silently
+// invalidate every existing call site's hand-measured value.
 int drawWrappedText(const String& text, int x, int y, int charsPerLine,
-                    int maxLines, uint16_t color) {
+                    int maxLines, uint16_t color, float size, int pitch) {
   Lcd.setTextWrap(false);
   Lcd.setTextColor(color, THEME_BLACK);
-  Lcd.setTextSize(1);
+  Lcd.setTextSize(size);
   String rest = text;
   rest.trim();
   int lines = 0;
@@ -5902,7 +5910,7 @@ int drawWrappedText(const String& text, int x, int y, int charsPerLine,
     }
     Lcd.setCursor(x, y);
     Lcd.print(line);
-    y += 11;
+    y += pitch;
     lines++;
   }
   return y;
@@ -5933,27 +5941,28 @@ void displayRADetail() {
   const int tx = bx + 10;
   int y = by + 12;
 
-  // Title (up to 2 lines, ~47 chars per line at size 1)
-  y = drawWrappedText(raListTitle[i], tx, y, 47, 2, THEME_YELLOW);
+  // Title (up to 2 lines, 284/9 = 31 chars per line at 1.5x)
+  y = drawWrappedText(raListTitle[i], tx, y, 31, 2, THEME_YELLOW, 1.5f, 14);
   y += 4;
 
-  // Points + state
+  // Points + state. The longest form, "1000 pts   UNLOCKED - HARDCORE", is
+  // 30 chars = 270 px at 1.5x, inside the 284 px interior.
   Lcd.setTextWrap(false);
   Lcd.setTextColor(stateColor, THEME_BLACK);
-  Lcd.setTextSize(1);
+  Lcd.setTextSize(1.5f);
   Lcd.setCursor(tx, y);
   Lcd.printf("%d pts   %s", raListPoints[i], stateLabel);
-  y += 18;
+  y += 20;
 
   // Separator rule
   Lcd.drawFastHLine(tx, y, bw - 20, THEME_GRAY);
   y += 8;
 
-  // Description (up to 5 lines)
+  // Description (up to 5 lines of 31 chars = 155, over the server's cap)
   String d = raListDesc[i];
   d.trim();
   if (d.length() == 0) d = "(No description provided.)";
-  drawWrappedText(d, tx, y, 47, 5, THEME_CYAN);
+  drawWrappedText(d, tx, y, 31, 5, THEME_CYAN, 1.5f, 14);
 
   // Close hint, bottom-right inside the card
   Lcd.setTextColor(THEME_GRAY, THEME_BLACK);
