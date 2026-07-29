@@ -148,14 +148,15 @@ Two components work together:
 ![Screensaver](images/Tab5/screenshot01_menu.png)
 ![System Monitor - CPU and Memory](images/Tab5/screenshot02_cpu_memory_status.png)
 ![System Monitor - Storage](images/Tab5/screenshot02_storage.png)
-![System Monitor - USB devices](images/Tab5/screenshot03_usb_devices.png)
 ![System Monitor - Arcade system artwork](images/Tab5/screenshot04_arcade.png)
-![System Monitor - Arcade subsystem artwork](images/Tab5/screenshot05_arcade_subsystem.png)
-![System Monitor - Arcade game artwork](images/Tab5/screenshot06_arcade_game.png)
 ![System Monitor - Console core artwork](images/Tab5/screenshot07_console.png)
 ![System Monitor - Console game artwork](images/Tab5/screenshot08_console_game.png)
-![System Monitor - Computer core artwork](images/Tab5/screenshot09_computer.png)
-![System Monitor - Computer game artwork](images/Tab5/screenshot10_computer_game.png)
+![Game Info - fields](images/Tab5/screenshot11_game-info1.png)
+![Game Info - synopsis](images/Tab5/screenshot12_game-info2.png)
+![RetroAchievements - progress](images/Tab5/screenshot13_RA1.png)
+![RetroAchievements - trophy list](images/Tab5/screenshot14_RA2.png)
+![RetroAchievements - achievement detail](images/Tab5/screenshot15_RA3.png)
+![RetroAchievements - unlock popup](images/Tab5/screenshot16_RA4.png)
 
 ## 2,8" Cheap Yellow Display (CYD) Screenshots (320x240)
 
@@ -164,8 +165,13 @@ Two components work together:
 ![System Monitor - Storage](images/CYD-2432S028R/10_storage.png)
 ![System Monitor - Arcade subsystem artwork](images/CYD-2432S028R/03.2_arcade_game_subsystem.png)
 ![System Monitor - Arcade game artwork](images/CYD-2432S028R/02_arcade_game_fanart.png)
-![System Monitor - Console game artwork](images/CYD-2432S028R/04_console_game_3dboxart.png)
-![System Monitor - Computer game artwork](images/CYD-2432S028R/06_computer_game_3dboxart.png)
+![Artwork download in progress](images/CYD-2432S028R/11_download.png)
+![Game Info - fields](images/CYD-2432S028R/12_game-info1.png)
+![Game Info - synopsis](images/CYD-2432S028R/13_game-info2.png)
+![RetroAchievements - progress](images/CYD-2432S028R/14_RA1.png)
+![RetroAchievements - trophy list](images/CYD-2432S028R/15_RA2.png)
+![RetroAchievements - achievement detail](images/CYD-2432S028R/16_RA3.png)
+![RetroAchievements - unlock popup](images/CYD-2432S028R/17_RA4.png)
 
 ## To Do
 
