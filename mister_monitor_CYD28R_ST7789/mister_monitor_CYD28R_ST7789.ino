@@ -244,13 +244,18 @@ int    raBannerShownFor = 0;   // game id the READY banner has already fired for
 const int RA_LIST_PER_PAGE = 4;
 
 // Trophy-row touch calibration — TOUCH space, not draw space, and BOARD
-// SPECIFIC. displayRAList() draws the rows at y = 90 + i*30, so their centres
-// sit at 94 + i*30 (94/124/154/184) — which is deliberately NOT what the two
+// SPECIFIC. displayRAList() draws the rows at y = 81 + i*30, so their centres
+// sit at 85 + i*30 (85/115/145/175) — which is deliberately NOT what the two
 // constants below say. This board's touch Y does not read 1:1 with the
 // display: working back from the values hardware testing confirmed land on
 // the right row, it reports roughly
 //     touchY ~= 1.333 * drawY - 51
-// so 74/40 is correct here and the "obvious" 94/30 would be wrong.
+// so 62/40 is correct here and the "obvious" 85/30 would be wrong.
+//
+// The slope is exactly 4/3, which is why the rows were raised by 9 px and not
+// 8 or 10: only draw shifts that are multiples of 3 map to a whole number of
+// touch pixels. 9 draw px = 12 touch px, so 74 became 62 with nothing to
+// round away. Keep that property if this layout is ever nudged again.
 //
 // The root cause is the TS_RAW_* range in board_hal.h not matching this
 // panel. It is left alone on purpose: every other hit target has a hitbox
@@ -268,7 +273,7 @@ const int RA_LIST_PER_PAGE = 4;
 // centre of the bottom row, then
 //   RA_ROW_TOUCH_TOP   = <top reading>
 //   RA_ROW_TOUCH_PITCH = (<bottom reading> - <top reading>) / 3
-int RA_ROW_TOUCH_TOP   = 74;   // raw touch Y at centre of the FIRST row
+int RA_ROW_TOUCH_TOP   = 62;   // raw touch Y at centre of the FIRST row
 int RA_ROW_TOUCH_PITCH = 40;   // raw touch Y between consecutive row centres
 int  raSubPage   = 0;
 int  raListPage  = 0;                    // which page the buffer holds
@@ -6008,10 +6013,13 @@ void drawRAPageIndicator(bool pressed) {
 //   [H] title ......................... 25p   hardcore unlock (red mark)
 //   [*] title ......................... 10p   softcore unlock (green mark)
 //   [ ] title .........................  5p   locked (gray, dim title)
-// Rows y = 90..180 step 30 (4 per page); the footer band (y>=205) stays
-// untouched. Changing this layout means recomputing RA_ROW_TOUCH_TOP/PITCH
-// through this board's touch transform (see their declaration) — the two are
-// NOT in the same coordinate space here.
+// Rows y = 81..171 step 30 (4 per page); the footer band (y>=205) stays
+// untouched. The last row's glyphs end at 179, leaving 26 px of air above the
+// footer — it used to be 17, which read as crowded, and only 4 px of that
+// cleared the point where this panel's touch starts behaving as footer.
+// Changing this layout means recomputing RA_ROW_TOUCH_TOP/PITCH through this
+// board's touch transform (see their declaration) — the two are NOT in the
+// same coordinate space here.
 void displayRAList() {
   Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
 
@@ -6035,7 +6043,7 @@ void displayRAList() {
 
   Lcd.setTextSize(1);
   for (int i = 0; i < raListCount; i++) {
-    int y = 90 + i * 30;   // 4 rows, wider pitch for finger use
+    int y = 81 + i * 30;   // 4 rows, wider pitch for finger use
 
     const char* mark;
     uint16_t markColor;
