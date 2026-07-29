@@ -7669,7 +7669,10 @@ String mapCoreToScreenScraperId(String coreName) {
   if (core == "MSX2+ Computer" || core == "MSX2Plus") return "116";
   
   // Other
-  if (core == "BK") return "93";
+  if (core == "BK" || core == "Elektronika BK0011M") return "93";
+  if (core == "Tomy Tutor / Pyuta / Pyuta Jr.") return "317";
+  if (core == "Jupiter Ace") return "126";
+  if (core == "Tamagotchi") return "293";
   if (core == "EG2000 Colour Genie") return "92";
   if (core == "Camputers Lynx") return "88";
   if (core == "NEC PC-8801") return "221";
@@ -7787,6 +7790,13 @@ String mapCoreToScreenScraperId(String coreName) {
   if (coreLower == "gba2p") return "12";
   if (coreLower == "scv") return "67";
   if (coreLower == "jaguar") return "27";
+  // Systems whose ScreenScraper platform exists but was never wired up. The
+  // CORENAMEs come from the server's CORE_NAME_MAPPING keys, which are the
+  // strings those cores actually write to /tmp/CORENAME.
+  if (coreLower == "bk0011m" || coreLower == "bk") return "93";
+  if (coreLower == "tomytutor") return "317";
+  if (coreLower == "jupiter") return "126";     // CORENAME is "Jupiter", not "JupiterAce"
+  if (coreLower == "tamagotchi") return "293";  // no friendly mapping: raw == friendly
   if (coreLower == "menu" || coreLower == "main") return "";
   
   Serial.printf("Core '%s' not mapped to ScreenScraper system\n", coreName.c_str());
