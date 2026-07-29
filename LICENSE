@@ -1,21 +1,109 @@
-MIT License
+MiSTer Monitor — Licensing Overview
+===================================
 
-Copyright (c) 2025 Adolfo Fernández
+Copyright (C) 2025-2026 Adolfo Fernández (chipster6502)
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+MiSTer Monitor is free software, distributed under a split copyleft
+license:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Display firmware and everything else in this repository
+   (all `mister_monitor_*` folders, the web flasher, documentation and
+   build tooling):
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+       GNU General Public License, version 3 or (at your option)
+       any later version — full text in LICENSE-GPL-3.0.txt
+
+2. MiSTer-side server (everything under `MiSTer/`, including the
+   installers and `MiSTer/Scripts/.config/mister_monitor/`):
+
+       GNU Affero General Public License, version 3 or (at your
+       option) any later version — full text in LICENSE-AGPL-3.0.txt
+
+The firmware and the server are separate programs that communicate
+over HTTP. The two licenses are mutually compatible.
+
+In short: you are free to use, study, modify and redistribute this
+software — including commercially — provided that any version you
+distribute (or, for the server, make available over a network) is
+released under the same terms, with complete corresponding source
+code.
+
+
+Official pre-built binaries
+---------------------------
+
+The firmware binaries attached to GitHub releases and served through
+the web flasher embed the author's private ScreenScraper developer
+credentials, injected at build time from repository secrets. These
+credentials are confidential material of the author and are NOT part
+of the license grants above.
+
+- You may download, flash and use the official binaries for personal
+  use.
+- You may NOT redistribute the official binaries in a commercial
+  context (for example, selling pre-flashed devices or bundling the
+  binaries with hardware for sale). Doing so would redistribute the
+  private credentials and consume the project's shared ScreenScraper
+  API quota.
+- Commercial distribution is welcome through the source code: build
+  the firmware yourself under the GPL-3.0 terms, using your own
+  ScreenScraper developer credentials and your own product branding
+  (see TRADEMARK.md).
+
+
+Non-code assets
+---------------
+
+The licenses above apply to software. Other material in this
+repository is covered as follows.
+
+**3D-printable stands (`3d-printing/`)** — these models are NOT the
+work of this project's author. They are third-party designs,
+redistributed here under their own Creative Commons licenses, and the
+GPL/AGPL grants above do not apply to them. Each model keeps the
+license its own author chose; attribution and license details are
+listed in the README's "3D-printable stand" section, and any
+redistribution must preserve them. In particular, the 3.5" CYD stand
+is ShareAlike, so derivatives of it must remain under the same terms.
+
+**Screenshots, demo videos and other project media authored by this
+project** — licensed under Creative Commons Attribution-ShareAlike
+4.0 International (CC BY-SA 4.0). Editorial use — reviews, articles,
+tutorials, videos about the project — is always welcome, including on
+monetised channels. Using this media to advertise a product for sale
+is a branding matter, governed by TRADEMARK.md.
+
+**The project logo** is not covered by the CC license above; see
+TRADEMARK.md.
+
+Should this project publish original 3D models of its own in the
+future, they will be licensed under CC BY-SA 4.0 and stored separately
+from third-party models, with the distinction stated in the README.
+
+
+Name and branding
+-----------------
+
+"MiSTer Monitor", the project logo and the official media identify
+this project. The source-code licenses above do not grant any
+trademark rights; see TRADEMARK.md for the branding policy, which
+also describes how commercial use of the project name can be granted
+in exchange for contributions back to the project.
+
+
+Third-party components
+----------------------
+
+Bundled or depended-upon components keep their original licenses and
+notices, including LovyanGFX (FreeBSD), M5GFX / M5Unified (MIT),
+JPEGDEC (Apache-2.0), XPT2046_Touchscreen, the Arduino-ESP32 core
+(LGPL-2.1 / Apache-2.0) and theypsilon's DB-Template (MIT, used by the
+companion MiSTer_monitor_DB repository).
+
+
+Earlier versions
+----------------
+
+Releases up to and including v2.6.0 were published under the MIT
+License and remain available under those terms. The licensing
+described in this file applies from the next tagged release onward.

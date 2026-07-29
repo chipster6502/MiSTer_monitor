@@ -214,4 +214,20 @@ Two components work together:
 
 ## License
 
-MIT License — see LICENSE file for details.
+MiSTer Monitor uses a split free-software license:
+
+- **Display firmware** (all `mister_monitor_*` folders) and everything else in
+  this repository — [GNU GPL v3.0 or later](LICENSE-GPL-3.0.txt).
+- **MiSTer-side server** (`MiSTer/`) —
+  [GNU AGPL v3.0 or later](LICENSE-AGPL-3.0.txt).
+
+See [LICENSE](LICENSE) for the overview, including the terms for the **official
+pre-built binaries**: they embed private ScreenScraper developer credentials and
+may not be redistributed commercially — commercial builds must be compiled from
+source with your own credentials. The 3D-printable stands are third-party
+designs under their own Creative Commons licenses (see above). The project name
+and logo are covered by the [trademark policy](TRADEMARK.md), which also
+describes how commercial use can be granted in exchange for contributions.
+
+Releases up to and including v2.6.0 were published under the MIT License and
+remain available under those terms.
