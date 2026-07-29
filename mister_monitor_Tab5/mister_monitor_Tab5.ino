@@ -1430,11 +1430,13 @@ void drawFooter() {
   M5.Display.setTextSize(2);
   M5.Display.setTextColor(THEME_CYAN, THEME_BLACK);
   
-// Vestigial guard: page 5 went fullscreen and no longer calls drawFooter()
+// Vestigial guard: the fullscreen pages (5 and 6) no longer call drawFooter()
   // (only pages 0-4 do), so this never evaluates false today. It is kept
-  // because the reason still holds — on a page whose scrolling title IS the
-  // game name, repeating it in the footer is noise.
-  if (currentPage != 5) {
+  // because the reason still holds — on a page that already shows the game
+  // name, as a scrolling title on 5 and in the header on 6, repeating it in
+  // the footer is noise. Same predicate as the scroll updater in loop() on
+  // purpose: two guards enforcing one rule should not read differently.
+  if (!isFullscreenPage(currentPage)) {
     if (currentGame.length() > 0 && !g_currentGameIsContainer) {
       String gameSeed = foldForDisplay(currentGame);   // display-only fold
       if (gameFooterScroll.fullText != gameSeed) {
@@ -3701,8 +3703,14 @@ if (oldGame != currentGame && sdCardAvailable) {
   
   static unsigned long lastFooterScrollUpdate = 0;
   if (millis() - lastFooterScrollUpdate > 100) { // Update every 100ms
-    // Page 5 (GAME INFO) draws no game name in the footer, so nothing to scroll.
-    if (!showingCoreImage && currentPage != 5 && gameFooterScroll.needsScroll) {
+    // The fullscreen pages own the bottom strip: page 5 (GAME INFO) shows the
+    // game as its scrolling title, and page 6 (RETROACHIEVEMENTS) puts the game
+    // in its header and the nav hints in the footer. Repainting the footer game
+    // name there is both redundant and destructive — the scroll window spans
+    // x 552..792 at y 660 and the "SCAN" hint sits at x 604, y 664, so the two
+    // land on each other. Ask about the pair, not about page 5 alone.
+    if (!showingCoreImage && !isFullscreenPage(currentPage) &&
+        gameFooterScroll.needsScroll) {
       String textToShow = (currentGame.length() > 0) ? currentGame : currentCore;
       
       if (gameFooterScroll.fullText == textToShow) {
