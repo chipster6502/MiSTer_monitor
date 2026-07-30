@@ -31,6 +31,7 @@ console and computer games via the MiSTer Remote web application.*
 ## Features
 
 - **Real-time artwork** — game and core images fetched on demand from ScreenScraper as you play, no pre-scraping.
+- **RetroAchievements** — live progress, points and hardcore breakdown, the full trophy list with per-achievement descriptions, and an unlock popup the moment an achievement triggers. View-only on a stock MiSTer; pairs with the [odelot/Main_MiSTer](https://github.com/odelot/Main_MiSTer) RetroAchievements fork to record unlocks.
 - **Game Info panel** — "Now Playing" metadata (year, developer, publisher, genre, players, rating, synopsis), cached on the SD card.
 - **Reliable load detection** — an event-driven server state machine tells real game loads from OSD navigation and delivers them to the display atomically.
 - **Detection from multiple sources** — recognises games loaded from the OSD, the MiSTer Remote web app, and Super Attract Mode (SAM); auto-discovers the MiSTer on the LAN.
@@ -42,6 +43,10 @@ console and computer games via the MiSTer Remote web application.*
 - **Name-based artwork search** for systems whose containers carry no ScreenScraper-indexed hash (e.g. DOS/0MHz packs), used automatically when the CRC route can't resolve.
 - **Clear on-screen status** when artwork is unavailable, distinguishing a core absent from ScreenScraper, a game not in the database, and a game catalogued with no artwork.
 - **Configurable synopsis** — scroll speed and manual/auto mode adjustable in `config.ini`; the synopsis re-fetches automatically when you change the preferred language.
+- **Neo Geo (Darksoft) layouts** — romset ZIPs and unzipped romset folders are recognised as the game itself, bare-romset `.neo` files resolve their title, and RetroAchievements matching works through romset-name hashing.
+- **Neo Geo CD as its own console** — the NeoGeo core serves both, so a disc image is identified by its format: it reports as Neo-Geo CD, uses the matching ScreenScraper platform, and keeps its own artwork cache.
+- **Backwards-compatible cores resolved by the game's system** — an Atari 2600 cartridge in the 7800 core, Apple II disks on the IIgs, or a `.sms` through Genesis get the artwork and achievements of the system they belong to, not the core that runs them.
+- **Self-auditing core coverage** — official cores are mapped from their own CONF_STR, a weekly audit proposes mappings for new ones, and unrecognised CORENAMEs are recorded at `/status/unknown_cores`.
 - **Automatic Arcade subsystem detection** for correct per-system artwork.
 - **Manual SCAN button** on the image screen for the rare case where the CRC couldn't be detected automatically.
 - **Automatic MiSTer discovery** via UDP broadcast (no static IP needed), with reconnection if the MiSTer isn't ready at boot.
@@ -188,7 +193,7 @@ Two components work together:
 
 ### Data and content enrichment
 
-- **RetroAchievements integration** — Show unlocked achievements and progress, building on [odelot/Main_MiSTer](https://github.com/odelot/Main_MiSTer).
+- ~~**RetroAchievements integration** — Show unlocked achievements and progress, building on [odelot/Main_MiSTer](https://github.com/odelot/Main_MiSTer).~~ *(shipped in v2.7.0)*
 - ~~**Enriched game metadata screen** — "Now Playing" view with synopsis, year, publisher, developer, genre.~~ *(shipped: Game Info panel)*
 - **Game Manuals access** — Show manuals for the system or running game from the ⁠Game Manuals Databases by *Moondandy*.
 - **Regional cover comparison** — Show EU/US/JP versions of the same game's artwork.
