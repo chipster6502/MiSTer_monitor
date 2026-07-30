@@ -7591,6 +7591,30 @@ String ssSystemForRom(const String& coreName, const RomDetails& rd, String* altO
     if (ext == "po" || ext == "2mg" || ext == "woz") { if (altOut) *altOut = "86";  return "217"; }
   }
 
+  // --- Neo Geo (142) also runs Neo Geo CD (70) --------------------------------
+  // One core, two platforms: the cartridge side arrives as a .neo file, a
+  // Darksoft romset ZIP or a romset folder, while the CD side is a disc image.
+  // A disc image on this core can therefore only be a Neo Geo CD title, which
+  // is why the extension decides.
+  //
+  // There IS a "Neo-Geo CD" entry in the friendly-name table returning 70, but
+  // it can only fire when CORENAME is literally NeoGeo-CD. Loading a CD from
+  // the stock NeoGeo core never reaches it — the core resolves to 142 and the
+  // disc was queried as a cartridge, which is the bug this fixes.
+  //
+  // 70 leads and 142 is the sibling rather than the reverse: most Neo Geo CD
+  // releases are CD editions of AES/MVS titles, so ScreenScraper's cartridge
+  // entry usually exists even where its CD entry does not. Asking 70 first
+  // gets the CD-specific artwork when it is there; the retry recovers the
+  // cartridge entry when it is not. Today only 142 is ever asked, so this is
+  // strictly more coverage and never less.
+  if (base == "142") {
+    if (ext == "cue" || ext == "chd" || ext == "iso") {
+      if (altOut) *altOut = "142";
+      return "70";
+    }
+  }
+
   return base;
 }
 
