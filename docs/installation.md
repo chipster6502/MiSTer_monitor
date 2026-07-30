@@ -15,6 +15,7 @@ used for artwork retrieval.
   - [Alternative: Building from source (advanced)](#alternative-building-from-source-advanced)
 - [Creating a ScreenScraper account](#creating-a-screenscraper-account)
   - [Advanced: using your own developer account](#advanced-using-your-own-developer-account)
+- [Enabling RetroAchievements (optional)](#enabling-retroachievements-optional)
 
 ## MiSTer side
 
@@ -243,3 +244,26 @@ no developer account or manual approval required.
 If you already have your own ScreenScraper developer account and prefer to
 use it (for its own quota and identity), set `ss_dev_user` and `ss_dev_pass`
 in `config.ini`. When present, they override the app's built-in credentials.
+
+## Enabling RetroAchievements (optional)
+
+The RetroAchievements page works out of the box once the server knows your
+account:
+
+1. Create a free account at
+   [https://retroachievements.org](https://retroachievements.org) if you
+   don't have one.
+2. Start the server once (load any game), then edit
+   `/media/fat/Scripts/.config/mister_monitor/ra_credentials.ini` on the
+   MiSTer — the server creates the template automatically — and fill in your
+   username and **Web API key** (retroachievements.org → *Settings* →
+   *Applications*).
+3. Load a game with a published achievement set: the display's
+   RetroAchievements page shows the set, your progress and the trophy list.
+
+That much is **view-only**. To actually earn achievements on the MiSTer,
+install the [odelot/Main_MiSTer](https://github.com/odelot/Main_MiSTer)
+RetroAchievements fork and play on its `RA_`-prefixed cores; the display
+detects it and unlock popups appear as they trigger. See
+[`configuration.md`](configuration.md#retroachievements) for the full tier
+breakdown, including the instant-popup option.

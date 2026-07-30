@@ -6,6 +6,7 @@
 - [config.ini](#configini)
 - [MiSTer IP address](#mister-ip-address)
 - [Artwork download order](#artwork-download-order)
+- [RetroAchievements](#retroachievements)
 
 ## SD Card content
 
@@ -114,3 +115,46 @@ arcade_media_order=fanart,marquee,wheel-carbon,wheel-steel,wheel,box3d,box2d,scr
 
 game_media_order=box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot
 ```
+
+## RetroAchievements
+
+RetroAchievements is configured **on the MiSTer**, not on the display's
+microSD card: the server does the hashing and talks to the RA API, and the
+display only renders what the server reports.
+
+### Credentials
+
+The first time the server starts it creates an editable template at:
+
+```
+/media/fat/Scripts/.config/mister_monitor/ra_credentials.ini
+```
+
+Open it and fill in your RetroAchievements username and your **Web API key**
+(retroachievements.org → *Settings* → *Applications*):
+
+```ini
+[retroachievements]
+username=YourRAUsername
+api_key=YourWebAPIKey
+```
+
+An existing file is never overwritten by updates, so your configuration
+survives every new server version. Without the file the RetroAchievements
+page simply reports that it is not configured; everything else works as
+before.
+
+### What you get, tier by tier
+
+Each tier is optional and degrades gracefully to the one below it:
+
+| Setup | What the display shows |
+|---|---|
+| Credentials only, stock MiSTer | The game's achievement set, your cloud progress, points and hardcore breakdown, and the full trophy list — **view-only**: nothing you do on the MiSTer is recorded, and the page says so. |
+| [odelot/Main_MiSTer](https://github.com/odelot/Main_MiSTer) RetroAchievements fork | Unlocks are **earned and recorded** while you play on `RA_`-prefixed cores. The display detects the fork and shows a READY FOR RETROACHIEVEMENTS banner when a matched game loads. |
+| Fork + `debug=1` in `/media/fat/retroachievements.cfg` | Unlock popups become **instant** (under a second, with title and description), and CD systems the server cannot hash locally — PlayStation, Saturn, Mega CD — resolve through the fork's own hash. |
+
+With the fork but without `debug=1`, unlocks still reach the display within a
+few seconds through cloud polling; `log_file_entry=1` in `MiSTer.ini`
+shortens that further. The fork's own installation and core setup are
+documented in its repository.
