@@ -89,32 +89,73 @@ jobs:
         with:
           files: dist/*.bin
           body: |
-            ## What's new in v2.6.0
+            ## What's new in v2.7.0
 
-            A **Game Info panel**, more reliable artwork detection through a
-            reworked server state engine, and coverage for systems and launch
-            methods that previously showed no artwork. Drop-in update: existing
-            `config.ini` files keep working, and the new firmware falls back
-            gracefully with an older server.
+            **RetroAchievements on the display**, and the release that made
+            artwork detection stop guessing: Neo Geo romsets, cores running
+            another system's games, DOS containers and name-only entries all
+            resolve now, and core coverage audits itself weekly instead of
+            being a hand-kept list. 102 commits since v2.6.0. Drop-in update —
+            existing `config.ini` files keep working.
 
-            ### New features
-            - **Game Info panel** — a new page with year, developer, publisher, genre, players, rating and a scrolling synopsis for the current game, cached on the SD card so it loads instantly and offline. On all five boards.
-            - **Name-based artwork search** — systems whose files carry no ScreenScraper-indexed hash now fall back to a name search, so they get artwork too.
-            - **Configurable synopsis** — scroll speed and manual/auto mode set in `config.ini` (`[gameinfo]`); the synopsis re-fetches when you change the preferred language.
+            ---
 
-            ### Improvements
-            - **Reworked load detection** — an event-driven server state machine reliably tells a real game load from OSD navigation, fixing cases where the display could freeze on the wrong state until a manual scan. Core and game are delivered atomically, so they never disagree.
-            - **Clear "no artwork" status** — the screen explains why artwork is missing (core not in ScreenScraper, game not in the database, or game with no artwork) and stops retrying cases that can never succeed, saving quota.
-            - Wider ScreenScraper system coverage and corrected mappings.
+            ### RetroAchievements
 
-            ### Fixes
-            - Correct handling of more launch layouts: arcade `.mra` from any folder, NEOGEO romsets, folder-per-game CD layouts, and MGL/CHD launches.
-            - Tab5 (ESP32-P4) stability fixes and several HUD layout fixes.
-            - On-screen ScreenScraper API error codes, with credentials redacted from logs.
+            A dedicated page on all five boards, and a server layer that
+            resolves the running game against RetroAchievements.
+
+            - **Progress panel** — points, unlocked count and hardcore breakdown for the game you are playing.
+            - **Trophy list** — every achievement in the set, paginated; tap any row for its full description.
+            - **Unlock popups** — an achievement pops on screen the moment it triggers, over fullscreen artwork included, with title, description and points.
+            - **READY FOR RETROACHIEVEMENTS banner** when a matched game loads on a core that can actually record unlocks.
+            - **Honest states.** The page distinguishes *not configured*, *core not supported*, *game not matched*, **SET NOT PUBLISHED YET** (the game resolved but has no achievement set), **view-only** (a stock MiSTer shows your cloud progress but records nothing), and *the fork has a different game loaded* — instead of implying progress that cannot be banked.
+            - **Setup is two lines.** The server writes an editable `ra_credentials.ini` on first start; fill in your RA username and Web API key. An existing file is never overwritten by updates.
+            - **Three optional tiers, each degrading to the one below**: credentials only (view-only) → the [odelot/Main_MiSTer](https://github.com/odelot/Main_MiSTer) fork on `RA_` cores (unlocks are earned and recorded) → the fork with `debug=1` in `retroachievements.cfg` (popups in under a second, and PlayStation, Saturn and Mega CD resolve too).
+            - Neo Geo games resolve through arcade romset-name hashing.
+            - New endpoint: `/status/retroachievements`.
+
+            ### Artwork and game detection
+
+            - **Neo Geo (Darksoft)** — romset ZIPs and unzipped romset folders are recognised as the game itself, and bare-romset `.neo` files resolve their title.
+            - **Neo Geo CD** — one core serves two consoles, and a disc image is now read as the CD console rather than as a cartridge: the panel names it Neo-Geo CD, artwork is fetched from ScreenScraper's Neo Geo CD platform (retrying as Neo Geo for the many CD releases whose cartridge entry is the one that exists), and it caches in its own folder. Loading a disc by hand now behaves exactly as a SAM rotation already did.
+            - **Backwards-compatible cores** — an Atari 2600 cartridge in the 7800 core, Apple II disks on the IIgs, or a `.sms` through Genesis now get the artwork and achievements of the system the *game* belongs to, not the core running it. Console (autoboot) boot ROMs are presented as core-only.
+            - **DOS and 0MHz containers** — container images are shown as core-only instead of chasing a game that isn't there; variant markers and disc numbers are stripped from name searches; CHD hashing is skipped on ao486.
+            - **Name-only games** — entries with a name but no ROM on disk are detected as such, searched by name, and the verdict is shown rather than left spinning.
+            - **New systems mapped** — Apple IIgs, AmigaVision Amiga variants, Atari Lynx 2P, Tomy Tutor, Elektronika BK0011M, Jupiter Ace, Tamagotchi, Paprium, Mega Drive VGM Player, and the unofficial z386 core.
+
+            ### Core coverage that maintains itself
+
+            - Official cores are mapped from **their own CONF_STR** instead of a hand-written table.
+            - Unrecognised CORENAMEs are recorded and exposed at **`/status/unknown_cores`**, resolved through the same chain the HUD uses so the log and the screen can never disagree.
+            - A **weekly job** audits MiSTer cores, watches GitHub for unofficial ones and opens a pull request proposing mappings.
+            - CI **validates `CORE_NAME_MAPPING`** imports and parses on every PR.
+
+            ### Game Info
+
+            - **`info_in_rotation`** — new `config.ini` key that adds the fields panel to the automatic artwork cycle.
+            - The panel no longer lingers after you leave it, the rotation clock restarts correctly, and it hides itself when ScreenScraper has confirmed there is nothing to show.
+            - Tab5 honours the sidecar language stamp and re-fetches when the preferred language changes; the synopsis scroll keys are wired there too.
+
+            ### Display and interface
+
+            - **New artwork assets** — redesigned gradient menu art and new generic arcade art for all three board families, in `SD_card_content/`.
+            - **CYD 2.8"** — achievement detail text at 1.5x, and trophy rows raised off the footer with the touch bands recalibrated to match.
+            - **Tab5** — the footer game name no longer paints over the fullscreen navigation strip, and an expected JPEG clip warning at the footer band is silenced.
+            - Core and game names with accents or non-Latin characters are folded to ASCII instead of rendering as garbage on the GLCD font.
+
+            ### Under the hood
+
+            - **Server robustness** — UTF-8 output end to end, refined SAM handling (evaluated before the OSD guard, freshness checks, name-only guards), case-insensitive `names.txt` merge, an ACTIVEGAME gate and a safety poll.
+            - The ecosystem observatory and the unofficial-cores pipeline moved to their own repositories, [MiSTer_ecosystem](https://github.com/chipster6502/MiSTer_ecosystem) and [MiSTer_unofficial_cores](https://github.com/chipster6502/MiSTer_unofficial_cores), keeping this one focused on the monitor.
 
             ### Notes
-            - Screenshot capture over HTTP is available on the Tab5 and 2.8" CYD boards; the 3.5" (ST7796) panels don't support it (no SPI readback).
-            - Existing `config.ini` files work unchanged; new keys use sensible defaults. New firmware pairs with older servers via a legacy fallback path.
+
+            - **License change** — from this release the firmware is GPL-3.0-or-later and the server AGPL-3.0-or-later, with SPDX headers on every source file. Releases up to and including v2.6.0 remain MIT. A `TRADEMARK.md` now covers the project name.
+            - **New artwork needs a copy.** The redesigned menu and arcade images live in `SD_card_content/`; an existing microSD card keeps the old ones until you copy the new files over.
+            - **Sketch rename** — the 2.8" sketches are now named by panel controller (`CYD28R_ILI9341`, `CYD28R_ST7789`) instead of USB port count. Web flasher users are unaffected; anyone building from source needs to update their paths.
+            - RetroAchievements is entirely optional: without `ra_credentials.ini` everything else behaves exactly as in v2.6.0.
+            - Existing `config.ini` files work unchanged; new keys use sensible defaults.
       - name: Build flasher site
         run: |
           mkdir -p site/flasher
