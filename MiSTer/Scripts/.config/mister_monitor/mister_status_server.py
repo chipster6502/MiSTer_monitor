@@ -580,6 +580,41 @@ def _md_or_sms(game_path):
     return 'Sega Genesis/Mega Drive'
 
 
+# Disc formats the NeoGeo core accepts for its CD side. '.pbp' is deliberately
+# absent: it is a PSX EBOOT container and never a Neo Geo CD image.
+_NEOGEO_CD_EXTS = ('.cue', '.chd', '.iso')
+
+
+def _neogeo_cart_or_cd(game_path):
+    """Real console of a game loaded through the stock NEOGEO core (serves both).
+
+    Neo Geo CD is a separate retail console, not a Neo Geo fed different media,
+    and the core's two sides never share a container: cartridges arrive as .neo
+    files, Darksoft romset ZIPs or romset folders, while the CD side is always a
+    disc image. So the extension alone decides, with no header sniffing.
+
+    Unlike _md_or_sms() and _atari_78_or_26(), the answer here belongs in the
+    CORE name rather than in game_system, for two independent reasons:
+
+      * SAM already says 'Neo-Geo CD'. It writes its own mnemonic ('neogeocd')
+        to /tmp/SAM_Games.log and CORE_NAME_MAPPING translates it, so a SAM
+        rotation through a CD title already yields ScreenScraper id 70, the Neo
+        Geo CD platform art and its own /cores/N/neo-geo cd/ cache folder.
+        Leaving a manual load on 'Neo-Geo' would make the same disc resolve two
+        different ways depending on who opened it.
+      * The firmware does not read game_system at all. It keys artwork off the
+        core name and off file extensions inside ssSystemForRom(), so a
+        game_system of 'Neo-Geo CD' would change precisely nothing on screen.
+
+    Returning the exact string CORE_NAME_MAPPING['neogeocd'] yields is the whole
+    point: it is what makes the SAM path and the manual path converge on one
+    ScreenScraper system, one platform image and one cache folder.
+    """
+    if game_path.lower().endswith(_NEOGEO_CD_EXTS):
+        return 'Neo-Geo CD'
+    return 'Neo-Geo'
+
+
 def _commit_state(core, game, game_path, is_arcade, event, core_raw='', game_system=''):
     """
     Atomically commits a derived state. Bumps 'seq' and invalidates the
@@ -1609,24 +1644,32 @@ def _update_state():
         
         print(f"🎮 Non-arcade: core={corename} game={game_name}")
 
+    # One core, two consoles. This is NOT the backwards-compatible case handled
+    # below — see _neogeo_cart_or_cd() for why the CD side changes the reported
+    # core instead of travelling in game_system.
+    if not is_arcade and friendly_name == 'Neo-Geo' and game_path:
+        friendly_name = _neogeo_cart_or_cd(game_path)
+
     # Backwards-compatible cores run software older than themselves: the Atari
     # 7800 takes 2600 cartridges, the MegaDrive takes Master System ones. The
     # CORE NAME deliberately stays what is actually loaded, so the panel reads
     # like the hardware on the desk — a Master System with a Game Gear cartridge
     # in it, which is exactly what the SMS core already does. The game's real
-    # system travels in its own field instead, for the consumers that must key
-    # off the GAME: the RetroAchievements console lookup cannot find a Master
-    # System set while it is asking Mega Drive's console list.
+    # system travels in its own field instead, for the one consumer that must
+    # key off the GAME: the RetroAchievements console lookup, which cannot find
+    # a Master System set while it is asking Mega Drive's console list. Artwork
+    # does NOT read this field — the firmware resolves that from the core name
+    # and the file extension in its own ssSystemForRom().
     game_system = ''
     if not is_arcade:
         # The 2-player Lynx core is Atari Lynx in every way that matters to the
         # rest of the stack: it loads the same .lnx files (they live under
         # games/AtariLynx/), so its real system is fixed, not game-dependent.
-        # Firmware maps game_system to the ScreenScraper system id, and without
-        # this the 2P core reaches neither AtariLynx2P nor 'Atari Lynx (2P)' in
-        # that table and artwork is impossible — while the stock Lynx (id 28)
-        # works. Set unconditionally (no game_path guard): the mapping holds
-        # even with the core sitting empty in the menu.
+        # This feeds the RetroAchievements console lookup only; the artwork side
+        # was fixed in the firmware, which now maps both 'Atari Lynx (2P)' and
+        # the raw AtariLynx2P to ScreenScraper id 28 directly. Set
+        # unconditionally (no game_path guard): the mapping holds even with the
+        # core sitting empty in the menu.
         if friendly_name == 'Atari Lynx (2P)':
             game_system = 'Atari Lynx'
         elif game_path:
