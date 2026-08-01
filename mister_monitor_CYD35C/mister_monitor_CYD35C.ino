@@ -24,6 +24,15 @@
 //    Upload Speed:    921600
 // ============================================================================
 
+// =============================================================================
+//  FIRMWARE_VERSION — single source of truth for this sketch's release.
+//  Shown on the boot screen and in the main HUD, and compared against the
+//  server's SERVER_VERSION (carried in /status/snapshot). A mismatch means one
+//  half was updated and the other was not — the display warns instead of
+//  failing silently. Bump on every release, with SERVER_VERSION in the server.
+// =============================================================================
+#define FIRMWARE_VERSION "2.7.0"
+
 #include <XPT2046_Touchscreen.h>
 #include <LovyanGFX.hpp>
 #include "board_hal.h"
@@ -271,6 +280,13 @@ bool raDetailShown = false;
 
 // Armed by getRAStatus() when a game WITH achievements is newly matched;
 // consumed by loop(), which shows the footer banner once per game.
+// --- Version tracking -------------------------------------------------------
+// serverVersion is filled from /status/snapshot. Empty means either an older
+// server that does not report it, or no successful snapshot yet.
+String serverVersion            = "";
+bool   versionMismatchPending   = false;   // armed on detection, consumed by loop()
+bool   versionMismatchReported  = false;   // one warning per boot, not per poll
+
 bool raBannerPending = false;
 int  raDetailRow   = 0;                  // index into the raList* buffers
 
@@ -537,6 +553,7 @@ void buttonPressFeedback(TouchButton* btn, void (*soundFn)());
 void testMiSTerConnectivity(bool discovered);
 void showReconnectBanner();
 void showRAReadyBanner();
+void showVersionMismatchBanner();
 void updateMiSTerData();
 void getCurrentCore();
 void getCurrentGame();
@@ -2723,6 +2740,15 @@ void loop() {
   // achievements is newly matched. Sits here, above the screensaver block, so
   // it fires in every mode — including over the fullscreen artwork, which is
   // exactly where a game normally starts.
+  // Version mismatch warning: armed by getStateSnapshot() on the first poll
+  // that reveals server and firmware are out of step. Shown before the RA
+  // banner because it explains why anything else may be misbehaving.
+  if (versionMismatchPending) {
+    versionMismatchPending = false;
+    showVersionMismatchBanner();
+    needsRedraw = true;
+  }
+
   if (raBannerPending) {
     raBannerPending = false;
     Serial.println("[RA] Game with achievements loaded — showing banner");
@@ -4063,6 +4089,14 @@ void showBootSequence() {
 
   // Bar sits midway between the last boot line (ends at y=240) and the bottom
   // of the 320 px panel: 32 px of air above and below.
+  // Firmware version on the boot screen: always visible, so a user can
+  // report it without any tooling.
+  Lcd.setTextSize(1);
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setCursor(15, 302);
+  Lcd.print("FW ");
+  Lcd.print(FIRMWARE_VERSION);
+
   const int barX = 60, barY = 272, barW = 360, barH = 16;   // wider bar
   Lcd.drawRect(barX, barY, barW, barH, THEME_WHITE);
   Lcd.fillRect(barX + 1, barY + 1, barW - 2, barH - 2, THEME_BLACK);
@@ -4319,6 +4353,35 @@ void showRAReadyBanner() {
   }
 }
 
+// Version mismatch banner. Same footer band and hold-then-restore shape as
+// showRAReadyBanner(), so the footer restore below fully covers it. Two centred
+// lines: the label, then "S:x.y.z F:x.y.z" (12 px/char at size 2).
+void showVersionMismatchBanner() {
+  char line2[48];
+  snprintf(line2, sizeof(line2), "S:%s F:%s",
+           serverVersion.c_str(), FIRMWARE_VERSION);
+
+  const char* l1 = "VERSION MISMATCH";
+  int w1 = (int)strlen(l1)    * 12;
+  int w2 = (int)strlen(line2) * 12;
+
+  Lcd.fillRect(0, 270, 480, 50, THEME_RED);
+  Lcd.setTextWrap(false);
+  Lcd.setTextSize(2);
+  Lcd.setTextColor(THEME_WHITE, THEME_RED);
+  Lcd.setCursor((480 - w1) / 2, 278);
+  Lcd.print(l1);
+  Lcd.setCursor((480 - w2) / 2, 300);
+  Lcd.print(line2);
+
+  delay(4000);                               // longer than RA: it is actionable
+
+  if (showingCoreImage) {
+    if (currentGame.length() > 0) addGameImageFooter(currentGame);
+    else                          drawCoreImageFooter();
+  }
+}
+
 void updateMiSTerData() {
   Serial.println("=== Updating MiSTer data ===");
   if (!getStateSnapshot()) {   // atomic path (server >= 2.6)
@@ -4364,6 +4427,25 @@ bool getStateSnapshot() {
   newCore.trim();
   newGame.trim();
   newCoreRaw.trim();
+
+  // Version check. Absent on servers older than this feature -> stays empty,
+  // and we say nothing rather than crying wolf. Reported once per boot: the
+  // condition is level, not edge, so without the flag every poll would warn.
+  String newServerVersion = extractStringValue(response, "server_version");
+  newServerVersion.trim();
+  if (newServerVersion.length() > 0) {
+    serverVersion = newServerVersion;
+    if (serverVersion != FIRMWARE_VERSION && !versionMismatchReported) {
+      versionMismatchReported = true;
+      versionMismatchPending  = true;
+      Serial.printf("[VERSION] MISMATCH  server=%s  firmware=%s\n",
+                    serverVersion.c_str(), FIRMWARE_VERSION);
+    } else if (serverVersion == FIRMWARE_VERSION && !versionMismatchReported) {
+      versionMismatchReported = true;   // matched: never warn this boot
+      Serial.printf("[VERSION] OK  server=%s  firmware=%s\n",
+                    serverVersion.c_str(), FIRMWARE_VERSION);
+    }
+  }
 
   // "Console (autoboot)" runs a splash animation, not a game. Blanking the name
   // HERE — at the single point where the snapshot enters the firmware — is what
@@ -5763,8 +5845,26 @@ void displayMainHUD() {
                  String(cpuUsage, 1) + "%", cpuUsage    > 80 ? THEME_RED : THEME_GREEN);
   drawMiniPanel(167, 192, 145, 42, "RAM",
                  String(memoryUsage, 1) + "%", memoryUsage > 80 ? THEME_RED : THEME_GREEN);
-  drawMiniPanel(325, 192, 145, 42, "USB",
-                 String(usbDeviceCount), THEME_CYAN);
+  // Versions replace the old USB device count here: this row is system status,
+  // not core status, so it belongs beside CPU/RAM rather than inside the core
+  // panel. The USB count is not lost — the DEVICE SCANNER page still shows it,
+  // in more detail. drawMiniPanel's two text rows map exactly onto server over
+  // firmware. serverVersion is empty until the first snapshot (and on a server
+  // too old to report it), so "?" is shown instead of a blank slot.
+  //
+  // This panel fits 14 chars; "SERVER:2.7.0" is 12, so normal x.y.z versions
+  // fit. A suffixed version ("2.7.0-rc1") would not, so the labels shorten to
+  // S:/F: rather than spilling past the border.
+  {
+    String sv = serverVersion.length() ? serverVersion : String("?");
+    String sLine = "SERVER:" + sv;
+    String fLine = "FIRMW:"  + String(FIRMWARE_VERSION);
+    if (sLine.length() > 14 || fLine.length() > 14) {
+      sLine = "S:" + sv;
+      fLine = "F:" + String(FIRMWARE_VERSION);
+    }
+    drawMiniPanel(325, 192, 145, 42, sLine, fLine, THEME_CYAN);
+  }
 }
 
 void displaySystemMonitor() {
