@@ -573,6 +573,7 @@ void drawFooter();
 void drawMiSTerLogo(int x, int y);
 void drawPanel(int x, int y, int w, int h, uint16_t color);
 void drawMiniPanel(int x, int y, int w, int h, String label, String value, uint16_t color);
+void drawVersionPanel(int x, int y, int w, int h, String sLine, String fLine, bool mismatch);
 void drawProgressBar(int x, int y, int w, int h, float percent);
 void drawStorageBar(int x, int y, int w, int h, float percent);
 void drawDigitalClock(int x, int y, String time, String label);
@@ -5863,7 +5864,10 @@ void displayMainHUD() {
       sLine = "S:" + sv;
       fLine = "F:" + String(FIRMWARE_VERSION);
     }
-    drawMiniPanel(325, 192, 145, 42, sLine, fLine, THEME_CYAN);
+    // Live comparison, not the one-shot banner flags: the HUD must keep showing
+    // the warning for as long as the mismatch lasts, not just once per boot.
+    bool vMismatch = (serverVersion.length() > 0 && serverVersion != FIRMWARE_VERSION);
+    drawVersionPanel(325, 192, 145, 42, sLine, fLine, vMismatch);
   }
 }
 
@@ -6094,6 +6098,30 @@ void drawPanel(int x, int y, int w, int h, uint16_t color) {
   Lcd.drawLine(x, y, x, y + 8, THEME_BLACK);
   Lcd.drawLine(x + w - 8, y, x + w, y, THEME_BLACK);
   Lcd.drawLine(x + w, y, x + w, y + 8, THEME_BLACK);
+}
+
+// Version panel: drawMiniPanel's geometry, but a mismatch flips the whole box
+// to red with white text instead of the usual coloured-on-black. Red text on a
+// black fill is legible but easy to miss; a filled box is not. Kept separate
+// from drawMiniPanel because that one always fills black, and every other
+// caller depends on that.
+void drawVersionPanel(int x, int y, int w, int h, String sLine, String fLine, bool mismatch) {
+  uint16_t border = mismatch ? THEME_RED   : THEME_CYAN;
+  uint16_t fill   = mismatch ? THEME_RED   : THEME_BLACK;
+  uint16_t fg     = mismatch ? THEME_WHITE : THEME_CYAN;
+
+  Lcd.drawRect(x, y, w, h, border);
+  Lcd.fillRect(x + 1, y + 1, w - 2, h - 2, fill);
+
+  // Explicit background colour on the text keeps repaints flicker-free:
+  // displayMainHUD() runs on every refresh, not just on change.
+  Lcd.setTextColor(fg, fill);
+  Lcd.setTextSize(1.5f);
+  Lcd.setCursor(x + 6, y + 5);
+  Lcd.print(sLine);
+  Lcd.setTextSize(1.5f);
+  Lcd.setCursor(x + 6, y + 23);
+  Lcd.print(fLine);
 }
 
 void drawMiniPanel(int x, int y, int w, int h, String label, String value, uint16_t color) {
