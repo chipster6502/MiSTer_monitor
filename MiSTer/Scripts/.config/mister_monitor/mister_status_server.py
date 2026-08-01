@@ -37,6 +37,15 @@ import io
 import socket
 from urllib.parse import urlparse
 
+# =============================================================================
+# SERVER_VERSION — single source of truth for this file's release.
+# Exposed in /status/snapshot and /status/version so the display (and support
+# scripts) can tell exactly which server code is RUNNING, not just which file
+# is on disk. Bump this on every release, together with FIRMWARE_VERSION in
+# the sketches.
+# =============================================================================
+SERVER_VERSION = "2.7.0"
+
 # RetroAchievements status resolver (sibling module). Imported lazily-safe:
 # if the file is missing the server still starts; the route reports the error.
 try:
@@ -1912,6 +1921,11 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 'last_valid_timestamp': last_valid_core_timestamp,
                 'timestamp': int(time.time())
             })
+        elif path == '/status/version':
+            self.send_json_response({
+                'server_version': SERVER_VERSION,
+                'timestamp': int(time.time()),
+            })
         elif path == '/status/snapshot':
             # Atomic identity snapshot. Optional ?seq=N: if the caller already
             # has the current generation, reply with a tiny body so the ESP32
@@ -1971,6 +1985,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         with _state_lock:
             return {
                 'seq':               _state['seq'],
+                'server_version':    SERVER_VERSION,
                 'core':              _state['core'],
                 'core_raw':          _state['core_raw'],
                 'system_name':       _state['system_name'],
