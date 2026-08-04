@@ -1,7 +1,8 @@
 {
-  "comment": "Cores already looked at. Presence here means 'we have seen it and decided', NOT 'supported'.",
-  "updated": "2026-07-16",
+  "comment": "Cores already looked at, keyed on the .rbf name the audit sees. Presence here means 'we have seen it and decided', NOT 'supported' - and NOT that the mapping key matches: some cores ship an .rbf whose stem differs from the CORENAME they write, so both spellings appear (Paprium and MegaDrive_Paprium -> PapriumMD; MegaVGMdrive_MiSTer -> MegaVGMDrive). Do not 'deduplicate' those.",
+  "updated": "2026-07-30",
   "triaged": [
+    "3DO",
     "AY-3-8500",
     "AcornAtom",
     "AcornElectron",
@@ -76,8 +77,9 @@
     "MacPlus",
     "MegaCD",
     "MegaDrive",
-    "PapriumMD",
+    "MegaDrive_Paprium",
     "MegaVGMDrive",
+    "MegaVGMdrive_MiSTer",
     "Minimig",
     "MinimigDB9",
     "MultiComp",
@@ -105,6 +107,8 @@
     "PSX",
     "PSX2X",
     "PSX2XCPU",
+    "Paprium",
+    "PapriumMD",
     "PokemonMini",
     "QL",
     "RX78",
@@ -143,6 +147,15 @@
     "ZX81",
     "ZXNext",
     "ao486",
-    "eg2000"
+    "eg2000",
+    "memtest_060MHz",
+    "memtest_100MHz",
+    "memtest_110MHz",
+    "memtest_120MHz",
+    "memtest_130MHz",
+    "memtest_140MHz",
+    "memtest_150MHz",
+    "memtest_160MHz",
+    "memtest_167MHz"
   ]
 }
