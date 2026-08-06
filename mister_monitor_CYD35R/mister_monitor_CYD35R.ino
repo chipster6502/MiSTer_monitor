@@ -8662,7 +8662,9 @@ bool tryMediaTypesForToken(String baseUrl, String savePath, String token) {
   else if (token == "wheel")         return tryMediaTypeWithRegions(baseUrl, savePath, "wheel",        "Wheel");
   else if (token == "box3d")         return tryMediaTypeWithRegions(baseUrl, savePath, "box-3D",       "3D Box");
   else if (token == "box2d")         return tryMediaTypeWithRegions(baseUrl, savePath, "box-2D",       "2D Box",    false);
-  else if (token == "mix")           return tryMediaTypeWithRegions(baseUrl, savePath, "mixrbv",       "MixRBV");
+  else if (token == "mix" ||
+           token == "mix2")          return tryMediaTypeWithRegions(baseUrl, savePath, "mixrbv2",      "MixRBV2");
+  else if (token == "mix1")          return tryMediaTypeWithRegions(baseUrl, savePath, "mixrbv1",      "MixRBV1");
   else if (token == "marquee") {
     // Generic "marquee" is the most common variant -- try it before regional ones
     if (tryDownloadMediaTypeWorking(baseUrl, savePath, "marquee", "Marquee")) return true;

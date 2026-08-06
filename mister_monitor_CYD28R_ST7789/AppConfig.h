@@ -90,8 +90,11 @@ struct AppConfig {
   //     screenshot    In-game title screenshot  (API: sstitle)
   //     photo         Real photograph of hardware or cartridge
   //     illustration  Promotional illustration / poster art
-  //     mix           MixRBV composite image
-  //                   API: mixrbv(wor/us/eu/jp), mixrbv
+  //     mix1          MixRBV composite image, Recalbox mix V1
+  //                   API: mixrbv1(wor/us/eu/jp), mixrbv1
+  //     mix2          MixRBV composite image, Recalbox mix V2
+  //                   API: mixrbv2(wor/us/eu/jp), mixrbv2
+  //                   'mix' is accepted as an alias of mix2
   //
   // Within each token the region fallback order is fixed:
   //   wor → us → eu → jp → generic

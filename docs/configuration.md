@@ -97,6 +97,8 @@ download succeeds. Available tokens:
 | `screenshot` | In-game title screenshot |
 | `photo` | Real photograph of hardware or cartridge |
 | `illustration` | Promotional illustration or poster |
+| `mix1` | Recalbox composite mix, version 1 |
+| `mix2` | Recalbox composite mix, version 2 (`mix` is accepted as an alias) |
 
 **Region order within each token** — the `region=` key in `[screenscraper]`
 controls which regional variant is tried first. The remaining regions follow
