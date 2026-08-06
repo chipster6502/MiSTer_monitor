@@ -121,6 +121,10 @@ struct AppConfig {
   String coreMediaOrder   = "wheel-steel,wheel-carbon,wheel,photo,illustration,box3d,box2d,marquee,fanart,screenshot";
 
   // --- UI / scroll -----------------------------------------------------------
+  // true = rotate the panel 180 degrees, for cases that mount the board
+  // upside down. Only 0 and 180 are offered: 90/270 would leave the panel in
+  // portrait and the whole UI is laid out on a fixed 320x240 landscape grid.
+  bool   flipDisplay        = false;
   int    scrollSpeedMs      = 300;
   int    scrollPauseStartMs = 2000;
   int    scrollPauseEndMs   = 3000;
@@ -211,6 +215,7 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "scroll_speed_ms")        { cfg.scrollSpeedMs = val.toInt(); }
     else if (key == "scroll_pause_start_ms")  { cfg.scrollPauseStartMs = val.toInt(); }
     else if (key == "scroll_pause_end_ms")    { cfg.scrollPauseEndMs = val.toInt(); }
+    else if (key == "flip_display")           { cfg.flipDisplay = parseBool(val); }
     // [debug]
     else if (key == "debug")                  { cfg.debugMode = parseBool(val); }
     else {

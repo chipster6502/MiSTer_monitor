@@ -195,3 +195,30 @@ public:
 };
 
 extern BoardClass Board;
+
+// Apply the [ui] flip_display setting once /config.ini has been read.
+// Called from setup() immediately after loadConfig(), not from Board.begin():
+// Board.begin() is the first statement of setup() and the SD card that holds
+// config.ini is not mounted yet at that point.
+//
+// The flip is expressed as "180 degrees from whatever orientation the sketch
+// established", not as a fixed rotation value. Board.begin() sets rotation 1,
+// but setup() then overrides it to 3 for this board's default microSD-on-top
+// layout - so hardcoding a value here would either be a silent no-op or fight
+// with that override. Reading the current rotation and adding 2 is correct on
+// every target and survives a later change of baseline orientation. Bit 2 is
+// LovyanGFX's mirror flag and is carried through untouched.
+//
+// Touch needs no extra handling: the controller is registered with LovyanGFX
+// via setTouch(), so getTouch() already returns coordinates transformed by the
+// panel rotation. (The 2.8" boards do need a manual mirror because they
+// bit-bang the XPT2046 outside LovyanGFX.)
+//
+// A false value is a deliberate no-op, so the default boot path is unchanged
+// for every existing user.
+inline void applyDisplayFlip(bool flip) {
+  if (!flip) return;
+  const uint8_t r = display.getRotation();
+  display.setRotation((r & 4) | ((r + 2) & 3));
+  display.fillScreen(TFT_BLACK);   // anything already drawn is in the old orientation
+}
