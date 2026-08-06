@@ -254,12 +254,17 @@ extern BoardClass Board;
 // Board.begin() is the first statement of setup() and the SD card that holds
 // config.ini is not mounted yet at that point.
 //
-// Rotation 1 is the default landscape; rotation 3 is the same landscape
-// flipped 180 degrees. A false value is a deliberate no-op, so the default
+// The flip is expressed as "180 degrees from whatever orientation the
+// sketch established", not as a fixed rotation value. Board.begin() sets
+// rotation 1, but setup() may override it - the 3.5" boards do, for their
+// default microSD-on-top layout - so a hardcoded value would either be a
+// silent no-op or fight with that override. Bit 2 is LovyanGFX's mirror
+// flag and is carried through untouched. A false value is a deliberate no-op, so the default
 // boot path is bit-for-bit what it was before this option existed.
 inline void applyDisplayFlip(bool flip) {
   if (!flip) return;
   displayFlipped = true;
-  display.setRotation(3);
+  const uint8_t r = display.getRotation();
+  display.setRotation((r & 4) | ((r + 2) & 3));
   display.fillScreen(TFT_BLACK);   // anything already drawn is in the old orientation
 }
