@@ -4,3 +4,6 @@
 
 LGFX_CYD display;
 BoardClass Board;
+
+// [ui] flip_display. Declared extern in board_hal.h; see applyDisplayFlip().
+bool displayFlipped = false;

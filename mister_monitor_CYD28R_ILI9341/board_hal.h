@@ -101,6 +101,11 @@ extern LGFX_CYD display;
 #define TS_RAW_Y_MIN  1350     // physical LEFT
 #define TS_RAW_Y_MAX  7170     // physical RIGHT
 
+// [ui] flip_display state. False = default landscape (USB on the right),
+// true = the same landscape rotated 180 degrees. Defined in board_hal.cpp,
+// written once at boot by applyDisplayFlip(), read by xpt2046_read().
+extern bool displayFlipped;
+
 // Read one 12-bit channel from the XPT2046 by bit-banging the SPI clock.
 inline uint16_t xpt2046_readChannel(uint8_t cmd) {
   digitalWrite(XPT2046_CS, LOW);
@@ -157,6 +162,15 @@ inline bool xpt2046_read(int* outX, int* outY) {
 
   *outX = constrain(sx, 0, 319);
   *outY = constrain(sy, 0, 239);
+
+  // 180 degree flip: the panel is rotated but the touch ADC is not, so the
+  // mapping above still describes the unflipped orientation. Mirroring both
+  // axes here is equivalent to swapping the map() endpoints and cannot get
+  // the sign wrong.
+  if (displayFlipped) {
+    *outX = 319 - *outX;
+    *outY = 239 - *outY;
+  }
 
   return true;
 }
@@ -234,3 +248,18 @@ public:
 };
 
 extern BoardClass Board;
+
+// Apply the [ui] flip_display setting once /config.ini has been read.
+// Called from setup() immediately after loadConfig(), not from Board.begin():
+// Board.begin() is the first statement of setup() and the SD card that holds
+// config.ini is not mounted yet at that point.
+//
+// Rotation 1 is the default landscape; rotation 3 is the same landscape
+// flipped 180 degrees. A false value is a deliberate no-op, so the default
+// boot path is bit-for-bit what it was before this option existed.
+inline void applyDisplayFlip(bool flip) {
+  if (!flip) return;
+  displayFlipped = true;
+  display.setRotation(3);
+  display.fillScreen(TFT_BLACK);   // anything already drawn is in the old orientation
+}

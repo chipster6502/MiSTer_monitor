@@ -2649,6 +2649,11 @@ void setup() {
   // ── Load /config.ini from SD card ─────────────────────────────────────────
   loadConfig(appConfig);
 
+  // [ui] flip_display - 180 degree panel rotation for cases that mount the
+  // board upside down. Applied here rather than in Board.begin() because the
+  // value lives on the SD card, which is not mounted that early in setup().
+  applyDisplayFlip(appConfig.flipDisplay);
+
   ssid     = appConfig.ssid.c_str();
   password = appConfig.wifiPass.c_str();
   // MiSTer IP from config.ini. UDP discovery overwrites this at boot on
