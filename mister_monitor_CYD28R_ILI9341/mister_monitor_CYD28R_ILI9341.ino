@@ -530,6 +530,20 @@ void setupScreenshotServer() {
                 WiFi.localIP().toString().c_str());
   Serial.println("[SCREENSHOT] Open in browser: http://<IP>:8080");
 }
+
+// Drop-in replacement for the long blocking delay()s around the download HUD.
+// WebServer is cooperative: it only answers requests while handleClient() is
+// being called. A plain delay() after showDownloadProgress() left port 8080
+// deaf for the whole pause, so an OBS browser source kept showing the frame
+// captured before the download began. Same idiom as the WDT-safe retry waits.
+static void pumpedDelay(unsigned long ms) {
+  unsigned long start = millis();
+  while (millis() - start < ms) {
+    Board.update();                   // Keep touch state fresh
+    screenshotServer.handleClient();  // Keep HTTP server alive
+    delay(50);                        // Yield to FreeRTOS / feed WDT
+  }
+}
 // ========================================
 
 // Global offset for callback-based image centering
@@ -8400,7 +8414,7 @@ bool downloadImageFromScreenScraper(String imageUrl, String savePath) {
   if (httpCode != 200) {
     Serial.printf("Download failed: %d\n", httpCode);
     showDownloadProgress(50, ssHudMessage(httpCode));
-    delay(2000);
+    pumpedDelay(2000);
     http.end();
     return false;
   }
@@ -8448,6 +8462,10 @@ bool downloadImageFromScreenScraper(String imageUrl, String savePath) {
       int progress = 50 + (downloaded * 40 / contentLength);
       showDownloadProgress(progress, "Downloading...");
     }
+    // Keep the screenshot endpoint (port 8080) alive mid-transfer so an OBS
+    // browser source can film the progress screen. Serving a request here
+    // pauses the transfer briefly; TCP flow control absorbs the gap.
+    screenshotServer.handleClient();
     delay(1);  // Yield to FreeRTOS / feed WDT every iteration
   }
   
@@ -8990,7 +9008,7 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
   currentUrl = "";
   
   // Delay between attempts
-  delay(1000);
+  pumpedDelay(1000);
   
   return false;
 }
@@ -9527,7 +9545,7 @@ bool downloadCoreImageStreamingSafe(String baseUrl, String savePath) {
     }
     
     http.end();
-    delay(1000); // Delay between attempts
+    pumpedDelay(1000); // Delay between attempts
   }
   
   Serial.println("All media types failed - no suitable core image found");
@@ -9797,6 +9815,7 @@ GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails,
                           body.length());
             break;
           }
+          screenshotServer.handleClient();  // Keep screenshot endpoint alive during bounded scan
           delay(10);
         }
       }
@@ -9982,6 +10001,7 @@ GameInfo searchWithJeuRechercheJSON(String coreName, String cleanName) {
                         body.length());
           break;
         }
+        screenshotServer.handleClient();  // Keep screenshot endpoint alive during bounded scan
         delay(10);
       }
     }
@@ -10069,7 +10089,7 @@ bool tryRomnomLookup(String coreName, String gameName, RomDetails romDetails) {
       }
     }
     showDownloadProgress(100, "Romset lookup complete!");
-    delay(1500);
+    pumpedDelay(1500);
   }
   return ok;
 }
@@ -10154,7 +10174,7 @@ bool tryNameSearchFallback(String coreName, String gameName, RomDetails romDetai
       }
     }
     showDownloadProgress(100, "Name search complete!");
-    delay(1500);
+    pumpedDelay(1500);
   }
   return ok;
 }
@@ -10193,7 +10213,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
   if (ESP.getFreeHeap() < 100000) {
     Serial.printf("Insufficient memory: %d bytes\n", ESP.getFreeHeap());
     showDownloadProgress(0, "Low memory");
-    delay(2000);
+    pumpedDelay(2000);
     return false;
   }
   
@@ -10294,7 +10314,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
         }
 
         showDownloadProgress(100, "JSON download complete!");
-        delay(1500);
+        pumpedDelay(1500);
         Serial.println("=== JSON DOWNLOAD COMPLETE ===\n");
         return true;
       } else {
@@ -10400,7 +10420,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
             }
 
             showDownloadProgress(100, "Retry download complete!");
-            delay(1500);
+            pumpedDelay(1500);
             Serial.println("=== RETRY DOWNLOAD COMPLETE ===\n");
             return true;
           } else {
@@ -10489,7 +10509,7 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
     } else {
       showDownloadProgress(0, "Download failed");
     }
-    delay(6000);
+    pumpedDelay(6000);
   }
   
   Serial.printf("Final result: %s\n", success ? "SUCCESS" : "FAILED");
