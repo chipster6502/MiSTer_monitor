@@ -2847,6 +2847,29 @@ void handleTouch() {
   }
 }
 
+// Apply the [ui] flip_display setting once /config.ini has been read.
+// Called from setup() immediately after loadConfig(), because the value
+// lives on the SD card and the card is not mounted any earlier.
+//
+// The flip is expressed as "180 degrees from whatever orientation the
+// sketch established", not as a fixed rotation value, so it stays correct
+// if the baseline orientation of this board ever changes. Bit 2 is the
+// mirror flag and is carried through untouched.
+//
+// This acts on M5.Display rather than on the Lcd (ScaledDisplay) wrapper:
+// rotation belongs to the physical panel. Lcd draws through to the same
+// device, so the 2x scale and the OFFSET_X/OFFSET_Y origin rotate along
+// with everything else and stay consistent with the frame bitmaps.
+//
+// A false value is a deliberate no-op, so the default boot path is
+// unchanged for every existing user.
+void applyDisplayFlip(bool flip) {
+  if (!flip) return;
+  const uint8_t r = M5.Display.getRotation();
+  M5.Display.setRotation((r & 4) | ((r + 2) & 3));
+  M5.Display.fillScreen(TFT_BLACK);   // stale pixels are in the old orientation
+}
+
 void setup() {
   // =====================================================================
   // ANTI-CRASH BLOCK — must run BEFORE M5.begin() and Serial
@@ -2999,6 +3022,9 @@ void setup() {
   
   // ── Load /config.ini from SD card ─────────────────────────────────────────
   loadConfig(appConfig);
+
+  // [ui] flip_display - 180 degree panel rotation for upside-down mounts.
+  applyDisplayFlip(appConfig.flipDisplay);
 
   ssid     = appConfig.ssid.c_str();
   password = appConfig.wifiPass.c_str();
