@@ -44,7 +44,7 @@ from urllib.parse import urlparse
 # is on disk. Bump this on every release, together with FIRMWARE_VERSION in
 # the sketches.
 # =============================================================================
-SERVER_VERSION = "2.7.0"
+SERVER_VERSION = "2.7.1"
 
 # RetroAchievements status resolver (sibling module). Imported lazily-safe:
 # if the file is missing the server still starts; the route reports the error.
@@ -1442,6 +1442,47 @@ def _enrich_rom_result(result, detection_method=None):
     result['no_rom_on_disk'] = bool(detection_method == 'sam_no_path')
     return result
 
+# ---------------------------------------------------------------------------
+# MiSTer system folders that can never contain the RUNNING game. The OSD file
+# browser is one generic component reused for scripts, video filters, gamma
+# tables, shadow masks, audio filters, documentation, SoundFonts and core
+# selection — and every confirmed selection there emits the very same
+# FILESELECT='selected' + CURRENTPATH/FULLPATH breadcrumbs as a game launch,
+# because fs_MenuSelect in menu.cpp is a per-selector VARIABLE, not a
+# game-only state. Companion daemons that mirror browser state into
+# ACTIVEGAME amplify the noise: merely running a script can leave
+# ACTIVEGAME='Scripts' behind (observed in the field on a core-only launch
+# right after a script run).
+# Any path whose first component (after the mount prefix) lands in this set,
+# or starts with '_' (the core/menu folder convention: _Console, _Utility,
+# _@Favorites …), is browser debris, not a game.
+# ---------------------------------------------------------------------------
+# How much OLDER than ACTIVEGAME the 'selected' witness may be and still be
+# trusted as belonging to the same launch. Trackers that mirror browser
+# state write their ACTIVEGAME copy a settle delay (well under 2 s) AFTER
+# menu.cpp writes 'selected', so a live selection is always slightly older
+# than its own mirror copy. A launcher that bypasses the OSD and MGL leaves
+# 'selected' minutes or hours behind its ACTIVEGAME write instead — and then
+# ACTIVEGAME must win, exactly as it did before the FILESELECT branches.
+_SELECTED_STALENESS_MARGIN_S = 5.0
+
+_MISTER_SYSTEM_DIRS = frozenset({
+    'scripts', 'filters', 'filters_audio', 'gamma', 'shadow_masks',
+    'presets', 'cheats', 'config', 'linux', 'font', 'saves',
+    'savestates', 'screenshots', 'wallpapers', 'docs',
+})
+
+_MOUNT_PREFIX_RE = re.compile(r'^/?(?:media/(?:fat|usb\d+)/)?', re.IGNORECASE)
+
+def _is_system_path(path):
+    """True when 'path' points into a MiSTer system folder — never a game."""
+    if not path:
+        return False
+    rest = _MOUNT_PREFIX_RE.sub('', path.strip(), count=1)
+    first = rest.split('/', 1)[0]
+    return bool(first) and (first.lower() in _MISTER_SYSTEM_DIRS
+                            or first.startswith('_'))
+
 def _game_name_from_path(path):
     """
     Extracts game name from a file path.
@@ -1460,6 +1501,11 @@ def _update_state():
     corename    = _read_file('/tmp/CORENAME')
     activegame  = _read_file('/tmp/ACTIVEGAME')
     currentpath = _read_file('/tmp/CURRENTPATH')
+    # FILESELECT's CONTENT, not just its mtime. Main_MiSTer writes 'active'
+    # while the file browser is open and 'selected' at the moment a file is
+    # actually launched (menu.cpp, guarded by log_file_entry). That single word
+    # separates navigation from a load without any timing heuristics.
+    fileselect  = _read_file('/tmp/FILESELECT')
     fullpath    = _read_file('/tmp/FULLPATH')
 
     # --- Navigation vs real load (tolerant gate) ---
@@ -1498,7 +1544,15 @@ def _update_state():
     core_changed      = (corename != _last_evaluated_corename)
     activegame_recent = (time.time_ns() - ag_ns) <= 3_000_000_000  # explicit launch (Remote/Zaparoo)
 
-    if delta_ms <= _NAV_COUPLING_MS and not core_changed and not activegame_recent:
+    # Both navigation and launch write FILESELECT and CURRENTPATH microseconds
+    # apart, so the coupling delta alone cannot tell them apart; the file's
+    # CONTENT can. 'selected' is written only on an actual launch, so it vetoes
+    # the navigation verdict outright — and it needs no tracker, which matters
+    # for the many setups without Remote/Zaparoo running.
+    fileselect_load = (fileselect == 'selected')
+
+    if (delta_ms <= _NAV_COUPLING_MS and not core_changed
+            and not activegame_recent and not fileselect_load):
         print(f"🔀 OSD navigation detected (Δ={delta_ms:.2f} ms) — state unchanged")
         return
 
@@ -1537,6 +1591,12 @@ def _update_state():
     ARCADE_FRESHNESS = 30  # seconds
     corename_ts   = _get_mtime_ns('/tmp/CORENAME') / 1e9
     activegame_ts = _get_mtime_ns('/tmp/ACTIVEGAME') / 1e9
+    fileselect_ts = _get_mtime_ns('/tmp/FILESELECT') / 1e9
+    # 'selected' is only testimony about the CURRENT launch while it is not
+    # staler than the freshest tracker write (see _SELECTED_STALENESS_MARGIN_S).
+    fileselect_fresh = (fileselect == 'selected' and
+                        fileselect_ts >= activegame_ts
+                        - _SELECTED_STALENESS_MARGIN_S)
     startpath_ts  = _get_mtime_ns('/tmp/STARTPATH') / 1e9
 
     activegame_arcade_fresh = (
@@ -1614,11 +1674,134 @@ def _update_state():
             )
         )
         
+
+        # --- FILESELECT='selected': Main_MiSTer's own launch witness ---------
+        # Every code path in menu.cpp that writes 'selected' writes CURRENTPATH
+        # in the SAME event: the OSD hook fires while CURRENTPATH still holds
+        # the navigation write of the item being launched, and the three MGL
+        # states (any launcher that loads a .mgl: remotes, NFC, web) rewrite
+        # FULLPATH + CURRENTPATH + FILESELECT together. So while FILESELECT
+        # reads 'selected', CURRENTPATH is first-hand testimony of the launched
+        # item — a file, a folder, or a NeoGeo title — and needs no tracker at
+        # all. Resolved up front into one value so the chain below can still
+        # fall through to ACTIVEGAME when nothing here matches.
+        base = fullpath.rstrip('/') if fullpath else ''
+        if currentpath and base and not base.endswith(currentpath):
+            cp_composed = base + '/' + currentpath        # browser: dir + item
+        else:
+            cp_composed = base or currentpath             # MGL: already the file
+
+        # System-path verdicts, shared by every branch below: a script,
+        # filter, gamma or cheat selection leaves these exact breadcrumbs and
+        # must never be adopted as a game — not from the browser files, and
+        # not from an ACTIVEGAME a tracker mirrored them into.
+        cp_is_system        = _is_system_path(cp_composed)
+        activegame_is_system = _is_system_path(activegame)
+
+        # A directory is a location, not a game identity. Trackers that mirror
+        # the browser leave the browsed FOLDER here, and that value stays
+        # fresh after FILESELECT moves off 'selected' (opening the OSD writes
+        # 'active'/'cancelled'), so without this verdict the folder would
+        # displace the game committed a moment earlier. Folder values may
+        # still establish identity on a NEW core (degraded but pre-existing
+        # behaviour), and confirmed NeoGeo romset folders stay first-class.
+        ag_probe = ((activegame if activegame.startswith('/')
+                     else os.path.join('/media/fat', activegame))
+                    if activegame else '')
+        activegame_is_folder = (bool(activegame) and not activegame_is_system
+                                and os.path.isdir(ag_probe)
+                                and not _neogeo_romset_dir(ag_probe, corename))
+
+        selected_launch = None            # (game_name, game_path) or None
+        if (fileselect_fresh and currentpath
+                and not currentpath_is_core_name):
+            candidate = cp_composed
+            if cp_is_system:
+                # 'selected' also fires for scripts, filters, gamma tables,
+                # shadow masks, docs and SoundFonts — same browser, same hook.
+                print(f"🛡️ FILESELECT=selected on a system path — "
+                      f"not a game: {candidate}")
+            elif cp_ext in _KNOWN_ROM_EXTS:
+                # Plain file launch — the common case (unchanged from v2).
+                selected_launch = (_game_name_from_path(currentpath), candidate)
+                print(f"🎯 Launch via FILESELECT=selected: {selected_launch[0]}")
+            else:
+                probe = candidate if candidate.startswith('/') \
+                        else os.path.join('/media/fat', candidate)
+                if os.path.isdir(probe):
+                    # Enter pressed ON a folder. CD cores (PSX, Saturn, MegaCD,
+                    # NeoGeo CD, …) auto-select when the folder holds exactly
+                    # one image matching the core's extension filter, and they
+                    # launch with CURRENTPATH still holding the FOLDER name —
+                    # menu.cpp only rewrites it on MGL loads. Resolve the image
+                    # here so game_path names a real file: the snapshot stays
+                    # honest and _neogeo_cart_or_cd() can tell CD from cart.
+                    # A NeoGeo Darksoft romset folder has no disc image inside
+                    # and is kept as the folder itself, which is what actually
+                    # got launched.
+                    disc = ''
+                    try:
+                        entries = sorted(os.listdir(probe))
+                    except Exception:
+                        entries = []
+                    for ext in ('.chd', '.cue', '.iso', '.pbp'):
+                        m = [f for f in entries if f.lower().endswith(ext)]
+                        if m:
+                            disc = candidate.rstrip('/') + '/' + m[0]
+                            break
+                    selected_launch = (_game_name_from_path(currentpath),
+                                       disc or candidate)
+                    print(f"🎯 Folder launch via FILESELECT=selected: "
+                          f"{selected_launch[0]}"
+                          + (f" -> {os.path.basename(disc)}" if disc else ""))
+                elif corename.lower() in _NEOGEO_CORENAMES:
+                    # NeoGeo romset via OSD: CURRENTPATH carries the display
+                    # TITLE from romsets.xml, not the folder/zip id on disk,
+                    # so the composed path does not exist. The title is kept
+                    # verbatim — it can legally contain '/' ('Metal Slug 2:
+                    # Super Vehicle-001/II') and any path-aware helper would
+                    # truncate it — because it is what the panel shows and
+                    # what ScreenScraper searches on. rom_details resolves the
+                    # real file later through its own romsets.xml reverse
+                    # lookup on this same composed path.
+                    selected_launch = (currentpath.strip(), candidate)
+                    print(f"🎯 NeoGeo title via FILESELECT=selected: "
+                          f"{currentpath}")
+                # Anything else (e.g. a ZIP virtual path that is not a real
+                # directory): leave selected_launch empty and let the
+                # ACTIVEGAME / CURRENTPATH fallbacks below decide, as before.
+
         if currentpath_is_core_name:
-            # Core loaded without a game — clear game state
-            game_name = ''
-            game_path = ''
-            print(f"🎮 Non-arcade: core={corename} loaded without game (CURRENTPATH='{currentpath}')")
+            # Core loaded without a game — clear game state. BUT a selector
+            # confirm can masquerade as this: picking a preset or filter whose
+            # NAME contains the core name ('SNES Interpolation') leaves the
+            # very same breadcrumbs without any core (re)load behind them. A
+            # real core load always (re)writes STARTPATH in the same burst,
+            # so when that witness is absent, the core is unchanged and a
+            # game is already established, the running game is kept instead
+            # of being wiped.
+            core_load_witness = (core_changed or
+                                 (time.time() - startpath_ts) <= 15.0)
+            prev_game, prev_path = '', ''
+            if not core_load_witness:
+                with _state_lock:
+                    prev_game = _state['game']
+                    prev_path = _state['game_path']
+            if not core_load_witness and prev_game:
+                game_name, game_path = prev_game, prev_path
+                print("🛡️ Core-name lookalike from a selector — keeping current game")
+            else:
+                game_name = ''
+                game_path = ''
+                print(f"🎮 Non-arcade: core={corename} loaded without game (CURRENTPATH='{currentpath}')")
+        # A launch witnessed by Main_MiSTer itself outranks every tracker:
+        # some trackers mirror FULLPATH — the FOLDER — into ACTIVEGAME on that
+        # very launch, so every game in one folder then looks identical and
+        # the display freezes on the first one. Resolution logic lives in the
+        # selected_launch block above.
+        elif selected_launch:
+            game_name, game_path = selected_launch
+
         # ACTIVEGAME freshness gate (mirror of the arcade branch): a stale
         # ACTIVEGAME surviving a later core-only load must not be paired
         # with the new core — until now the currentpath heuristic above was
@@ -1626,6 +1809,8 @@ def _update_state():
         # the game seconds BEFORE the core lands (Remote/Zaparoo cross-core
         # transient) and slow core loads, same rationale as ARCADE_FRESHNESS.
         elif (activegame and not activegame.lower().endswith('.ini') and
+              not activegame_is_system and
+              not (activegame_is_folder and not core_changed) and
               activegame_ts >= corename_ts - 30):
             game_name = _game_name_from_path(activegame)
             game_path = activegame
@@ -1644,13 +1829,31 @@ def _update_state():
                 # a slash ('Metal Slug 2: Super Vehicle-001/II'), which any
                 # path-aware helper would truncate to the last segment.
                 game_name = currentpath.strip()
-        elif currentpath and not currentpath.lower().endswith('.ini'):
+        elif (currentpath and not currentpath.lower().endswith('.ini')
+              and not cp_is_system):
             game_name = _game_name_from_path(currentpath)
-            game_path = currentpath
+            game_path = cp_composed
         else:
             game_name = ''
             game_path = ''
-        
+
+        # Every source rejected as a system path leaves game_name empty, but
+        # that emptiness means two different things. On a genuinely new core
+        # (Remote 'launch system' right after a script run) empty is the
+        # truth: the core IS running without a game. When the core did NOT
+        # change — a script, filter or cheat picked during play — the running
+        # game is untouched and blanking it would wipe the panel mid-session,
+        # so the current identity is re-asserted instead (an identical commit
+        # is a no-op that also preserves the rom-details cache).
+        if (not game_name and not currentpath_is_core_name
+                and (activegame_is_system or cp_is_system)
+                and not core_changed):
+            with _state_lock:
+                game_name = _state['game']
+                game_path = _state['game_path']
+            if game_name:
+                print("🛡️ Only system paths on offer — keeping current game")
+
         print(f"🎮 Non-arcade: core={corename} game={game_name}")
 
     # One core, two consoles. This is NOT the backwards-compatible case handled
@@ -2848,14 +3051,39 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 print(f"🔗 CURRENTPATH has no directory - combining with FULLPATH: '{combined}'")
                 currentpath = combined
 
-        # Determine preferred order by timestamp (same logic as get_current_game)
+        # Preferred order: FILESELECT='selected' outranks any mtime. menu.cpp
+        # writes it on every real launch (the OSD hook and all three MGL
+        # states) in the same event as a CURRENTPATH naming the launched item,
+        # so CURRENTPATH is first-hand testimony. Some trackers then mirror
+        # FULLPATH — the FOLDER — into ACTIVEGAME a moment LATER, so the
+        # 'newest file wins' heuristic below would prefer that folder copy
+        # and hash the same first game forever. Content beats timing. Without
+        # log_file_entry the file never reads 'selected' and the timestamp
+        # ordering applies exactly as before.
+        fileselect_selected = False
+        try:
+            with open('/tmp/FILESELECT', 'r') as f:
+                fileselect_selected = (f.read().strip() == 'selected')
+            if fileselect_selected:
+                # Same corroboration as _update_state: a leftover 'selected'
+                # from an old OSD session must not outrank a fresh ACTIVEGAME
+                # written by an OSD-less launcher.
+                fs_ts = os.path.getmtime('/tmp/FILESELECT')
+                fileselect_selected = (fs_ts >= activegame_timestamp
+                                       - _SELECTED_STALENESS_MARGIN_S)
+        except Exception:
+            fileselect_selected = False
+
         activegame_is_newer = activegame_timestamp > currentpath_timestamp
-        if activegame_is_newer:
+        if fileselect_selected:
+            sources = [('CURRENTPATH', currentpath), ('ACTIVEGAME', activegame)]
+            print("⏱️ Preferred source: CURRENTPATH (FILESELECT=selected)")
+        elif activegame_is_newer:
             sources = [('ACTIVEGAME', activegame), ('CURRENTPATH', currentpath)]
+            print("⏱️ Preferred source: ACTIVEGAME (newer)")
         else:
             sources = [('CURRENTPATH', currentpath), ('ACTIVEGAME', activegame)]
-
-        print(f"⏱️ Preferred source: {'ACTIVEGAME' if activegame_is_newer else 'CURRENTPATH'} (newer)")
+            print("⏱️ Preferred source: CURRENTPATH (newer)")
 
         for source_name, source_path in sources:
             if not source_path:
@@ -2865,6 +3093,13 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             # Safety check: non-arcade path should not point into _Arcade
             if "_Arcade" in source_path:
                 print(f"⚠️ {source_name} contains arcade path, skipping: '{source_path}'")
+                continue
+
+            # Safety check: scripts, filters, cheats & co. are browser debris
+            # (see _is_system_path) — a tracker may have mirrored them here.
+            if _is_system_path(source_path):
+                print(f"🛡️ {source_name} points into a MiSTer system folder, "
+                      f"skipping: '{source_path}'")
                 continue
 
             try:
@@ -2980,8 +3215,22 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         sources (':' in the XML vs ' - ' in CURRENTPATH), so titles are
         compared on their alphanumeric characters only.
         """
-        xml_path = os.path.join(directory, 'romsets.xml')
-        if not os.path.isfile(xml_path):
+        # romsets.xml normally sits at the games/NEOGEO ROOT while the user
+        # may be browsing a pack subfolder (Darksoft dumps, 'World A-Z'
+        # collections), so look locally first and then walk upwards with the
+        # same bounded search the id loader uses.
+        xml_path = None
+        for d in (directory, _neogeo_games_dir(os.path.join(directory, '_'))):
+            if not d:
+                continue
+            for n in _ROMSET_XML_NAMES:
+                p = os.path.join(d, n)
+                if os.path.isfile(p):
+                    xml_path = p
+                    break
+            if xml_path:
+                break
+        if not xml_path:
             return None
         try:
             import xml.etree.ElementTree as ET
@@ -3020,6 +3269,11 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 if os.path.isfile(p):
                     found = p
                     break
+            if not found:
+                # Darksoft layout: the romset is a FOLDER named after the id.
+                p = os.path.join(directory, name)
+                if os.path.isdir(p):
+                    found = p
 
             if is_exact:
                 if found:
@@ -3121,6 +3375,23 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 "timestamp": int(time.time())
             }
         
+        # A romset can be a FOLDER (Darksoft layout): its identity is the
+        # romset name — there is no single file whose bytes could be hashed.
+        if os.path.isdir(rom_path):
+            print(f"📁 Romset folder — name-based identity, no byte hash: "
+                  f"{os.path.basename(rom_path)}")
+            return {
+                "filename": os.path.basename(rom_path),
+                "size": 0,
+                "crc32": "",
+                "md5": "",
+                "sha1": "",
+                "path": rom_path,
+                "available": True,
+                "hash_calculated": False,
+                "timestamp": int(time.time())
+            }
+
         try:
             file_size = os.path.getsize(rom_path)
             filename = os.path.basename(rom_path)
