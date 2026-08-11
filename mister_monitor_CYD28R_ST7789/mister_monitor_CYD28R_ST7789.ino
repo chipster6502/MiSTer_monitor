@@ -8180,7 +8180,7 @@ String mapCoreToScreenScraperId(String coreName) {
   if (core == "Famicom Disk System" || core == "Family Computer Disk System") return "106";
   if (core == "Nintendo Super Game Boy" || core == "Super Game Boy") return "127";
   if (core == "Nintendo Game & Watch" || core == "Game & Watch") return "52";
-  if (core == "Virtual Boy") return "11";
+  if (core == "Nintendo Virtual Boy") return "11";
   
   // Sega systems
   if (core == "Sega Genesis/Mega Drive" || core == "Megadrive") return "1";
@@ -8273,7 +8273,8 @@ String mapCoreToScreenScraperId(String coreName) {
   // The IIgs runs Apple II software, but ScreenScraper catalogues it as its
   // OWN system: a IIgs disk queried under 86 misses. Keep them distinct.
   if (core == "Apple IIgs" || core == "Apple 2GS") return "217";
-  if (core == "Macintosh Plus" || core == "Mac OS") return "146";
+  if (core == "Apple Macintosh Plus" || core == "Mac OS") return "146";
+  if (core == "Apple Macintosh LC") return "146";
   
   // Misc consoles / handhelds
   if (core == "Vectrex") return "102";
@@ -8354,6 +8355,7 @@ String mapCoreToScreenScraperId(String coreName) {
   if (coreLower == "coco3") return "144";          // TRS-80 Color Computer 3
   if (coreLower == "colecovision") return "48";
   if (coreLower == "gameboy2p") return "10";       // shares GBC artwork
+  if (coreLower == "virtualboy") return "11";
   if (coreLower == "odyssey2") return "104";       // Videopac G7000/Odyssey 2
   if (coreLower == "svi328") return "218";         // Spectravideo SVI-328
   // Apple. CORENAMEs straight from each core's CONF_STR, so the raw leg stands
@@ -8361,6 +8363,8 @@ String mapCoreToScreenScraperId(String coreName) {
   // by shadowing the friendly lookup above.
   if (coreLower == "apple-iigs" || coreLower == "appleiigs") return "217";
   if (coreLower == "apple-ii" || coreLower == "apple2") return "86";
+  if (coreLower == "maclc") return "146";
+  if (coreLower == "macplus") return "146";
   if (coreLower == "amstrad" || coreLower == "cpc") return "65";
   if (coreLower == "sam" || coreLower == "samcoupe") return "213";
   if (coreLower == "x68000") return "79";
