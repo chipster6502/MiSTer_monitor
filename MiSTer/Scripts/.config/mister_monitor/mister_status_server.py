@@ -140,6 +140,7 @@ CORE_NAME_MAPPING = {
     'SGB': 'Nintendo Super Game Boy',
     'GameNWatch': 'Nintendo Game & Watch',
     'GAMEBOY2P': 'Nintendo Game Boy Color',
+    'VirtualBoy': 'Nintendo Virtual Boy',
     'Genesis': 'Sega Genesis/Mega Drive',
     'MegaDrive': 'Sega Genesis/Mega Drive',
     'PapriumMD': 'Paprium (Mega Drive)',
@@ -182,11 +183,9 @@ CORE_NAME_MAPPING = {
     'AmigaCD32': 'Amiga CD32',
     'AO486': 'PC Dos',
     'PCXT': 'PC Dos',
+    'PCXT-EGA': 'PC Dos',
     'PCjr': 'PC Dos',
-    # z386: unofficial 80386 core by nand2mario. Not in the official
-    # Distribution DB, so it can only be learned from users running it.
-    # It shares games/AO486, so mapping it onto the existing 'PC Dos'
-    # friendly name gives it artwork with no firmware change.
+    # z386: unofficial 80386 core by nand2mario.
     'Z386': 'PC Dos',
     'Jupiter': 'Jupiter Ace',
     'PC8801': 'NEC PC-8801',
@@ -213,7 +212,10 @@ CORE_NAME_MAPPING = {
     'GX4000': 'Amstrad GX4000',
     'Apple-II': 'Apple II',
     'APPLE-I': 'Apple I',
-    'MACPLUS': 'Macintosh Plus',
+    'MACPLUS': 'Apple Macintosh Plus',
+    'Apple-IIgs': 'Apple IIgs',
+    'Apple-Lisa': 'Apple Lisa',
+    'MACLC': 'Apple Macintosh LC',
     'X68000': 'Sharp X68000',
     'Coleco': 'Colecovision',
     'Intellivision': 'Mattel/INTV Intellivision',
@@ -274,8 +276,6 @@ CORE_NAME_MAPPING = {
     'Adam': 'Coleco Adam',
     'Altair8800': 'Altair 8800',
     'APOGEE': 'Apogee BK-01 / Radio-86RK',
-    'Apple-IIgs': 'Apple IIgs',
-    'Apple-Lisa': 'Apple Lisa',
     'Arduboy': 'Arduboy',
     'Astrocade': 'Bally Astrocade',
     'BBCBridgeCompanion': 'BBC Bridge Companion',
@@ -309,14 +309,6 @@ CORE_NAME_MAPPING = {
     'VECTOR06': 'Vector-06C',
     'VT52': 'DEC VT52',
     '3DO': '3DO Interactive Multiplayer',
-
-    # --- Proposed automatically from each core's CONF_STR.
-    # The KEY is verbatim from the core's Verilog and is correct.
-    # The VALUE is a placeholder: replace it with a display name
-    # before merging ('C16' -> 'Commodore 16').
-    'MACLC': 'MACLC',  # MacLC.rbf, MacLC_MiSTer
-    'PCXT-EGA': 'PCXT-EGA',  # PCXT-EGA.rbf, PCXT-EGA_MiSTer
-    'VirtualBoy': 'VirtualBoy',  # VirtualBoy.rbf, VirtualBoy_MiSTer
 }
 
 # names.txt fills in cores not already in CORE_NAME_MAPPING.
