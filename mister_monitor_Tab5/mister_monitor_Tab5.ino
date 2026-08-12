@@ -22,7 +22,7 @@
 //  half was updated and the other was not — the display warns instead of
 //  failing silently. Bump on every release, with SERVER_VERSION in the server.
 // =============================================================================
-#define FIRMWARE_VERSION "2.7.0"
+#define FIRMWARE_VERSION "2.7.1"
 
 #include <M5Unified.h>
 #include <WiFi.h>
