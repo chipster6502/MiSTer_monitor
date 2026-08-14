@@ -1040,6 +1040,41 @@ def _is_no_hash(ext, corename):
 # verified: romnom=mslug2.zip returns gameid 37605 / rom id 21808.
 _NEOGEO_CORENAMES = frozenset({'neogeo'})
 
+
+# NeoGeo packs that keep a human-readable filename and park the romset id in
+# trailing parentheses: 'Garou - Mark of the Wolves (garou).neo'. The id is
+# the only stable key here — the title MiSTer displays comes from the .neo
+# header and can contain characters no filename can hold (a ':' in Garou's
+# case), so it cannot be matched against disk. Scanned lazily and only after
+# the direct probes miss, so no layout that resolves today pays for it.
+_NEOGEO_ROM_EXTS = ('.neo', '.zip')
+
+
+def _neogeo_file_with_embedded_id(directory, romset_id):
+    """Path of a file whose stem ends with '(<romset_id>)', or None."""
+    if not romset_id:
+        return None
+    needle = '(' + romset_id.strip().lower() + ')'
+    hits = []
+    try:
+        for entry in os.listdir(directory):
+            stem, ext = os.path.splitext(entry)
+            if ext.lower() not in _NEOGEO_ROM_EXTS:
+                continue
+            if stem.strip().lower().endswith(needle):
+                hits.append(os.path.join(directory, entry))
+    except Exception as e:
+        print(f"\u26a0\ufe0f NeoGeo directory scan failed: {e}")
+        return None
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        print(f"\u26a0\ufe0f {len(hits)} files embed romset id "
+              f"'{romset_id}' \u2014 refusing to guess")
+    return None
+
+
+
 # Installed by the MiSTer Downloader itself: |games/NEOGEO/romsets.xml is in the
 # official Distribution DB (md5 9b5536a3b95bcd755a4904d34e55582d). Both files
 # are read because a user may own either collection: romsets.xml describes the
@@ -3410,6 +3445,9 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             committed_game      = _state['game']
             committed_game_path = _state['game_path']
         identity_dropped = 0
+        identity_passed  = 0   # candidates that survived the filter and
+                               # were actually attempted — identity is
+                               # only the verdict when this stays zero
         if committed_game and committed_game_path:
             sources.append(('STATE', committed_game_path))
 
@@ -3440,6 +3478,11 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                       f"('{committed_game}') — skipping: "
                       f"'{source_path}'")
                 continue
+
+            # Survived the identity filter and is about to be
+            # resolved: from here on, any failure is about the
+            # FILE, not about identity.
+            identity_passed += 1
 
             try:
                 final_path = self._resolve_mister_path(source_path)
@@ -3542,7 +3585,15 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 print(f"❌ Error resolving {source_name}: {e} - trying next source")
                 continue
 
-        self._identity_unconfirmed = (identity_dropped > 0)
+        # Identity is the cause ONLY when nothing survived the filter to
+        # be tried. Keying on identity_dropped alone was wrong: the OSD
+        # browse folder in ACTIVEGAME is dropped on virtually every
+        # FILESELECT launch, so a plain missing-file failure was being
+        # reported as 'cursor resting on another title' (field capture:
+        # Garou, where CURRENTPATH and STATE both passed identity and
+        # failed because the file genuinely is not there).
+        self._identity_unconfirmed = (identity_dropped > 0
+                                      and identity_passed == 0)
         if self._identity_unconfirmed:
             print(f"❌ No valid ROM path found: {identity_dropped} candidate(s) named")
             print(f"   a different game than '{committed_game}' — identity unconfirmed")
@@ -3618,6 +3669,14 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 # Darksoft layout: the romset is a FOLDER named after the id.
                 p = os.path.join(directory, name)
                 if os.path.isdir(p):
+                    found = p
+            if not found:
+                # Pack layout: readable filename with the id in trailing
+                # parentheses ('Garou - Mark of the Wolves (garou).neo').
+                p = _neogeo_file_with_embedded_id(directory, name)
+                if p:
+                    print(f"📁 NeoGeo romset '{name}' found via "
+                          f"embedded id: {os.path.basename(p)}")
                     found = p
 
             if is_exact:
