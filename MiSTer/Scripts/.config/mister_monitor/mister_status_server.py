@@ -1419,6 +1419,49 @@ def _clean_search_name(name):
     base = re.sub(r'\s{2,}', ' ', base).strip(' -.')
     return base
 
+def _norm_game_label(s):
+    """Casefold + collapse whitespace, for identity comparison only."""
+    return ' '.join((s or '').split()).casefold()
+
+
+def _path_names_game(candidate, game):
+    """
+    True when a tracker path plausibly NAMES the committed game.
+
+    The committed game name was derived from a path exactly like these at
+    commit time, so in steady state equality holds by construction; the only
+    divergence is OSD noise (the cursor resting on another title). Matching
+    is therefore deliberately generous — a false accept costs nothing new,
+    a false reject blocks a legitimate hash:
+
+      suffix    — normalized candidate equals the game, or ends with
+                  '/' + game. Whole-string first because NeoGeo titles can
+                  legally contain '/' ('... Super Vehicle-001/II'), which a
+                  component split would destroy.
+      stem      — same test with the last component's extension stripped
+                  ('games/SNES/Chrono Trigger (USA).sfc').
+      component — any single path component equals the game, raw or with
+                  its own extension stripped ('.../Game (E)/track01.cue',
+                  'games/X/Game.zip/rom.bin').
+    """
+    ng = _norm_game_label(game)
+    if not ng:
+        return True
+    cand = (candidate or '').replace('\\', '/').rstrip('/')
+    nc = _norm_game_label(cand)
+    if nc == ng or nc.endswith('/' + ng):
+        return True
+    stem_cand = os.path.splitext(cand)[0]
+    ns = _norm_game_label(stem_cand)
+    if ns == ng or ns.endswith('/' + ng):
+        return True
+    for part in cand.split('/'):
+        np = _norm_game_label(part)
+        if np == ng or _norm_game_label(os.path.splitext(part)[0]) == ng:
+            return True
+    return False
+
+
 def _enrich_rom_result(result, detection_method=None):
     """
     Adds name-search metadata to a rom-details result (success OR failure):
@@ -2758,13 +2801,32 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             rom_path = self._get_enhanced_rom_path()
 
             if not rom_path:
-                result = {
-                    "filename": "", "size": 0, "crc32": "", "md5": "", "sha1": "",
-                    "path": "", "available": False,
-                    "error": "No active ROM found",
-                    "detection_method": "none",
-                    "timestamp": int(time.time())
-                }
+                if getattr(self, '_identity_unconfirmed', False):
+                    # Every tracker candidate named a DIFFERENT game than
+                    # the committed one — the OSD cursor is resting on
+                    # another title while the loaded game keeps running.
+                    # Transient by nature, so it is reported as its own
+                    # error and NEVER cached (see below). detection_method
+                    # is deliberately NOT 'sam_no_path': that is the one
+                    # value that sets no_rom_on_disk, and no_rom + a clean
+                    # name-search miss is the firmware's NOT-IN-DATABASE
+                    # verdict — a permanent card this transient state
+                    # must never be able to trigger.
+                    result = {
+                        "filename": "", "size": 0, "crc32": "", "md5": "", "sha1": "",
+                        "path": "", "available": False,
+                        "error": "identity_unconfirmed",
+                        "detection_method": "identity_unconfirmed",
+                        "timestamp": int(time.time())
+                    }
+                else:
+                    result = {
+                        "filename": "", "size": 0, "crc32": "", "md5": "", "sha1": "",
+                        "path": "", "available": False,
+                        "error": "No active ROM found",
+                        "detection_method": "none",
+                        "timestamp": int(time.time())
+                    }
             else:
                 is_zip, zip_path, internal_path = self.is_zip_path(rom_path)
                 if is_zip:
@@ -2776,7 +2838,13 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             _enrich_rom_result(result, getattr(self, '_last_detection_method', None))
             result['seq'] = seq_at_start
             with _state_lock:
-                if _state['seq'] == seq_at_start:
+                if result.get('error') == 'identity_unconfirmed':
+                    # Caching this would freeze the miss until the next
+                    # state commit; the whole point is that the firmware's
+                    # 10 s recurrent recomputes until a corroborating
+                    # witness appears.
+                    print("⏳ Identity unconfirmed — result NOT cached (transient; recompute on next request)")
+                elif _state['seq'] == seq_at_start:
                     _state['rom_details']       = result
                     _state['rom_details_stale'] = False
                 else:
@@ -3080,6 +3148,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
         ACTIVEGAME (when present) always contains the full path and is tried first.
         """
+        self._identity_unconfirmed = False   # set by the loop tail; read by get_rom_details
         activegame = ""
         activegame_timestamp = 0
         currentpath_timestamp = 0
@@ -3159,6 +3228,30 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             sources = [('CURRENTPATH', currentpath), ('ACTIVEGAME', activegame)]
             print("⏱️ Preferred source: CURRENTPATH (newer)")
 
+        # --- Identity corroboration (rom-details poisoning fix) --------------
+        # Recency alone chose the witness above, but CURRENTPATH is rewritten
+        # by merely RESTING the OSD cursor on a title — no launch, no commit,
+        # no seq bump. A details request landing in that moment used to hash
+        # the highlighted game and cache it under the running one (field
+        # capture: Gran Turismo hashed, cached and saved as Destruction
+        # Derby's .jpg/.meta). Content beats timing here exactly as it does
+        # for FILESELECT: a candidate that does not NAME the committed game
+        # is testimony about the browser, not about the running game, and is
+        # dropped in the loop below.
+        #
+        # game_path was resolved in the same commit that produced the game
+        # name (folder launches even store the actual disc file), so it is
+        # coherent with the identity by construction. Appended LAST: every
+        # healthy flow keeps today's source order byte for byte, and the
+        # rescue only acts when the trackers fail identity or resolution —
+        # e.g. while the cursor keeps resting on another title.
+        with _state_lock:
+            committed_game      = _state['game']
+            committed_game_path = _state['game_path']
+        identity_dropped = 0
+        if committed_game and committed_game_path:
+            sources.append(('STATE', committed_game_path))
+
         for source_name, source_path in sources:
             if not source_path:
                 print(f"⏭️ {source_name} is empty - skipping")
@@ -3174,6 +3267,17 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             if _is_system_path(source_path):
                 print(f"🛡️ {source_name} points into a MiSTer system folder, "
                       f"skipping: '{source_path}'")
+                continue
+
+            # Identity guard: tracker testimony must name the committed game.
+            # 'STATE' is exempt — it IS the committed identity's own path.
+            if (committed_game and source_name != 'STATE'
+                    and not _path_names_game(source_path, committed_game)):
+                identity_dropped += 1
+                print(f"🛡️ {source_name} names a different "
+                      f"game than the committed one "
+                      f"('{committed_game}') — skipping: "
+                      f"'{source_path}'")
                 continue
 
             try:
@@ -3277,7 +3381,13 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 print(f"❌ Error resolving {source_name}: {e} - trying next source")
                 continue
 
-        print(f"❌ No valid ROM path found from any source")
+        self._identity_unconfirmed = (identity_dropped > 0)
+        if self._identity_unconfirmed:
+            print(f"❌ No valid ROM path found: {identity_dropped} candidate(s) named")
+            print(f"   a different game than '{committed_game}' — identity unconfirmed")
+            print(f"   (transient while the OSD cursor rests on another title)")
+        else:
+            print(f"❌ No valid ROM path found from any source")
         return None
     
     def _lookup_neogeo_romset(self, directory, title):
