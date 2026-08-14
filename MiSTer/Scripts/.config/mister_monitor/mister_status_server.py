@@ -1586,6 +1586,108 @@ def _is_system_path(path):
     return bool(first) and (first.lower() in _MISTER_SYSTEM_DIRS
                             or first.startswith('_'))
 
+# ---------------------------------------------------------------------------
+# ZIP virtual paths for the state machine. Pack zips (alphabet packs:
+# games/Amstrad/a.zip/a/<title>) put the browser INSIDE an archive, where
+# os.path probing is blind: the composed launch candidate is neither a file
+# nor an isdir, and the daemon-mirrored browse location ('a.zip/a') slips
+# the folder gate and gets minted as the game name. The zip's central
+# directory is the authority for both questions, cached by (path, mtime_ns)
+# because the evaluator runs on every inotify burst — one directory read per
+# zip per change, O(1) lookups after.
+#
+# Splitting mirrors is_zip_path (greedy '.zip', case-insensitive); member
+# matching mirrors get_zip_file_info_enhanced: exact, then case-insensitive,
+# then stem (CURRENTPATH drops the extension) preferring _KNOWN_ROM_EXTS.
+# The basename-only strategy is deliberately NOT mirrored here: for
+# establishing IDENTITY the path must agree, not just the filename.
+# ---------------------------------------------------------------------------
+_ZIP_SPLIT_RE = re.compile(r'(.+\.zip)', re.IGNORECASE)
+
+_zip_dir_cache = {}      # zip_abs -> (mtime_ns, lower_map, stem_map, dirset)
+_zip_dir_lock = threading.Lock()
+
+
+def _zip_split(path):
+    """('games/X/a.zip', 'a/title') for a zip virtual path, else ('', '')."""
+    if not path or '.zip' not in path.lower():
+        return '', ''
+    m = _ZIP_SPLIT_RE.search(path)
+    if not m:
+        return '', ''
+    zip_part = m.group(1)
+    internal = path[len(zip_part):].lstrip('/')
+    return zip_part, internal
+
+
+def _zip_entries(zip_abs):
+    """Cached central-directory views; ({}, {}, frozenset()) when unreadable."""
+    stamp = 0
+    try:
+        stamp = _get_mtime_ns(zip_abs)
+    except Exception:
+        pass
+    if not stamp:
+        return {}, {}, frozenset()
+
+    with _zip_dir_lock:
+        cached = _zip_dir_cache.get(zip_abs)
+        if cached and cached[0] == stamp:
+            return cached[1], cached[2], cached[3]
+
+    lower_map, stem_map, dirs = {}, {}, set()
+    try:
+        with zipfile.ZipFile(zip_abs, 'r') as zf:
+            for name in zf.namelist():
+                norm = name.replace('\\', '/')
+                if norm.endswith('/'):
+                    dirs.add(norm.rstrip('/').lower())
+                    continue
+                lower_map.setdefault(norm.lower(), norm)
+                stem_map.setdefault(
+                    os.path.splitext(norm)[0].lower(), []).append(norm)
+                parts = norm.split('/')
+                for i in range(1, len(parts)):
+                    dirs.add('/'.join(parts[:i]).lower())
+    except Exception as e:
+        print(f"\u26a0\ufe0f zip central directory unreadable: "
+              f"{os.path.basename(zip_abs)}: {e}")
+        lower_map, stem_map, dirs = {}, {}, set()
+
+    dirset = frozenset(dirs)
+    with _zip_dir_lock:
+        _zip_dir_cache[zip_abs] = (stamp, lower_map, stem_map, dirset)
+    return lower_map, stem_map, dirset
+
+
+def _zip_member_match(zip_abs, internal):
+    """The real member for a (possibly extensionless) internal path, or ''."""
+    if not internal:
+        return ''
+    lower_map, stem_map, _ = _zip_entries(zip_abs)
+    if not lower_map:
+        return ''
+    norm = internal.replace('\\', '/').lstrip('/')
+    hit = lower_map.get(norm.lower())
+    if hit:
+        return hit
+    stems = stem_map.get(os.path.splitext(norm)[0].lower())
+    if not stems:
+        return ''
+    rom_hit = next((m for m in stems
+                    if os.path.splitext(m)[1].lower() in _KNOWN_ROM_EXTS),
+                   None)
+    return rom_hit if rom_hit else stems[0]
+
+
+def _zip_internal_is_folder(zip_abs, internal):
+    """True when the internal path is a DIRECTORY inside the zip."""
+    if not internal:
+        return False
+    _, _, dirset = _zip_entries(zip_abs)
+    return internal.replace('\\', '/').strip('/').lower() in dirset
+
+
 def _game_name_from_path(path):
     """
     Extracts game name from a file path.
@@ -1825,8 +1927,25 @@ def _update_state():
         ag_probe = ((activegame if activegame.startswith('/')
                      else os.path.join('/media/fat', activegame))
                     if activegame else '')
+        # Zip-shaped variant of the same mirroring: browsing INSIDE a
+        # pack zip leaves 'games/Amstrad/a.zip/a' here — a location,
+        # not a game — but isdir() cannot see into archives, so it
+        # slipped this gate and its basename ('a') was minted as the
+        # game name. The central directory settles it: an internal path
+        # that is a directory prefix there is a browsed folder exactly
+        # like an isdir() one. Zip-ROOT mirrors (empty internal) are
+        # left alone — a single-game zip launched via ACTIVEGAME is
+        # legitimate, and NeoGeo romset zips stay first-class below.
+        ag_zip_rel, ag_zip_internal = _zip_split(activegame)
+        ag_zip_is_folder = False
+        if ag_zip_rel and ag_zip_internal:
+            _ag_zip_abs = (ag_zip_rel if ag_zip_rel.startswith('/')
+                           else os.path.join('/media/fat', ag_zip_rel))
+            ag_zip_is_folder = _zip_internal_is_folder(_ag_zip_abs,
+                                                       ag_zip_internal)
         activegame_is_folder = (bool(activegame) and not activegame_is_system
-                                and os.path.isdir(ag_probe)
+                                and (os.path.isdir(ag_probe)
+                                     or ag_zip_is_folder)
                                 and not _neogeo_romset_dir(ag_probe, corename))
 
         selected_launch = None            # (game_name, game_path) or None
@@ -1884,8 +2003,32 @@ def _update_state():
                     selected_launch = (currentpath.strip(), candidate)
                     print(f"🎯 NeoGeo title via FILESELECT=selected: "
                           f"{currentpath}")
-                # Anything else (e.g. a ZIP virtual path that is not a real
-                # directory): leave selected_launch empty and let the
+                elif _zip_split(candidate)[0]:
+                    # ZIP virtual path — the browser is INSIDE a pack
+                    # zip (alphabet packs: games/Amstrad/a.zip/a/<title>).
+                    # Neither the extension test nor isdir() can see it,
+                    # so this first-hand witness used to be thrown away
+                    # and the ACTIVEGAME fallback minted the browsed
+                    # FOLDER's name as the game. The zip's own central
+                    # directory settles it — same stem tolerance as
+                    # rom-details, because CURRENTPATH drops the
+                    # extension — and game_path lands on the REAL
+                    # member so the snapshot stays honest (folder-branch
+                    # doctrine above).
+                    zip_rel, zip_internal = _zip_split(candidate)
+                    zip_abs = (zip_rel if zip_rel.startswith('/')
+                               else os.path.join('/media/fat', zip_rel))
+                    member = _zip_member_match(zip_abs, zip_internal)
+                    if member:
+                        selected_launch = (_game_name_from_path(currentpath),
+                                           zip_rel + '/' + member)
+                        print(f"🎯 ZIP launch via FILESELECT=selected: "
+                              f"{selected_launch[0]} -> "
+                              f"{os.path.basename(member)}")
+                    else:
+                        print(f"🔍 FILESELECT=selected inside a zip but no "
+                              f"member matches: '{candidate}' — falling back")
+                # Anything else: leave selected_launch empty and let the
                 # ACTIVEGAME / CURRENTPATH fallbacks below decide, as before.
 
         if currentpath_is_core_name:
