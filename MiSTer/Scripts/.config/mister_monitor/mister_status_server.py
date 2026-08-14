@@ -1050,6 +1050,66 @@ _romset_cache = {}                    # directory -> (mtime_stamp, frozenset)
 _romset_cache_lock = threading.Lock()
 
 
+# --- .mra <setname> corroboration --------------------------------------------
+# Main_MiSTer writes the romset's <setname> to /tmp/CORENAME when it loads an
+# arcade .mra (field-verified: 'smashtv', 'raidenu', 'holo'). That makes the
+# .mra at STARTPATH self-identifying: when its setname equals the running
+# CORENAME it IS the current launch, no matter how long the core took to
+# assemble — positive identity rather than a timing guess, so it needs no
+# freshness window of its own. A stale STARTPATH cannot satisfy it: a console
+# core's CORENAME is never an arcade romset id.
+#
+# Cached by (path, mtime) for the same reason the romset ids are: evaluate()
+# runs on every inotify burst and would otherwise re-read the file hundreds of
+# times per session.
+_MRA_SETNAME_RE = re.compile(
+    rb'<\s*setname\s*>\s*([^<]+?)\s*<\s*/\s*setname\s*>', re.IGNORECASE)
+_MRA_READ_CAP = 262144                # generous: real .mra files are 2-50 KB
+
+_mra_setname_cache = {}               # path -> (mtime_ns, setname)
+_mra_setname_lock = threading.Lock()
+
+
+def _mra_setname(mra_path):
+    """The <setname> declared inside an .mra; '' when absent or unreadable."""
+    stamp = 0
+    try:
+        stamp = _get_mtime_ns(mra_path)
+    except Exception:
+        return ''
+    if not stamp:
+        return ''
+
+    with _mra_setname_lock:
+        cached = _mra_setname_cache.get(mra_path)
+        if cached and cached[0] == stamp:
+            return cached[1]
+
+    setname = ''
+    try:
+        with open(mra_path, 'rb') as f:
+            blob = f.read(_MRA_READ_CAP)
+        m = _MRA_SETNAME_RE.search(blob)
+        if m:
+            setname = m.group(1).decode('utf-8', 'ignore').strip()
+    except Exception as e:
+        print(f"\u26a0\ufe0f .mra setname read failed: {e}")
+
+    with _mra_setname_lock:
+        _mra_setname_cache[mra_path] = (stamp, setname)
+    return setname
+
+
+def _mra_confirms_corename(startpath, corename):
+    """True when the .mra at STARTPATH declares the core running right now."""
+    if not startpath or not corename:
+        return False
+    if not startpath.lower().endswith('.mra'):
+        return False
+    setname = _mra_setname(startpath)
+    return bool(setname) and setname.lower() == corename.strip().lower()
+
+
 def _load_romset_names(directory):
     """
     Every romset id declared by the NeoGeo core's own data files.
@@ -1618,10 +1678,24 @@ def _update_state():
     except Exception:
         pass
 
+    startpath_is_mra = startpath.lower().endswith('.mra')
     startpath_arcade_fresh = (
-        startpath.lower().endswith('.mra') and
+        startpath_is_mra and
         startpath_ts >= corename_ts - ARCADE_FRESHNESS
     )
+
+    # Slow arcade romsets (large MRAs assembling from many ROM parts) can
+    # take longer than ARCADE_FRESHNESS to write CORENAME, which makes the
+    # timing test fail on a launch that is perfectly real — the game is then
+    # dropped and the panel falls back to the bare core. The .mra's own
+    # <setname> settles it without reopening the window the freshness gate
+    # exists to close.
+    if startpath_is_mra and not startpath_arcade_fresh:
+        if _mra_confirms_corename(startpath, corename):
+            startpath_arcade_fresh = True
+            print(f"\U0001f579\ufe0f .mra setname matches CORENAME '{corename}' "
+                  f"(core took {corename_ts - startpath_ts:.1f}s > "
+                  f"{ARCADE_FRESHNESS}s freshness) - accepting launch")
 
     is_arcade = False
     game_name = ''
