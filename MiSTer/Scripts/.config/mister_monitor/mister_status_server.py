@@ -1526,6 +1526,24 @@ def _enrich_rom_result(result, detection_method=None):
         result.get('path') or path_for_name,
         result.get('filename'),
         corename_raw)
+    # Arcade: the launched .mra names its romset in <setname>, and that
+    # id IS ScreenScraper's key — SS indexes arcade as MAME romsets,
+    # exactly like the NeoGeo override above ('mslug2.zip', field-
+    # verified). Until now arcade queries carried the .mra FILENAME as
+    # romnom plus a CRC of the .mra itself, surviving only on SS's fuzzy
+    # matching — which parses 'Smash T.V. (rev 8.00) [...].mra' but
+    # chokes on 'Raiden.US.mra', a 404 for a game SS has. The setname is
+    # exact and immune to pack filename cosmetics. Same contract as
+    # NeoGeo: '' means "use the filename" (today's behaviour), so a
+    # missing or malformed setname changes nothing; the shape guard is
+    # ra_hash's arcade rule, because a wrong romnom is worse than none.
+    if not result['ss_romnom']:
+        _arc_p = (result.get('path') or path_for_name or '')
+        if _arc_p.lower().endswith('.mra'):
+            _arc_sn = _mra_setname(_arc_p).strip().lower()
+            if _arc_sn and re.match(r'^[a-z0-9][a-z0-9_-]*$', _arc_sn):
+                result['ss_romnom'] = _arc_sn + '.zip'
+                print(f"🕹️ arcade romnom from .mra setname: '{result['ss_romnom']}'")
     result['name_search_hint'] = bool(
         (not result.get('available')) or
         (not result.get('crc32')) or
