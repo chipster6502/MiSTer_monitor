@@ -8580,7 +8580,30 @@ bool displayCoreImageCentered(String imagePath) {
     Serial.println("jpeg.openRAM() SUCCESS");
     int imgW = jpeg.getWidth();
     int imgH = jpeg.getHeight();
-    
+
+    // The pack ships artwork up to 768 px on the long side, sized for consumers
+    // with real screens. ScreenScraper used to hand us the image already fitted
+    // to TARGET_WIDTH x IMAGE_AREA_HEIGHT via maxwidth/maxheight, so nothing
+    // here ever scaled and decode() was always called with options 0 -- which
+    // on a pack image would draw the centre crop at 1:1 and lose the borders.
+    // JPEGDEC scales during decode, in powers of two only and at no extra cost
+    // in RAM or time. Pick the largest of 1/1, 1/2, 1/4, 1/8 that fits.
+    // imgW/imgH are then the DRAWN size, so the centring below and the
+    // callback's clipping keep working untouched.
+    int scaleOpt = 0;
+    if (imgW > TARGET_WIDTH * 4 || imgH > IMAGE_AREA_HEIGHT * 4) {
+      scaleOpt = JPEG_SCALE_EIGHTH;  imgW /= 8;  imgH /= 8;
+    } else if (imgW > TARGET_WIDTH * 2 || imgH > IMAGE_AREA_HEIGHT * 2) {
+      scaleOpt = JPEG_SCALE_QUARTER; imgW /= 4;  imgH /= 4;
+    } else if (imgW > TARGET_WIDTH || imgH > IMAGE_AREA_HEIGHT) {
+      scaleOpt = JPEG_SCALE_HALF;    imgW /= 2;  imgH /= 2;
+    }
+    if (scaleOpt != 0) {
+      Serial.printf("Scaling %dx%d -> %dx%d to fit %dx%d\n",
+                    jpeg.getWidth(), jpeg.getHeight(), imgW, imgH,
+                    TARGET_WIDTH, IMAGE_AREA_HEIGHT);
+    }
+
     // Calculate automatic centering
     int offsetX = (TARGET_WIDTH - imgW) / 2;
     int offsetY = (IMAGE_AREA_HEIGHT - imgH) / 2;
@@ -8614,8 +8637,8 @@ bool displayCoreImageCentered(String imagePath) {
     Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
     
     // ALWAYS decode at (0,0) - centering is applied in callback
-    Serial.println("Calling jpeg.decode(0, 0, 0) - centering via callback...");
-    bool success = jpeg.decode(0, 0, 0);
+    Serial.println("Calling jpeg.decode() - centering via callback...");
+    bool success = jpeg.decode(0, 0, scaleOpt);
     
     // Clear global offsets
     g_jpegOffsetX = 0;
