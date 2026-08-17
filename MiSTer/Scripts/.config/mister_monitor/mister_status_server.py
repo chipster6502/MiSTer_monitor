@@ -2257,6 +2257,29 @@ def _update_state():
                                      or ag_zip_is_folder)
                                 and not _neogeo_romset_dir(ag_probe, corename))
 
+        # Same verdict for CURRENTPATH, which had none. Browsing the OSD into
+        # a game folder leaves the FOLDER here, and the fallback at the end of
+        # the chain minted it as a game: browsing games/NeoGeoPocket under the
+        # NeoGeoPocket-Color core committed game='NeoGeoPocket', a title that
+        # does not exist. The core-name test above could not catch it -- the
+        # folder matches neither 'NeoGeoPocket-Color' nor 'Neo-Geo Pocket' --
+        # so the fact that it IS a directory is the only reliable witness, and
+        # rom-details already reaches that same verdict, just too late to stop
+        # the commit.
+        cp_probe = ((cp_composed if cp_composed.startswith('/')
+                     else os.path.join('/media/fat', cp_composed))
+                    if cp_composed else '')
+        cp_zip_rel, cp_zip_internal = _zip_split(cp_composed)
+        cp_zip_is_folder = False
+        if cp_zip_rel and cp_zip_internal:
+            _cp_zip_abs = (cp_zip_rel if cp_zip_rel.startswith('/')
+                           else os.path.join('/media/fat', cp_zip_rel))
+            cp_zip_is_folder = _zip_internal_is_folder(_cp_zip_abs,
+                                                       cp_zip_internal)
+        cp_is_folder = (bool(cp_composed) and not cp_is_system
+                        and (os.path.isdir(cp_probe) or cp_zip_is_folder)
+                        and not _neogeo_romset_dir(cp_probe, corename))
+
         selected_launch = None            # (game_name, game_path) or None
         if (fileselect_fresh and currentpath
                 and not currentpath_is_core_name):
@@ -2398,8 +2421,13 @@ def _update_state():
                 # a slash ('Metal Slug 2: Super Vehicle-001/II'), which any
                 # path-aware helper would truncate to the last segment.
                 game_name = currentpath.strip()
+        # Folder gate mirrors the ACTIVEGAME branch above, core_changed clause
+        # included: on a genuinely NEW core a folder may still establish
+        # identity (degraded but pre-existing behaviour), while during an
+        # unchanged core -- plain OSD browsing -- it never may.
         elif (currentpath and not currentpath.lower().endswith('.ini')
-              and not cp_is_system):
+              and not cp_is_system
+              and not (cp_is_folder and not core_changed)):
             game_name = _game_name_from_path(currentpath)
             game_path = cp_composed
         else:
