@@ -8693,12 +8693,17 @@ bool displayCoreImageCentered(String imagePath) {
     // in RAM or time. Pick the largest of 1/1, 1/2, 1/4, 1/8 that fits.
     // imgW/imgH are then the DRAWN size, so the centring below and the
     // callback's clipping keep working untouched.
+    // Fit against the PANEL, not the image area. A panel-sized asset (menu.jpg
+    // is exactly 320x240) has always been drawn 1:1 and allowed to bleed into
+    // the 40 px footer band -- the callback silences that clip on purpose.
+    // Measuring against IMAGE_AREA_HEIGHT instead halved those assets, which
+    // is why the menu suddenly rendered at 160x120.
     int scaleOpt = 0;
-    if (imgW > TARGET_WIDTH * 4 || imgH > IMAGE_AREA_HEIGHT * 4) {
+    if (imgW > TARGET_WIDTH * 4 || imgH > TARGET_HEIGHT * 4) {
       scaleOpt = JPEG_SCALE_EIGHTH;  imgW /= 8;  imgH /= 8;
-    } else if (imgW > TARGET_WIDTH * 2 || imgH > IMAGE_AREA_HEIGHT * 2) {
+    } else if (imgW > TARGET_WIDTH * 2 || imgH > TARGET_HEIGHT * 2) {
       scaleOpt = JPEG_SCALE_QUARTER; imgW /= 4;  imgH /= 4;
-    } else if (imgW > TARGET_WIDTH || imgH > IMAGE_AREA_HEIGHT) {
+    } else if (imgW > TARGET_WIDTH || imgH > TARGET_HEIGHT) {
       scaleOpt = JPEG_SCALE_HALF;    imgW /= 2;  imgH /= 2;
     }
     if (scaleOpt != 0) {
