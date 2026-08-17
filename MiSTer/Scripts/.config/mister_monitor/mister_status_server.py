@@ -524,6 +524,7 @@ _state = {
     'system_name':       'Menu',   # alias of 'core' (same value); kept for backward compatibility
     'game_system':       '',       # the GAME's real system when a backwards-compatible core is running
     'artwork_path':      '',       # absolute path of the pack image for the loaded game, '' when none
+    'artwork_seq':       -1,       # the seq that artwork_path was resolved for; a mismatch means stale
                                    # something older than itself (a Master System cartridge in the
                                    # MegaDrive core, a 2600 cartridge in the Atari 7800 core). Empty
                                    # whenever the game belongs to the core that opened it. 'core' stays
@@ -660,6 +661,10 @@ def _commit_state(core, game, game_path, is_arcade, event, core_raw='', game_sys
             _state['last_event']        = event
         seq_now = _state['seq']
     if changed:
+        # Resolve the pack image now, not when rom-details is computed: the
+        # display fetches artwork first, and a later resolution would serve
+        # the previous game's image.
+        _pack_resolve_for_state(game_path, is_arcade, game_system, core, seq_now)
         print(f"✅ State committed (seq={seq_now}, {event}): core='{core}' game='{game}' arcade={is_arcade}")
     else:
         print(f"♻️ Evaluation confirmed current state (seq={seq_now}) — rom cache preserved")
@@ -1648,6 +1653,48 @@ def _pack_lookup(pack_dir, key, crc, size):
     return '', ''
 
 
+def _pack_key_from_state(game_path, is_arcade):
+    """The pack key for the loaded game, derived from state ALONE.
+
+    Deliberately independent of rom-details: the display asks for artwork
+    before (and sometimes without) triggering a hash, so tying resolution to
+    rom-details left /media/artwork serving the PREVIOUS game's image. The
+    exact-filename step never needed the hash anyway — only the CRC fallback
+    does, and that runs later as a refinement.
+    """
+    if not game_path:
+        return ''
+    if is_arcade:
+        if game_path.lower().endswith('.mra'):
+            setname = _mra_setname(game_path).strip().lower()
+            if setname and re.match(r'^[a-z0-9][a-z0-9_-]*$', setname):
+                return setname
+        return ''
+    # Consoles: the No-Intro name without its extension. Zip-internal paths
+    # carry the real name at the end, so basename() covers them too.
+    return os.path.splitext(os.path.basename(game_path))[0]
+
+
+def _pack_resolve_for_state(game_path, is_arcade, game_system, core, seq):
+    """Resolves the pack image at state-commit time and records which seq it
+    belongs to. Called the moment the game changes, so /media/artwork is
+    correct before the display asks."""
+    path = ''
+    try:
+        system_folder = 'Arcade' if is_arcade else _PACK_SYSTEM.get(
+            game_system or core, '')
+        if system_folder:
+            key = _pack_key_from_state(game_path, is_arcade)
+            path, resolved = _pack_lookup(_pack_dir(system_folder), key, '', '')
+            if path:
+                print("\U0001f5bc\ufe0f local artwork: %s/%s.jpg" % (system_folder, resolved))
+    except Exception as e:
+        print("\u26a0\ufe0f local artwork lookup failed: %s" % e)
+    with _state_lock:
+        _state['artwork_path'] = path
+        _state['artwork_seq'] = seq
+
+
 def _pack_annotate(result):
     """Adds artwork_local / artwork_key / artwork_system to a rom-details
     result, and caches the resolved path for /media/artwork to serve.
@@ -1684,16 +1731,19 @@ def _pack_annotate(result):
         pack_dir = _pack_dir(system_folder)
         found, resolved = _pack_lookup(pack_dir, key,
                                        result.get('crc32'), result.get('size'))
+        result['artwork_system'] = system_folder
         if found:
             result['artwork_local'] = True
             result['artwork_key'] = resolved
-            result['artwork_system'] = system_folder
+            # Only ever UPGRADES what the state commit already resolved: the
+            # CRC step can find an image the name step missed, but a miss here
+            # must not wipe a good path (this runs per rom-details request,
+            # while the commit runs once per game).
             with _state_lock:
-                _state['artwork_path'] = found
+                if _state['artwork_path'] != found:
+                    _state['artwork_path'] = found
+                    _state['artwork_seq'] = _state['seq']
             print("\U0001f5bc\ufe0f local artwork: %s/%s.jpg" % (system_folder, resolved))
-        else:
-            with _state_lock:
-                _state['artwork_path'] = ''
     except Exception as e:
         print("\u26a0\ufe0f local artwork lookup failed: %s" % e)
     return result
@@ -4280,6 +4330,14 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         """
         with _state_lock:
             artwork_path = _state.get('artwork_path', '')
+            fresh = (_state.get('artwork_seq', -1) == _state['seq'])
+
+        # Serving an image resolved for a PREVIOUS game is worse than serving
+        # none: the display would cache confident-looking wrong artwork under
+        # the current game's name. 404 sends it to ScreenScraper instead.
+        if not fresh:
+            self.send_error_response(404, 'Artwork not resolved for the current game')
+            return
 
         if not artwork_path or not os.path.isfile(artwork_path):
             self.send_error_response(404, 'No local artwork for the loaded game')
