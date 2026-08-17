@@ -555,6 +555,25 @@ static void pumpedDelay(unsigned long ms) {
 static int g_jpegOffsetX = 0;
 static int g_jpegOffsetY = 0;
 
+// ---- Fine scaling state, recomputed once per image ----
+// The destination box is a variable, not a constant: a panel-sized asset
+// measures against the whole 320x240 and is allowed to bleed into the
+// footer, while artwork measures against the 320x200 image area.
+static int      g_artBoxW    = TARGET_WIDTH;
+static int      g_artBoxH    = IMAGE_AREA_HEIGHT;
+// When set, the callback reduces each block to the exact destination size.
+// Steps are 16.16 fixed point and every row/column is derived from ABSOLUTE
+// coordinates -- never from a per-block ratio, which is what keeps MCU
+// boundaries seamless.
+static bool     g_fineActive = false;
+static uint32_t g_fineXStep  = 1u << 16;
+static uint32_t g_fineYStep  = 1u << 16;
+static int      g_fineDstW   = 0;
+static int      g_fineDstH   = 0;
+// One destination row at a time. 640 bytes of .bss, versus the ~168 KB a
+// whole-image resample would need against ~110 KB of contiguous heap.
+static uint16_t g_fineRow[TARGET_WIDTH];
+
 // ========== TOUCH BUTTON STRUCTURE ==========
 ScrollTextState gameFooterScroll  = {"", 8, 0, 0, 0, false, false, false};
 ScrollTextState imageFooterScroll = {"", 25, 0, 0, 0, false, false, false};
@@ -3799,6 +3818,49 @@ int jpegDrawCallback(JPEGDRAW *pDraw) {
     firstCall = false;
   }
   
+  // Fine path: this block carries SOURCE pixels of the predecoded image, and
+  // the destination is smaller. Emit only the destination rows and columns
+  // whose source sample falls inside this block, so the blocks tile exactly.
+  if (g_fineActive) {
+    const int blockX = pDraw->x, blockY = pDraw->y;
+    const int blockW = pDraw->iWidth, blockH = pDraw->iHeight;
+
+    // Smallest dy with (dy*yStep)>>16 >= blockY, largest with it < blockY+blockH.
+    int dyFirst = (int)((((uint64_t)blockY << 16) + g_fineYStep - 1) / g_fineYStep);
+    int dyLast  = (int)((((uint64_t)(blockY + blockH) << 16) + g_fineYStep - 1)
+                        / g_fineYStep) - 1;
+    int dxFirst = (int)((((uint64_t)blockX << 16) + g_fineXStep - 1) / g_fineXStep);
+    int dxLast  = (int)((((uint64_t)(blockX + blockW) << 16) + g_fineXStep - 1)
+                        / g_fineXStep) - 1;
+
+    if (dyFirst < 0) dyFirst = 0;
+    if (dxFirst < 0) dxFirst = 0;
+    if (dyLast > g_fineDstH - 1) dyLast = g_fineDstH - 1;
+    if (dxLast > g_fineDstW - 1) dxLast = g_fineDstW - 1;
+    if (dyFirst > dyLast || dxFirst > dxLast) return 1;   // nothing lands here
+
+    const int runLen = dxLast - dxFirst + 1;
+    for (int dy = dyFirst; dy <= dyLast; dy++) {
+      int srcY = (int)(((uint64_t)dy * g_fineYStep) >> 16) - blockY;
+      if (srcY < 0) srcY = 0;
+      if (srcY > blockH - 1) srcY = blockH - 1;
+      const uint16_t *srcRow = pDraw->pPixels + (srcY * blockW);
+      for (int i = 0; i < runLen; i++) {
+        int srcX = (int)(((uint64_t)(dxFirst + i) * g_fineXStep) >> 16) - blockX;
+        if (srcX < 0) srcX = 0;
+        if (srcX > blockW - 1) srcX = blockW - 1;
+        g_fineRow[i] = srcRow[srcX];
+      }
+      int outX = dxFirst + g_jpegOffsetX;
+      int outY = dy + g_jpegOffsetY;
+      if (outX >= 0 && outY >= 0 &&
+          outX + runLen <= TARGET_WIDTH && outY < TARGET_HEIGHT) {
+        Lcd.pushImage(outX, outY, runLen, 1, g_fineRow);
+      }
+    }
+    return 1;
+  }
+
   // Apply global offset for centering (JPEGDEC doesn't accept large offsets in decode())
   int finalX = pDraw->x + g_jpegOffsetX;
   int finalY = pDraw->y + g_jpegOffsetY;
@@ -8751,26 +8813,89 @@ bool displayCoreImageCentered(String imagePath) {
     // the 40 px footer band -- the callback silences that clip on purpose.
     // Measuring against IMAGE_AREA_HEIGHT instead halved those assets, which
     // is why the menu suddenly rendered at 160x120.
-    int scaleOpt = 0;
-    if (imgW > TARGET_WIDTH * 4 || imgH > TARGET_HEIGHT * 4) {
-      scaleOpt = JPEG_SCALE_EIGHTH;  imgW /= 8;  imgH /= 8;
-    } else if (imgW > TARGET_WIDTH * 2 || imgH > TARGET_HEIGHT * 2) {
-      scaleOpt = JPEG_SCALE_QUARTER; imgW /= 4;  imgH /= 4;
-    } else if (imgW > TARGET_WIDTH || imgH > TARGET_HEIGHT) {
-      scaleOpt = JPEG_SCALE_HALF;    imgW /= 2;  imgH /= 2;
+    // Which box does this image belong in? ONLY an exactly panel-sized asset --
+    // menu.jpg at 320x240 -- keeps the full panel and bleeds into the footer, as
+    // it always has. Anything else, artwork and core screens alike, is fitted to
+    // the 320x200 image area and centred there. Widening this to "anything that
+    // fits the panel" pushed the 320x200 core images down by 20 px and clipped
+    // covers against the footer.
+    const int srcW = imgW, srcH = imgH;
+    g_artBoxW = TARGET_WIDTH;
+    g_artBoxH = (srcW == TARGET_WIDTH && srcH == TARGET_HEIGHT)
+              ? TARGET_HEIGHT        // menu.jpg only: drawn 1:1, bleeds by design
+              : IMAGE_AREA_HEIGHT;   // everything else stays above the footer
+
+    // Ideal destination: preserve aspect, fit the box, never upscale.
+    int dstW = srcW, dstH = srcH;
+    if (srcW > g_artBoxW || srcH > g_artBoxH) {
+      if ((int64_t)srcW * g_artBoxH > (int64_t)srcH * g_artBoxW) {
+        dstW = g_artBoxW;
+        dstH = (int)(((int64_t)srcH * g_artBoxW + srcW / 2) / srcW);
+      } else {
+        dstH = g_artBoxH;
+        dstW = (int)(((int64_t)srcW * g_artBoxH + srcH / 2) / srcH);
+      }
     }
-    if (scaleOpt != 0) {
-      Serial.printf("Scaling %dx%d -> %dx%d to fit %dx%d\n",
-                    jpeg.getWidth(), jpeg.getHeight(), imgW, imgH,
-                    TARGET_WIDTH, IMAGE_AREA_HEIGHT);
+    if (dstW < 1) dstW = 1;
+    if (dstH < 1) dstH = 1;
+
+    // The power-of-two rule on its own: SMALLEST divisor that fits, 8 as the
+    // floor for anything enormous (mirrors the old if/else chain exactly).
+    int fitDiv = 8;
+    for (int d = 1; d <= 8; d <<= 1) {
+      if (srcW / d <= g_artBoxW && srcH / d <= g_artBoxH) { fitDiv = d; break; }
+    }
+    int fitW = srcW / fitDiv, fitH = srcH / fitDiv;
+
+    // Take the cheap path whenever it already fills the box, so panel assets and
+    // everything ScreenScraper pre-sized render byte for byte as before. Extreme
+    // aspect ratios can overflow even at 1/8, and those must resample too.
+    int  fillPct = (fitW * 100 / dstW < fitH * 100 / dstH)
+                 ?  fitW * 100 / dstW :  fitH * 100 / dstH;
+    bool fitOverflows = (fitW > g_artBoxW || fitH > g_artBoxH);
+
+    int scaleOpt = 0;
+    g_fineActive = false;
+
+    if (fillPct >= 90 && !fitOverflows) {
+      imgW = fitW;  imgH = fitH;
+      if      (fitDiv == 8) scaleOpt = JPEG_SCALE_EIGHTH;
+      else if (fitDiv == 4) scaleOpt = JPEG_SCALE_QUARTER;
+      else if (fitDiv == 2) scaleOpt = JPEG_SCALE_HALF;
+      if (scaleOpt != 0) {
+        Serial.printf("Scaling %dx%d -> %dx%d to fit %dx%d\n",
+                      srcW, srcH, imgW, imgH, g_artBoxW, g_artBoxH);
+      }
+    } else {
+      // Fine path: LARGEST divisor whose output still covers the destination,
+      // so the resample only ever shrinks (ratio lands in (0.5, 1]).
+      int covDiv = 1;
+      for (int d = 8; d >= 1; d >>= 1) {
+        if (srcW / d >= dstW && srcH / d >= dstH) { covDiv = d; break; }
+      }
+      int decW = srcW / covDiv, decH = srcH / covDiv;
+      if      (covDiv == 8) scaleOpt = JPEG_SCALE_EIGHTH;
+      else if (covDiv == 4) scaleOpt = JPEG_SCALE_QUARTER;
+      else if (covDiv == 2) scaleOpt = JPEG_SCALE_HALF;
+
+      g_fineXStep  = (uint32_t)(((uint64_t)decW << 16) / dstW);
+      g_fineYStep  = (uint32_t)(((uint64_t)decH << 16) / dstH);
+      g_fineDstW   = dstW;
+      g_fineDstH   = dstH;
+      g_fineActive = true;
+      imgW = dstW;  imgH = dstH;
+
+      Serial.printf("Scaling %dx%d -> 1/%d (%dx%d) -> %dx%d to fit %dx%d\n",
+                    srcW, srcH, covDiv, decW, decH, imgW, imgH,
+                    g_artBoxW, g_artBoxH);
     }
 
     // Calculate automatic centering
-    int offsetX = (TARGET_WIDTH - imgW) / 2;
-    int offsetY = (IMAGE_AREA_HEIGHT - imgH) / 2;
+    int offsetX = (g_artBoxW - imgW) / 2;
+    int offsetY = (g_artBoxH - imgH) / 2;
 
     Serial.printf("Image dimensions: %dx%d\n", imgW, imgH);
-    Serial.printf("Available area: %dx%d\n", TARGET_WIDTH, IMAGE_AREA_HEIGHT);
+    Serial.printf("Available area: %dx%d\n", g_artBoxW, g_artBoxH);
     Serial.printf("Calculated offset: X=%d, Y=%d\n", offsetX, offsetY);
     Serial.printf("Final position: X=%d to X=%d, Y=%d to Y=%d\n", 
                   offsetX, offsetX + imgW, offsetY, offsetY + imgH);
@@ -8779,10 +8904,11 @@ bool displayCoreImageCentered(String imagePath) {
     if (offsetX < 0) offsetX = 0;
     if (offsetY < 0) offsetY = 0;
     
-    // Verify image won't overlap footer
-    if (offsetY + imgH > IMAGE_AREA_HEIGHT) {
-      Serial.printf("WARNING: Image extends into footer area, adjusting...\n");
-      offsetY = IMAGE_AREA_HEIGHT - imgH;
+    // Keep the image inside ITS box. For artwork that is the image area; for
+    // panel assets the box is the whole panel, so the footer bleed the design
+    // has always allowed no longer trips a warning.
+    if (offsetY + imgH > g_artBoxH) {
+      offsetY = g_artBoxH - imgH;
       if (offsetY < 0) offsetY = 0;
     }
     
@@ -8804,6 +8930,7 @@ bool displayCoreImageCentered(String imagePath) {
     // Clear global offsets
     g_jpegOffsetX = 0;
     g_jpegOffsetY = 0;
+    g_fineActive  = false;
     
     Serial.printf("Result: %s\n", success ? "SUCCESS" : "FAILED");
     Serial.printf("Heap after: %d bytes\n", ESP.getFreeHeap());
