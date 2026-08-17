@@ -164,6 +164,10 @@ int  DEBUG_FORCE_LEVEL            = 0;
 bool ENABLE_AUTO_DOWNLOAD         = true;
 int  MAX_IMAGE_SIZE               = 500000;
 int  DOWNLOAD_TIMEOUT             = 30000;
+// Streaming window for artwork transfers. Deliberately a compile-time
+// constant and not a config knob: the point of it is that no allocation in
+// the artwork path scales with the image. Matches JPEGDEC's file window.
+#define PACK_STREAM_CHUNK           2048
 int  SCROLL_SPEED_MS              = 300;
 int  SCROLL_PAUSE_START_MS        = 2000;
 int  SCROLL_PAUSE_END_MS          = 3000;
@@ -517,6 +521,25 @@ void setupScreenshotServer() {
 static int g_jpegOffsetX = 0;
 static int g_jpegOffsetY = 0;
 
+// ---- Fine scaling state, recomputed once per image ----
+// The destination box is a variable, not a constant: an exactly
+// panel-sized asset (menu.jpg) measures against the whole panel and is
+// allowed to bleed into the footer, while everything else measures
+// against the image area and is centred there.
+static int      g_artBoxW    = TARGET_WIDTH;
+static int      g_artBoxH    = IMAGE_AREA_HEIGHT;
+// When set, the callback reduces each block to the exact destination size.
+// Steps are 16.16 fixed point and every row/column is derived from ABSOLUTE
+// coordinates -- never from a per-block ratio, which is what keeps MCU
+// boundaries seamless.
+static bool     g_fineActive = false;
+static uint32_t g_fineXStep  = 1u << 16;
+static uint32_t g_fineYStep  = 1u << 16;
+static int      g_fineDstW   = 0;
+static int      g_fineDstH   = 0;
+// One destination row at a time, rather than the whole resampled image.
+static uint16_t g_fineRow[TARGET_WIDTH];
+
 // ========== TOUCH BUTTON STRUCTURE ==========
 ScrollTextState gameFooterScroll  = {"", 8, 0, 0, 0, false, false, false};
 ScrollTextState imageFooterScroll = {"", 25, 0, 0, 0, false, false, false};
@@ -618,6 +641,7 @@ String sanitizeCoreFilename(String name);
 String getSavePath(String exactFileName, String searchCore);
 
 // Media and image functions
+bool downloadArtworkFromPack(String savePath);
 bool downloadImageFromScreenScraper(String imageUrl, String savePath);
 bool downloadImageFromMediaJeu(String mediaUrl, String savePath);
 bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload = FORCE_CORE_REDOWNLOAD);
@@ -3742,6 +3766,48 @@ int jpegDrawCallback(JPEGDRAW *pDraw) {
   }
   
   // Apply global offset for centering (JPEGDEC doesn't accept large offsets in decode())
+  // Fine path: this block carries SOURCE pixels of the predecoded image, and
+  // the destination is smaller. Emit only the destination rows and columns
+  // whose source sample falls inside this block, so the blocks tile exactly.
+  if (g_fineActive) {
+    const int blockX = pDraw->x, blockY = pDraw->y;
+    const int blockW = pDraw->iWidth, blockH = pDraw->iHeight;
+
+    int dyFirst = (int)((((uint64_t)blockY << 16) + g_fineYStep - 1) / g_fineYStep);
+    int dyLast  = (int)((((uint64_t)(blockY + blockH) << 16) + g_fineYStep - 1)
+                        / g_fineYStep) - 1;
+    int dxFirst = (int)((((uint64_t)blockX << 16) + g_fineXStep - 1) / g_fineXStep);
+    int dxLast  = (int)((((uint64_t)(blockX + blockW) << 16) + g_fineXStep - 1)
+                        / g_fineXStep) - 1;
+
+    if (dyFirst < 0) dyFirst = 0;
+    if (dxFirst < 0) dxFirst = 0;
+    if (dyLast > g_fineDstH - 1) dyLast = g_fineDstH - 1;
+    if (dxLast > g_fineDstW - 1) dxLast = g_fineDstW - 1;
+    if (dyFirst > dyLast || dxFirst > dxLast) return 1;   // nothing lands here
+
+    const int runLen = dxLast - dxFirst + 1;
+    for (int dy = dyFirst; dy <= dyLast; dy++) {
+      int srcY = (int)(((uint64_t)dy * g_fineYStep) >> 16) - blockY;
+      if (srcY < 0) srcY = 0;
+      if (srcY > blockH - 1) srcY = blockH - 1;
+      const uint16_t *srcRow = pDraw->pPixels + (srcY * blockW);
+      for (int i = 0; i < runLen; i++) {
+        int srcX = (int)(((uint64_t)(dxFirst + i) * g_fineXStep) >> 16) - blockX;
+        if (srcX < 0) srcX = 0;
+        if (srcX > blockW - 1) srcX = blockW - 1;
+        g_fineRow[i] = srcRow[srcX];
+      }
+      int outX = dxFirst + g_jpegOffsetX;
+      int outY = dy + g_jpegOffsetY;
+      if (outX >= 0 && outY >= 0 &&
+          outX + runLen <= TARGET_WIDTH && outY < TARGET_HEIGHT) {
+        Lcd.pushImage(outX, outY, runLen, 1, g_fineRow);
+      }
+    }
+    return 1;
+  }
+
   int finalX = pDraw->x + g_jpegOffsetX;
   int finalY = pDraw->y + g_jpegOffsetY;
   
@@ -7972,6 +8038,130 @@ String mapCoreToScreenScraperId(String coreName) {
 
 // ========== IMAGE DOWNLOAD WITH AUTOMATIC RESIZING ==========
 
+// ========== LOCAL-FIRST: THE INSTALLED ARTWORK PACK ==========
+
+// Fetches the pack image the MiSTer holds for the game that is loaded right
+// now, saving it to the usual cache path so everything downstream (display,
+// metadata sidecar, redraws) is unchanged.
+//
+// The server decides WHICH image, so this endpoint needs no parameters: it
+// serves whatever the current game resolved to, or 404.
+//
+// A 404 is the normal answer for a game the pack does not cover, and for any
+// server older than pack support, which falls through to its own
+// endpoint-not-found. It is NOT a failure: no error screen, no retry budget
+// spent, no g_lastSSHttpCode written (that global is the ScreenScraper
+// diagnostic and must keep whatever the SS path put there).
+bool downloadArtworkFromPack(String savePath) {
+  if (strlen(misterIP) == 0) return false;
+
+  String url = String("http://") + misterIP + ":8081/media/artwork";
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(DOWNLOAD_TIMEOUT);
+  int httpCode = http.GET();
+
+  if (httpCode != 200) {
+    Serial.printf("Pack: no local artwork (HTTP %d)\n", httpCode);
+    http.end();
+    return false;
+  }
+
+  int contentLength = http.getSize();
+  if (contentLength <= 0 || contentLength > MAX_IMAGE_SIZE) {
+    Serial.printf("Pack: unusable content length %d\n", contentLength);
+    http.end();
+    return false;
+  }
+
+  showDownloadProgress(40, "Local artwork...");
+
+  // Stream straight onto the card. Buffering the whole image first would cap
+  // artwork at the largest CONTIGUOUS free block rather than at free heap --
+  // a ceiling that moves with whatever ran before, so it fails intermittently
+  // and silently. A fixed window has no ceiling at all.
+  //
+  // Streaming costs the atomicity a whole-image buffer gave for free: the
+  // file would appear before it was validated. Write under a temporary name
+  // and rename on success, so a power cut mid-transfer cannot leave a
+  // truncated JPEG that every later boot would trust as valid cache.
+  String tmpPath = savePath + ".tmp";
+  File file = SD.open(tmpPath, FILE_WRITE);
+  if (!file) {
+    Serial.printf("Pack: cannot create file: %s\n", tmpPath.c_str());
+    http.end();
+    return false;
+  }
+
+  static uint8_t chunk[PACK_STREAM_CHUNK];
+  WiFiClient* stream = http.getStreamPtr();
+  size_t downloaded = 0;
+  bool headerOk = false;
+  bool failed   = false;
+  unsigned long downloadStart = millis();
+
+  while (downloaded < (size_t)contentLength) {
+    if (millis() - downloadStart > DOWNLOAD_TIMEOUT) {
+      Serial.println("Pack: timeout waiting for stream data");
+      break;
+    }
+    size_t available = stream->available();
+    if (available > 0) {
+      size_t toRead = min(available, (size_t)PACK_STREAM_CHUNK);
+      toRead = min(toRead, (size_t)contentLength - downloaded);
+      size_t read = stream->readBytes(chunk, toRead);
+      if (read > 0) {
+        // Validate the signature on the first bytes that arrive, so a wrong
+        // body is dropped before it costs a full transfer.
+        if (downloaded == 0) {
+          headerOk = (read >= 2 && chunk[0] == 0xFF && chunk[1] == 0xD8);
+          if (!headerOk) {
+            Serial.println("Pack: response is not a JPEG");
+            failed = true;
+            break;
+          }
+        }
+        if (file.write(chunk, read) != read) {
+          Serial.println("Pack: SD write error");
+          failed = true;
+          break;
+        }
+        downloaded += read;
+        showDownloadProgress(40 + (int)(downloaded * 50 / contentLength),
+                             "Local artwork...");
+      }
+    }
+    screenshotServer.handleClient();
+    delay(1);
+  }
+
+  file.close();
+  http.end();
+
+  if (failed || !headerOk || downloaded != (size_t)contentLength) {
+    Serial.printf("Pack: incomplete download %d/%d bytes\n",
+                  (int)downloaded, contentLength);
+    SD.remove(tmpPath);
+    return false;
+  }
+
+  // f_rename refuses an existing destination, so clear it first. Only now does
+  // the artwork become visible under the name the cache looks up.
+  if (SD.exists(savePath)) SD.remove(savePath);
+  if (!SD.rename(tmpPath, savePath)) {
+    Serial.printf("Pack: cannot rename %s -> %s\n",
+                  tmpPath.c_str(), savePath.c_str());
+    SD.remove(tmpPath);
+    return false;
+  }
+
+  Serial.printf("Pack: local artwork saved: %s (%d bytes)\n",
+                savePath.c_str(), (int)downloaded);
+  showDownloadProgress(100, "Complete!");
+  return true;
+}
+
 bool downloadImageFromScreenScraper(String imageUrl, String savePath) {
   // Add resizing parameters to ScreenScraper URL
   String resizedUrl = imageUrl;
@@ -8086,6 +8276,41 @@ bool downloadImageFromScreenScraper(String imageUrl, String savePath) {
   }
 }
 
+// ========== JPEGDEC FILE CALLBACKS ==========
+// Let JPEGDEC pull from the card through its own internal window instead of
+// requiring the whole file in one contiguous heap block. The handle has to
+// outlive the call, hence the static File.
+
+static File g_jpegSDFile;
+
+static void * jpegSDOpen(const char *filename, int32_t *size) {
+  // A failed open() never reaches the close callback, so reclaim any handle
+  // left behind before taking a new one -- otherwise descriptors leak until
+  // the card stops handing them out.
+  if (g_jpegSDFile) g_jpegSDFile.close();
+  g_jpegSDFile = SD.open(filename);
+  if (!g_jpegSDFile) return NULL;
+  *size = (int32_t)g_jpegSDFile.size();
+  return &g_jpegSDFile;
+}
+
+static void jpegSDClose(void *handle) {
+  File *f = (File *)handle;
+  if (f) f->close();
+}
+
+static int32_t jpegSDRead(JPEGFILE *handle, uint8_t *buffer, int32_t length) {
+  File *f = (File *)handle->fHandle;
+  if (!f) return 0;
+  return f->read(buffer, length);
+}
+
+static int32_t jpegSDSeek(JPEGFILE *handle, int32_t position) {
+  File *f = (File *)handle->fHandle;
+  if (!f) return 0;
+  return f->seek(position) ? position : 0;
+}
+
 // ========== DISPLAY WITH AUTOMATIC CENTERING ==========
 
 bool displayCoreImageCentered(String imagePath) {
@@ -8106,59 +8331,123 @@ bool displayCoreImageCentered(String imagePath) {
     return false;
   }
   
+  // Probe size and signature only. The decode itself reads from the card, so
+  // nothing here allocates on the image's scale: openRAM() used to demand the
+  // whole file in one contiguous block and failed on covers the card held fine.
   size_t fileSize = imageFile.size();
-  if (fileSize == 0 || fileSize > 500000) {
-    Serial.println("Invalid image file size");
-    imageFile.close();
-    return false;
-  }
-  
-  // Read image to buffer
-  uint8_t *buffer = (uint8_t*)malloc(fileSize);
-  if (!buffer) {
-    Serial.println("No memory for image buffer");
-    imageFile.close();
-    return false;
-  }
-  
-  size_t bytesRead = imageFile.read(buffer, fileSize);
+  uint8_t header[4] = {0, 0, 0, 0};
+  size_t headerRead = imageFile.read(header, 4);
   imageFile.close();
   
-  if (bytesRead != fileSize) {
-    Serial.println("Error reading image file");
-    free(buffer);
+  if (fileSize == 0 || fileSize > 500000) {
+    Serial.println("Invalid image file size");
     return false;
   }
   
   // Verify valid JPEG
-  if (buffer[0] != 0xFF || buffer[1] != 0xD8) {
+  if (headerRead != 4 || header[0] != 0xFF || header[1] != 0xD8) {
     Serial.println("Not a valid JPEG file");
-    free(buffer);
     return false;
   }
   
   Serial.println("=== JPEG DECODE DIAGNOSTIC ===");
   Serial.printf("File: %s\n", imagePath.c_str());
-  Serial.printf("Buffer size: %d bytes\n", fileSize);
-  Serial.printf("JPEG signature: %02X %02X %02X %02X\n", buffer[0], buffer[1], buffer[2], buffer[3]);
-  Serial.printf("Free heap before openRAM: %d bytes\n", ESP.getFreeHeap());
+  Serial.printf("File size: %d bytes (decoded from SD)\n", (int)fileSize);
+  Serial.printf("JPEG signature: %02X %02X %02X %02X\n", header[0], header[1], header[2], header[3]);
+  Serial.printf("Free heap before open: %d bytes\n", ESP.getFreeHeap());
   
   // Ensure clean state
   jpeg.close();
   
   // Decode with automatic centering
-  Serial.println("Calling jpeg.openRAM()...");
-  if (jpeg.openRAM(buffer, fileSize, jpegDrawCallback)) {
-    Serial.println("jpeg.openRAM() SUCCESS");
+  Serial.println("Calling jpeg.open() from SD...");
+  if (jpeg.open(imagePath.c_str(), jpegSDOpen, jpegSDClose,
+                jpegSDRead, jpegSDSeek, jpegDrawCallback)) {
+    Serial.println("jpeg.open() SUCCESS");
     int imgW = jpeg.getWidth();
     int imgH = jpeg.getHeight();
     
+    // Which box does this image belong in? ONLY an exactly panel-sized asset
+    // keeps the full panel and bleeds into the footer, as it always has.
+    // Anything else, artwork and core screens alike, is fitted to the image
+    // area and centred there.
+    const int srcW = imgW, srcH = imgH;
+    g_artBoxW = TARGET_WIDTH;
+    g_artBoxH = (srcW == TARGET_WIDTH && srcH == TARGET_HEIGHT)
+              ? TARGET_HEIGHT        // panel asset: drawn 1:1, bleeds by design
+              : IMAGE_AREA_HEIGHT;   // everything else stays above the footer
+    
+    // Ideal destination: preserve aspect, fit the box, never upscale.
+    int dstW = srcW, dstH = srcH;
+    if (srcW > g_artBoxW || srcH > g_artBoxH) {
+      if ((int64_t)srcW * g_artBoxH > (int64_t)srcH * g_artBoxW) {
+        dstW = g_artBoxW;
+        dstH = (int)(((int64_t)srcH * g_artBoxW + srcW / 2) / srcW);
+      } else {
+        dstH = g_artBoxH;
+        dstW = (int)(((int64_t)srcW * g_artBoxH + srcH / 2) / srcH);
+      }
+    }
+    if (dstW < 1) dstW = 1;
+    if (dstH < 1) dstH = 1;
+    
+    // JPEGDEC only halves, so pick the SMALLEST divisor that fits, with 8 as
+    // the floor for anything enormous.
+    int fitDiv = 8;
+    for (int d = 1; d <= 8; d <<= 1) {
+      if (srcW / d <= g_artBoxW && srcH / d <= g_artBoxH) { fitDiv = d; break; }
+    }
+    int fitW = srcW / fitDiv, fitH = srcH / fitDiv;
+    
+    // Take the cheap path whenever it already fills the box, so panel assets
+    // and everything ScreenScraper pre-sized render exactly as before. Extreme
+    // aspect ratios can overflow even at 1/8, and those must resample too.
+    int  fillPct = (fitW * 100 / dstW < fitH * 100 / dstH)
+                 ?  fitW * 100 / dstW :  fitH * 100 / dstH;
+    bool fitOverflows = (fitW > g_artBoxW || fitH > g_artBoxH);
+    
+    int scaleOpt = 0;
+    g_fineActive = false;
+    
+    if (fillPct >= 90 && !fitOverflows) {
+      imgW = fitW;  imgH = fitH;
+      if      (fitDiv == 8) scaleOpt = JPEG_SCALE_EIGHTH;
+      else if (fitDiv == 4) scaleOpt = JPEG_SCALE_QUARTER;
+      else if (fitDiv == 2) scaleOpt = JPEG_SCALE_HALF;
+      if (scaleOpt != 0) {
+        Serial.printf("Scaling %dx%d -> %dx%d to fit %dx%d\n",
+                      srcW, srcH, imgW, imgH, g_artBoxW, g_artBoxH);
+      }
+    } else {
+      // Fine path: LARGEST divisor whose output still covers the destination,
+      // so the resample only ever shrinks (ratio lands above one half).
+      int covDiv = 1;
+      for (int d = 8; d >= 1; d >>= 1) {
+        if (srcW / d >= dstW && srcH / d >= dstH) { covDiv = d; break; }
+      }
+      int decW = srcW / covDiv, decH = srcH / covDiv;
+      if      (covDiv == 8) scaleOpt = JPEG_SCALE_EIGHTH;
+      else if (covDiv == 4) scaleOpt = JPEG_SCALE_QUARTER;
+      else if (covDiv == 2) scaleOpt = JPEG_SCALE_HALF;
+      
+      g_fineXStep  = (uint32_t)(((uint64_t)decW << 16) / dstW);
+      g_fineYStep  = (uint32_t)(((uint64_t)decH << 16) / dstH);
+      g_fineDstW   = dstW;
+      g_fineDstH   = dstH;
+      g_fineActive = true;
+      imgW = dstW;  imgH = dstH;
+      
+      Serial.printf("Scaling %dx%d -> 1/%d (%dx%d) -> %dx%d to fit %dx%d\n",
+                    srcW, srcH, covDiv, decW, decH, imgW, imgH,
+                    g_artBoxW, g_artBoxH);
+    }
+    
     // Calculate automatic centering
-    int offsetX = (TARGET_WIDTH - imgW) / 2;
-    int offsetY = (IMAGE_AREA_HEIGHT - imgH) / 2;
+    int offsetX = (g_artBoxW - imgW) / 2;
+    int offsetY = (g_artBoxH - imgH) / 2;
 
     Serial.printf("Image dimensions: %dx%d\n", imgW, imgH);
-    Serial.printf("Available area: %dx%d\n", TARGET_WIDTH, IMAGE_AREA_HEIGHT);
+    Serial.printf("Available area: %dx%d\n", g_artBoxW, g_artBoxH);
     Serial.printf("Calculated offset: X=%d, Y=%d\n", offsetX, offsetY);
     Serial.printf("Final position: X=%d to X=%d, Y=%d to Y=%d\n", 
                   offsetX, offsetX + imgW, offsetY, offsetY + imgH);
@@ -8167,10 +8456,11 @@ bool displayCoreImageCentered(String imagePath) {
     if (offsetX < 0) offsetX = 0;
     if (offsetY < 0) offsetY = 0;
     
-    // Verify image won't overlap footer
-    if (offsetY + imgH > IMAGE_AREA_HEIGHT) {
-      Serial.printf("WARNING: Image extends into footer area, adjusting...\n");
-      offsetY = IMAGE_AREA_HEIGHT - imgH;
+    // Keep the image inside ITS box. For artwork that is the image area; for a
+    // panel asset the box is the whole panel, so the footer bleed the design
+    // has always allowed no longer trips a warning.
+    if (offsetY + imgH > g_artBoxH) {
+      offsetY = g_artBoxH - imgH;
       if (offsetY < 0) offsetY = 0;
     }
     
@@ -8180,24 +8470,25 @@ bool displayCoreImageCentered(String imagePath) {
     g_jpegOffsetY = offsetY;
     Serial.printf("Set global callback offsets: (%d,%d)\n", g_jpegOffsetX, g_jpegOffsetY);
     
+    if (scaleOpt != 0) jpeg.setMaxOutputSize(1);
     jpeg.setPixelType(RGB565_BIG_ENDIAN);
     
-    Serial.printf("Image: %dx%d, Buffer: %d bytes\n", imgW, imgH, fileSize);
+    Serial.printf("Image: %dx%d, File: %d bytes\n", imgW, imgH, (int)fileSize);
     Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
     
     // ALWAYS decode at (0,0) - centering is applied in callback
-    Serial.println("Calling jpeg.decode(0, 0, 0) - centering via callback...");
-    bool success = jpeg.decode(0, 0, 0);
+    Serial.println("Calling jpeg.decode() - centering via callback...");
+    bool success = jpeg.decode(0, 0, scaleOpt);
     
     // Clear global offsets
     g_jpegOffsetX = 0;
     g_jpegOffsetY = 0;
+    g_fineActive  = false;
     
     Serial.printf("Result: %s\n", success ? "SUCCESS" : "FAILED");
     Serial.printf("Heap after: %d bytes\n", ESP.getFreeHeap());
     
     jpeg.close();
-    free(buffer);
     
     if (success) {
       Serial.printf("Image displayed centered: %dx%d at (%d,%d)\n", 
@@ -8209,7 +8500,6 @@ bool displayCoreImageCentered(String imagePath) {
     }
   } else {
     Serial.println("Error opening JPEG decoder");
-    free(buffer);
     return false;
   }
 }
@@ -9777,6 +10067,22 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
   Serial.printf("=== JSON-BASED SCREENSCRAPER DOWNLOAD ===\n");
   Serial.printf("Game: '%s' | Core: '%s'\n", gameName.c_str(), coreName.c_str());
   Serial.printf("Free heap at start: %d bytes\n", ESP.getFreeHeap());
+
+  // Local-first: try the pack installed on the MiSTer before any network
+  // traffic. Deliberately ABOVE the systemId guard below: the pack is keyed by
+  // the game's own identity, not by a ScreenScraper system id, so it can cover
+  // cores this firmware has no mapping for. On a miss nothing is consumed and
+  // the ScreenScraper path below runs untouched.
+  {
+    String packExactName = getExactFileName(gameName);
+    String packCore = coreName;
+    packCore.toLowerCase();
+    String packSavePath = getSavePath(packExactName, packCore);
+    if (downloadArtworkFromPack(packSavePath)) {
+      Serial.println("Artwork served from the local pack - no ScreenScraper call");
+      return true;
+    }
+  }
   
   // Early exit: if the core isn't mapped to a ScreenScraper system, there's
   // no point asking MiSTer for ROM details 
