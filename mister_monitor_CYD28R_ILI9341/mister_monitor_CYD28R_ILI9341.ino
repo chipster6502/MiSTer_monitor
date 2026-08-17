@@ -658,6 +658,7 @@ String sanitizeCoreFilename(String name);
 String getSavePath(String exactFileName, String searchCore);
 
 // Media and image functions
+bool downloadArtworkFromPack(String savePath);
 bool downloadImageFromScreenScraper(String imageUrl, String savePath);
 bool downloadImageFromMediaJeu(String mediaUrl, String savePath);
 bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload = FORCE_CORE_REDOWNLOAD);
@@ -8396,6 +8397,108 @@ String mapCoreToScreenScraperId(String coreName) {
 
 // ========== IMAGE DOWNLOAD WITH AUTOMATIC RESIZING ==========
 
+// ========== LOCAL-FIRST: THE INSTALLED ARTWORK PACK ==========
+
+// Fetches the pack image the MiSTer holds for the game that is loaded right
+// now, saving it to the usual cache path so everything downstream (display,
+// metadata sidecar, redraws) is unchanged.
+//
+// The server resolves WHICH image during rom-details -- exact filename, then
+// index.tsv by variant name, then by CRC+size -- so this endpoint needs no
+// parameters: it serves whatever the current game resolved to, or 404.
+//
+// A 404 is the normal answer for a game the pack does not cover, and for any
+// server older than the pack support, which falls through to its own
+// endpoint-not-found. It is NOT a failure: no error screen, no retry budget
+// spent, no g_lastSSHttpCode written (that global is the ScreenScraper
+// diagnostic and must keep whatever the SS path put there). The caller simply
+// carries on to ScreenScraper exactly as it always has.
+bool downloadArtworkFromPack(String savePath) {
+  if (strlen(misterIP) == 0) return false;
+
+  String url = String("http://") + misterIP + ":8081/media/artwork";
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(DOWNLOAD_TIMEOUT);
+  int httpCode = http.GET();
+
+  if (httpCode != 200) {
+    Serial.printf("Pack: no local artwork (HTTP %d)\n", httpCode);
+    http.end();
+    return false;
+  }
+
+  int contentLength = http.getSize();
+  if (contentLength <= 0 || contentLength > MAX_IMAGE_SIZE) {
+    Serial.printf("Pack: unusable content length %d\n", contentLength);
+    http.end();
+    return false;
+  }
+
+  showDownloadProgress(40, "Local artwork...");
+
+  uint8_t* buffer = (uint8_t*)malloc(contentLength);
+  if (!buffer) {
+    Serial.println("Pack: no memory for download");
+    http.end();
+    return false;
+  }
+
+  WiFiClient* stream = http.getStreamPtr();
+  size_t downloaded = 0;
+  unsigned long downloadStart = millis();
+
+  while (downloaded < (size_t)contentLength) {
+    if (millis() - downloadStart > DOWNLOAD_TIMEOUT) {
+      Serial.println("Pack: timeout waiting for stream data");
+      break;
+    }
+    size_t available = stream->available();
+    if (available > 0) {
+      size_t toRead = min(available, (size_t)(contentLength - downloaded));
+      size_t read = stream->readBytes(buffer + downloaded, toRead);
+      downloaded += read;
+      showDownloadProgress(40 + (int)(downloaded * 50 / contentLength),
+                           "Local artwork...");
+    }
+    screenshotServer.handleClient();
+    delay(1);
+  }
+
+  http.end();
+
+  if (downloaded != (size_t)contentLength ||
+      downloaded < 4 || buffer[0] != 0xFF || buffer[1] != 0xD8) {
+    Serial.println("Pack: incomplete or not a JPEG");
+    free(buffer);
+    return false;
+  }
+
+  showDownloadProgress(90, "Saving...");
+
+  File file = SD.open(savePath, FILE_WRITE);
+  if (!file) {
+    Serial.printf("Pack: cannot create file: %s\n", savePath.c_str());
+    free(buffer);
+    return false;
+  }
+  size_t written = file.write(buffer, downloaded);
+  file.close();
+  free(buffer);
+
+  if (written != downloaded) {
+    Serial.printf("Pack: write error %d/%d bytes\n", written, downloaded);
+    SD.remove(savePath);
+    return false;
+  }
+
+  Serial.printf("Pack: local artwork saved: %s (%d bytes)\n",
+                savePath.c_str(), written);
+  showDownloadProgress(100, "Complete!");
+  return true;
+}
+
 bool downloadImageFromScreenScraper(String imageUrl, String savePath) {
   // Add resizing parameters to ScreenScraper URL
   String resizedUrl = imageUrl;
@@ -10232,6 +10335,22 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
   Serial.printf("Game: '%s' | Core: '%s'\n", gameName.c_str(), coreName.c_str());
   Serial.printf("Free heap at start: %d bytes\n", ESP.getFreeHeap());
   
+  // Local-first: try the pack installed on the MiSTer before any network
+  // traffic. Deliberately ABOVE the systemId guard below: the pack is keyed by
+  // the game's own identity, not by a ScreenScraper system id, so it can cover
+  // cores this firmware has no mapping for. On a miss nothing is consumed and
+  // the ScreenScraper path below runs untouched.
+  {
+    String packExactName = getExactFileName(gameName);
+    String packCore = coreName;
+    packCore.toLowerCase();
+    String packSavePath = getSavePath(packExactName, packCore);
+    if (downloadArtworkFromPack(packSavePath)) {
+      Serial.println("Artwork served from the local pack - no ScreenScraper call");
+      return true;
+    }
+  }
+
   // Early exit: if the core isn't mapped to a ScreenScraper system, there's
   // no point asking MiSTer for ROM details 
   // the search would fail anyway. Mark search exhausted.
