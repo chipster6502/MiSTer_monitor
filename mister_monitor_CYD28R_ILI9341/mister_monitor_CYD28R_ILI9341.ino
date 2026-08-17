@@ -164,6 +164,10 @@ int  DEBUG_FORCE_LEVEL            = 0;
 bool ENABLE_AUTO_DOWNLOAD         = true;
 int  MAX_IMAGE_SIZE               = 500000;
 int  DOWNLOAD_TIMEOUT             = 30000;
+// Streaming window for artwork transfers. Deliberately a compile-time
+// constant and not a config knob: the point of it is that no allocation in
+// the artwork path scales with the image. Matches JPEGDEC's own file window.
+#define PACK_STREAM_CHUNK           2048
 int  SCROLL_SPEED_MS              = 300;
 int  SCROLL_PAUSE_START_MS        = 2000;
 int  SCROLL_PAUSE_END_MS          = 3000;
@@ -8438,15 +8442,30 @@ bool downloadArtworkFromPack(String savePath) {
 
   showDownloadProgress(40, "Local artwork...");
 
-  uint8_t* buffer = (uint8_t*)malloc(contentLength);
-  if (!buffer) {
-    Serial.println("Pack: no memory for download");
+  // Stream straight onto the card. Buffering the whole image first capped
+  // artwork at the largest CONTIGUOUS free block rather than at free heap --
+  // ~110 KB against ~158 KB free on a fragmented heap, which rejected a 158 KB
+  // cover the card held perfectly well. That ceiling also moves with whatever
+  // ran before, so it failed intermittently and silently. A fixed window has
+  // no ceiling at all.
+  //
+  // Streaming costs the atomicity the old buffer gave for free: the file used
+  // to appear only once fully validated. Write under a temporary name and
+  // rename on success, so a power cut mid-transfer cannot leave a truncated
+  // JPEG that every later boot would trust as valid cache.
+  String tmpPath = savePath + ".tmp";
+  File file = SD.open(tmpPath, FILE_WRITE);
+  if (!file) {
+    Serial.printf("Pack: cannot create file: %s\n", tmpPath.c_str());
     http.end();
     return false;
   }
 
+  static uint8_t chunk[PACK_STREAM_CHUNK];
   WiFiClient* stream = http.getStreamPtr();
   size_t downloaded = 0;
+  bool headerOk  = false;
+  bool failed    = false;
   unsigned long downloadStart = millis();
 
   while (downloaded < (size_t)contentLength) {
@@ -8456,45 +8475,56 @@ bool downloadArtworkFromPack(String savePath) {
     }
     size_t available = stream->available();
     if (available > 0) {
-      size_t toRead = min(available, (size_t)(contentLength - downloaded));
-      size_t read = stream->readBytes(buffer + downloaded, toRead);
-      downloaded += read;
-      showDownloadProgress(40 + (int)(downloaded * 50 / contentLength),
-                           "Local artwork...");
+      size_t toRead = min(available, (size_t)PACK_STREAM_CHUNK);
+      toRead = min(toRead, (size_t)contentLength - downloaded);
+      size_t read = stream->readBytes(chunk, toRead);
+      if (read > 0) {
+        // Validate the signature on the first bytes that arrive, so a wrong
+        // body is dropped before it costs a full transfer.
+        if (downloaded == 0) {
+          headerOk = (read >= 2 && chunk[0] == 0xFF && chunk[1] == 0xD8);
+          if (!headerOk) {
+            Serial.println("Pack: response is not a JPEG");
+            failed = true;
+            break;
+          }
+        }
+        if (file.write(chunk, read) != read) {
+          Serial.println("Pack: SD write error");
+          failed = true;
+          break;
+        }
+        downloaded += read;
+        showDownloadProgress(40 + (int)(downloaded * 50 / contentLength),
+                             "Local artwork...");
+      }
     }
     screenshotServer.handleClient();
     delay(1);
   }
 
+  file.close();
   http.end();
 
-  if (downloaded != (size_t)contentLength ||
-      downloaded < 4 || buffer[0] != 0xFF || buffer[1] != 0xD8) {
-    Serial.println("Pack: incomplete or not a JPEG");
-    free(buffer);
+  if (failed || !headerOk || downloaded != (size_t)contentLength) {
+    Serial.printf("Pack: incomplete download %d/%d bytes\n",
+                  (int)downloaded, contentLength);
+    SD.remove(tmpPath);
     return false;
   }
 
-  showDownloadProgress(90, "Saving...");
-
-  File file = SD.open(savePath, FILE_WRITE);
-  if (!file) {
-    Serial.printf("Pack: cannot create file: %s\n", savePath.c_str());
-    free(buffer);
-    return false;
-  }
-  size_t written = file.write(buffer, downloaded);
-  file.close();
-  free(buffer);
-
-  if (written != downloaded) {
-    Serial.printf("Pack: write error %d/%d bytes\n", written, downloaded);
-    SD.remove(savePath);
+  // f_rename refuses an existing destination, so clear it first. Only now does
+  // the artwork become visible under the name the cache looks up.
+  if (SD.exists(savePath)) SD.remove(savePath);
+  if (!SD.rename(tmpPath, savePath)) {
+    Serial.printf("Pack: cannot rename %s -> %s\n",
+                  tmpPath.c_str(), savePath.c_str());
+    SD.remove(tmpPath);
     return false;
   }
 
   Serial.printf("Pack: local artwork saved: %s (%d bytes)\n",
-                savePath.c_str(), written);
+                savePath.c_str(), (int)downloaded);
   showDownloadProgress(100, "Complete!");
   return true;
 }
@@ -8617,6 +8647,41 @@ bool downloadImageFromScreenScraper(String imageUrl, String savePath) {
   }
 }
 
+// ========== JPEGDEC FILE CALLBACKS ==========
+// Let JPEGDEC pull from the card through its own internal window instead of
+// requiring the whole file in one contiguous heap block. The handle has to
+// outlive the call, hence the static File.
+
+static File g_jpegSDFile;
+
+static void * jpegSDOpen(const char *filename, int32_t *size) {
+  // A failed open() never reaches the close callback, so reclaim any handle
+  // left behind before taking a new one -- otherwise descriptors leak until
+  // the card stops handing them out.
+  if (g_jpegSDFile) g_jpegSDFile.close();
+  g_jpegSDFile = SD.open(filename);
+  if (!g_jpegSDFile) return NULL;
+  *size = (int32_t)g_jpegSDFile.size();
+  return &g_jpegSDFile;
+}
+
+static void jpegSDClose(void *handle) {
+  File *f = (File *)handle;
+  if (f) f->close();
+}
+
+static int32_t jpegSDRead(JPEGFILE *handle, uint8_t *buffer, int32_t length) {
+  File *f = (File *)handle->fHandle;
+  if (!f) return 0;
+  return f->read(buffer, length);
+}
+
+static int32_t jpegSDSeek(JPEGFILE *handle, int32_t position) {
+  File *f = (File *)handle->fHandle;
+  if (!f) return 0;
+  return f->seek(position) ? position : 0;
+}
+
 // ========== DISPLAY WITH AUTOMATIC CENTERING ==========
 
 bool displayCoreImageCentered(String imagePath) {
@@ -8630,57 +8695,45 @@ bool displayCoreImageCentered(String imagePath) {
   // Clear screen with black
   Lcd.fillScreen(THEME_BLACK);
   
-  // Open and verify image file
+  // Probe size and signature only. The decode itself reads from the card, so
+  // nothing here allocates on the image's scale: openRAM() used to demand the
+  // whole file in one contiguous block and failed on covers the card held fine.
   File imageFile = SD.open(imagePath);
   if (!imageFile) {
     Serial.println("Error opening image file");
     return false;
   }
-  
+
   size_t fileSize = imageFile.size();
+  uint8_t header[4] = {0, 0, 0, 0};
+  size_t headerRead = imageFile.read(header, 4);
+  imageFile.close();
+
   if (fileSize == 0 || fileSize > 500000) {
     Serial.println("Invalid image file size");
-    imageFile.close();
     return false;
   }
-  
-  // Read image to buffer
-  uint8_t *buffer = (uint8_t*)malloc(fileSize);
-  if (!buffer) {
-    Serial.println("No memory for image buffer");
-    imageFile.close();
-    return false;
-  }
-  
-  size_t bytesRead = imageFile.read(buffer, fileSize);
-  imageFile.close();
-  
-  if (bytesRead != fileSize) {
-    Serial.println("Error reading image file");
-    free(buffer);
-    return false;
-  }
-  
+
   // Verify valid JPEG
-  if (buffer[0] != 0xFF || buffer[1] != 0xD8) {
+  if (headerRead != 4 || header[0] != 0xFF || header[1] != 0xD8) {
     Serial.println("Not a valid JPEG file");
-    free(buffer);
     return false;
   }
-  
+
   Serial.println("=== JPEG DECODE DIAGNOSTIC ===");
   Serial.printf("File: %s\n", imagePath.c_str());
-  Serial.printf("Buffer size: %d bytes\n", fileSize);
-  Serial.printf("JPEG signature: %02X %02X %02X %02X\n", buffer[0], buffer[1], buffer[2], buffer[3]);
-  Serial.printf("Free heap before openRAM: %d bytes\n", ESP.getFreeHeap());
-  
+  Serial.printf("File size: %d bytes (decoded from SD)\n", (int)fileSize);
+  Serial.printf("JPEG signature: %02X %02X %02X %02X\n", header[0], header[1], header[2], header[3]);
+  Serial.printf("Free heap before open: %d bytes\n", ESP.getFreeHeap());
+
   // Ensure clean state
   jpeg.close();
-  
+
   // Decode with automatic centering
-  Serial.println("Calling jpeg.openRAM()...");
-  if (jpeg.openRAM(buffer, fileSize, jpegDrawCallback)) {
-    Serial.println("jpeg.openRAM() SUCCESS");
+  Serial.println("Calling jpeg.open() from SD...");
+  if (jpeg.open(imagePath.c_str(), jpegSDOpen, jpegSDClose,
+                jpegSDRead, jpegSDSeek, jpegDrawCallback)) {
+    Serial.println("jpeg.open() SUCCESS");
     int imgW = jpeg.getWidth();
     int imgH = jpeg.getHeight();
 
@@ -8741,7 +8794,7 @@ bool displayCoreImageCentered(String imagePath) {
     
     jpeg.setPixelType(RGB565_BIG_ENDIAN);
     
-    Serial.printf("Image: %dx%d, Buffer: %d bytes\n", imgW, imgH, fileSize);
+    Serial.printf("Image: %dx%d, File: %d bytes\n", imgW, imgH, (int)fileSize);
     Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
     
     // ALWAYS decode at (0,0) - centering is applied in callback
@@ -8756,7 +8809,6 @@ bool displayCoreImageCentered(String imagePath) {
     Serial.printf("Heap after: %d bytes\n", ESP.getFreeHeap());
     
     jpeg.close();
-    free(buffer);
     
     if (success) {
       Serial.printf("Image displayed centered: %dx%d at (%d,%d)\n", 
@@ -8768,7 +8820,6 @@ bool displayCoreImageCentered(String imagePath) {
     }
   } else {
     Serial.println("Error opening JPEG decoder");
-    free(buffer);
     return false;
   }
 }
