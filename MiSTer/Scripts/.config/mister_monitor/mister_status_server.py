@@ -237,6 +237,7 @@ CORE_NAME_MAPPING = {
     'NEOGEO': 'Neo-Geo',
     'NeoGeo-CD': 'Neo-Geo CD',
     'NeoGeoPocket': 'Neo-Geo Pocket',
+    'NeoGeoPocket-Color': 'Neo-Geo Pocket Color',
     'cdi':          'Philips CD-i',
     'colecovision': 'Colecovision',
     'jaguar':       'Atari Jaguar',
