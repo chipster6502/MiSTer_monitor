@@ -570,8 +570,13 @@ static uint32_t g_fineXStep  = 1u << 16;
 static uint32_t g_fineYStep  = 1u << 16;
 static int      g_fineDstW   = 0;
 static int      g_fineDstH   = 0;
-// One destination row at a time. 640 bytes of .bss, versus the ~168 KB a
-// whole-image resample would need against ~110 KB of contiguous heap.
+// A block is at most one MCU, so its destination rectangle never exceeds
+// 16x16 whatever the scale. 512 bytes buys one display transaction per block
+// instead of one per row.
+#define FINE_BLOCK_MAX 16
+static uint16_t g_fineBlock[FINE_BLOCK_MAX * FINE_BLOCK_MAX];
+static uint16_t g_fineCol[FINE_BLOCK_MAX];
+// Kept for the oversized-block fallback only.
 static uint16_t g_fineRow[TARGET_WIDTH];
 
 // ========== TOUCH BUTTON STRUCTURE ==========
@@ -3840,6 +3845,44 @@ int jpegDrawCallback(JPEGDRAW *pDraw) {
     if (dyFirst > dyLast || dxFirst > dxLast) return 1;   // nothing lands here
 
     const int runLen = dxLast - dxFirst + 1;
+    const int rowCnt = dyLast - dyFirst + 1;
+    const int outX   = dxFirst + g_jpegOffsetX;
+    const int outY   = dyFirst + g_jpegOffsetY;
+
+    if (outX < 0 || outY < 0 || outX + runLen > TARGET_WIDTH ||
+        outY + rowCnt > TARGET_HEIGHT) {
+      return 1;
+    }
+
+    // Resolve the source column for each destination column ONCE per block
+    // rather than once per row: the mapping does not change down the block.
+    if (runLen <= FINE_BLOCK_MAX) {
+      for (int i = 0; i < runLen; i++) {
+        int sx = (int)(((uint64_t)(dxFirst + i) * g_fineXStep) >> 16) - blockX;
+        if (sx < 0) sx = 0;
+        if (sx > blockW - 1) sx = blockW - 1;
+        g_fineCol[i] = (uint16_t)sx;
+      }
+    }
+
+    // One push for the whole block. Emitting a row at a time cost ~13x the
+    // display transactions, which the DSI panel felt badly.
+    if (runLen <= FINE_BLOCK_MAX && rowCnt <= FINE_BLOCK_MAX) {
+      uint16_t *dst = g_fineBlock;
+      for (int dy = dyFirst; dy <= dyLast; dy++) {
+        int srcY = (int)(((uint64_t)dy * g_fineYStep) >> 16) - blockY;
+        if (srcY < 0) srcY = 0;
+        if (srcY > blockH - 1) srcY = blockH - 1;
+        const uint16_t *srcRow = pDraw->pPixels + (srcY * blockW);
+        for (int i = 0; i < runLen; i++) *dst++ = srcRow[g_fineCol[i]];
+      }
+      Lcd.pushImage(outX, outY, runLen, rowCnt, g_fineBlock);
+      return 1;
+    }
+
+    // Fallback: a block wider or taller than one MCU. Should not happen with
+    // setMaxOutputSize(1), but guessing wrong here would write past the buffer,
+    // so fall back to the row-at-a-time path instead of trusting the decoder.
     for (int dy = dyFirst; dy <= dyLast; dy++) {
       int srcY = (int)(((uint64_t)dy * g_fineYStep) >> 16) - blockY;
       if (srcY < 0) srcY = 0;
@@ -3851,12 +3894,7 @@ int jpegDrawCallback(JPEGDRAW *pDraw) {
         if (srcX > blockW - 1) srcX = blockW - 1;
         g_fineRow[i] = srcRow[srcX];
       }
-      int outX = dxFirst + g_jpegOffsetX;
-      int outY = dy + g_jpegOffsetY;
-      if (outX >= 0 && outY >= 0 &&
-          outX + runLen <= TARGET_WIDTH && outY < TARGET_HEIGHT) {
-        Lcd.pushImage(outX, outY, runLen, 1, g_fineRow);
-      }
+      Lcd.pushImage(outX, dy + g_jpegOffsetY, runLen, 1, g_fineRow);
     }
     return 1;
   }
@@ -8790,12 +8828,40 @@ bool displayCoreImageCentered(String imagePath) {
 
   // Ensure clean state
   jpeg.close();
-
-  // Decode with automatic centering
-  Serial.println("Calling jpeg.open() from SD...");
-  if (jpeg.open(imagePath.c_str(), jpegSDOpen, jpegSDClose,
-                jpegSDRead, jpegSDSeek, jpegDrawCallback)) {
-    Serial.println("jpeg.open() SUCCESS");
+  
+  // Prefer RAM. JPEGDEC's file window is 2 KB but refills PARTIALLY -- it keeps
+  // what it has not consumed and asks only for the gap -- so decoding from the
+  // card costs roughly a thousand small reads on a large asset. Reading the
+  // file in one go and decoding from memory is what it always was.
+  //
+  // The failing allocation IS the test for "does it fit": no invented
+  // threshold, nothing to keep in sync per board. Only images too large for a
+  // contiguous block take the slow path, which is the case that had no path at
+  // all before.
+  uint8_t *buffer = (uint8_t*)malloc(fileSize);
+  if (buffer) {
+    File rf = SD.open(imagePath);
+    if (!rf || rf.read(buffer, fileSize) != (int)fileSize) {
+      if (rf) rf.close();
+      free(buffer);
+      buffer = NULL;   // fall through to the card
+    } else {
+      rf.close();
+    }
+  }
+  
+  bool jpegOpened;
+  if (buffer) {
+    Serial.println("Calling jpeg.openRAM()...");
+    jpegOpened = jpeg.openRAM(buffer, fileSize, jpegDrawCallback);
+  } else {
+    Serial.println("Calling jpeg.open() from SD (image exceeds contiguous heap)...");
+    jpegOpened = jpeg.open(imagePath.c_str(), jpegSDOpen, jpegSDClose,
+                           jpegSDRead, jpegSDSeek, jpegDrawCallback);
+  }
+  
+  if (jpegOpened) {
+    Serial.println("JPEG decoder ready");
     int imgW = jpeg.getWidth();
     int imgH = jpeg.getHeight();
 
@@ -8918,6 +8984,10 @@ bool displayCoreImageCentered(String imagePath) {
     g_jpegOffsetY = offsetY;
     Serial.printf("Set global callback offsets: (%d,%d)\n", g_jpegOffsetX, g_jpegOffsetY);
     
+    // One MCU per callback. Required whenever the fine path runs -- including
+    // at divisor 1, where scaleOpt is 0 -- because the block buffer is sized
+    // for a single MCU and nothing else bounds what the decoder hands over.
+    if (scaleOpt != 0 || g_fineActive) jpeg.setMaxOutputSize(1);
     jpeg.setPixelType(RGB565_BIG_ENDIAN);
     
     Serial.printf("Image: %dx%d, File: %d bytes\n", imgW, imgH, (int)fileSize);
@@ -8936,6 +9006,7 @@ bool displayCoreImageCentered(String imagePath) {
     Serial.printf("Heap after: %d bytes\n", ESP.getFreeHeap());
     
     jpeg.close();
+    if (buffer) free(buffer);
     
     if (success) {
       Serial.printf("Image displayed centered: %dx%d at (%d,%d)\n", 
@@ -8947,6 +9018,7 @@ bool displayCoreImageCentered(String imagePath) {
     }
   } else {
     Serial.println("Error opening JPEG decoder");
+    if (buffer) free(buffer);
     return false;
   }
 }
