@@ -1,3 +1,5 @@
+
+
 # MiSTer FPGA Monitor
 
 A status monitor for the MiSTer FPGA platform. Displays the currently loaded
@@ -95,7 +97,9 @@ Installation has two parts: the **server** on the MiSTer and the **firmware**
 on the display.
 
 - **MiSTer side** — install the server via the **MiSTer Downloader database**
-  (recommended, auto-updating).
+  (recommended, auto-updating), and make sure `log_file_entry=1` is set under
+  the `[MiSTer]` section of `MiSTer.ini` so the server can detect core/game
+  changes.
 - **Display side** — the easiest path is the **web flasher**: open
   [the flasher page](https://chipster6502.github.io/MiSTer_monitor/flasher/)
   in Chrome or Edge on desktop, connect the display via USB, and flash the
