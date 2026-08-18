@@ -1273,6 +1273,21 @@ def _neogeo_romset_label(path, corename):
     return name if name in names else ''
 
 
+def _is_sd_root_file(path):
+    """True when the path is a file sitting directly in the card's root.
+
+    Root holds configuration, scripts and documentation; every game lives at
+    least one directory down. Both mount points are covered because a path can
+    be resolved through either.
+    """
+    try:
+        parent = os.path.dirname(os.path.normpath(path)).rstrip('/')
+    except Exception:
+        return False
+    return parent in ('/media/fat', '/media/usb0', '/media/usb1', '/media/usb2',
+                      '/media/usb3', '/media/usb4', '/media/usb5', '')
+
+
 def _neogeo_romset_dir(path, corename):
     """
     The romset id when `path` is a romset CONTAINER — an unzipped Darksoft
@@ -3790,6 +3805,15 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                         print(f"❌ ZIP not found via {source_name}: {zip_path} - trying next source")
                         continue
                 else:
+                    if os.path.isfile(final_path) and _is_sd_root_file(final_path):
+                        # A game is never loose in the card's root; that is where
+                        # MiSTer.ini, scripts and readmes live. Reached when a bare
+                        # name picks up a ROM extension by accident -- 'ROMS' under
+                        # the MegaDrive core resolving to the readme ROMS.md, which
+                        # would otherwise be hashed and passed off as a real game.
+                        print(f"🛡️ {source_name} resolved into the SD root, not a "
+                              f"game: {final_path}")
+                        continue
                     if os.path.isfile(final_path):
                         print(f"✅ ROM file found via {source_name}: {final_path}")
                         return final_path
