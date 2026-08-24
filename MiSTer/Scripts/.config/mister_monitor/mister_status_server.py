@@ -3206,7 +3206,23 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_file:
                 zip_files = zip_file.namelist()
-                
+
+                # Strategy 0: internal_path is empty when the reported path IS
+                # the zip itself with nothing after it (is_zip_path() has no
+                # trailing "/innerfile" to split off) - some cores report just
+                # the zip path for a single-ROM archive rather than
+                # "zip/file.ext". Every strategy below is derived from
+                # internal_path, so they can never match when it's "": none of
+                # them compare against "the zip has exactly one entry" at all.
+                # That case has zero ambiguity, so resolve it directly instead
+                # of falling through to five guaranteed-empty comparisons.
+                if not internal_path and len(zip_files) == 1:
+                    only = zip_files[0]
+                    info = zip_file.getinfo(only)
+                    filename = os.path.basename(only)
+                    print(f"✅ File info (sole entry, no internal path given): {filename} ({info.file_size:,} bytes)")
+                    return filename, info.file_size, info.CRC
+
                 # Try multiple search strategies
                 search_paths = [
                     internal_path,
