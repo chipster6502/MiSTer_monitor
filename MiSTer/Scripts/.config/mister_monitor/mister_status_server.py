@@ -4261,6 +4261,14 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 "timestamp": int(time.time())
             }
         
+        # Some cores report the archive alone for a single-ROM zip. Resolve it to
+        # the sole member so the strategies and the RA layer see a normal member.
+        if not internal_path:
+            _members, _, _ = _zip_entries(resolved_zip_path)
+            if len(_members) == 1:
+                internal_path = next(iter(_members.values()))
+                print(f"📦 Sole member resolved: {internal_path}")
+
         try:
             print(f"📂 Opening ZIP: {resolved_zip_path}")
             
