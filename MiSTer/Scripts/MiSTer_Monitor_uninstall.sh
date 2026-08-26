@@ -25,7 +25,7 @@
 # NOT touch the Downloader's state. This is the safe, reversible model used
 # across the MiSTer ecosystem.
 #
-#   - Reactivate later: run 'MiSTer_Monitor_setup' again (no re-download).
+#   - Reactivate later: run 'MiSTer_Monitor' again (no re-download).
 #   - Remove completely: run this, then delete the drop-in
 #     'downloader_chipster6502_MiSTer_monitor_DB.ini' from the root of your SD
 #     so the Downloader stops tracking/updating the files.
@@ -37,11 +37,15 @@
 set -e
 
 SCRIPTS_DIR="/media/fat/Scripts"
-START_SCRIPT="${SCRIPTS_DIR}/start_monitor.sh"
+START_SCRIPT="${SCRIPTS_DIR}/MiSTer_Monitor.sh"
 STARTUP_FILE="/media/fat/linux/user-startup.sh"
 
-STARTUP_COMMENT="# MiSTer Monitor — added by MiSTer_Monitor_setup.sh"
-STARTUP_LINE="${START_SCRIPT} start"
+STARTUP_COMMENT="# MiSTer Monitor — added by MiSTer_Monitor.sh"
+STARTUP_LINE="bash ${START_SCRIPT} start"
+
+# Auto-start lines written by earlier versions, removed as well.
+LEGACY_COMMENT="# MiSTer Monitor — added by MiSTer_Monitor_setup.sh"
+LEGACY_LINE="${SCRIPTS_DIR}/start_monitor.sh start"
 
 echo "MiSTer Monitor uninstall (deactivate)"
 echo "====================================="
@@ -50,7 +54,7 @@ echo
 # ===== 1. Stop the server =====
 if [ -f "${START_SCRIPT}" ]; then
     echo "Stopping server..."
-    "${START_SCRIPT}" stop 2>/dev/null || true
+    bash "${START_SCRIPT}" stop 2>/dev/null || true
     sleep 1
 fi
 
@@ -58,11 +62,14 @@ fi
 # Remove both the comment line and the command line, leaving everything else
 # in the file untouched.
 if [ -f "${STARTUP_FILE}" ]; then
-    if grep -qF "${STARTUP_LINE}" "${STARTUP_FILE}"; then
+    if grep -qF "${STARTUP_LINE}" "${STARTUP_FILE}" \
+       || grep -qF "${LEGACY_LINE}" "${STARTUP_FILE}"; then
         echo "Removing auto-start line from user-startup.sh..."
         sed -i \
             -e "\|^${STARTUP_COMMENT}\$|d" \
             -e "\|${STARTUP_LINE}|d" \
+            -e "\|^${LEGACY_COMMENT}\$|d" \
+            -e "\|${LEGACY_LINE}|d" \
             "${STARTUP_FILE}"
     else
         echo "No auto-start line found in user-startup.sh (already removed)."
@@ -82,7 +89,7 @@ echo
 echo "The server is stopped and will no longer start on boot."
 echo
 echo "The program files were KEPT in place, so you can reactivate at any time"
-echo "by running 'MiSTer_Monitor_setup' from the Scripts menu — no re-download."
+echo "by running 'MiSTer_Monitor' from the Scripts menu — no re-download."
 echo
 echo "Notes:"
 echo "  - To remove MiSTer Monitor COMPLETELY, also delete the drop-in file"
