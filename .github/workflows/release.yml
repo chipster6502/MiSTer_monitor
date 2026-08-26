@@ -89,22 +89,22 @@ jobs:
         with:
           files: dist/*.bin
           body: |
-            ### Fixes
-
-            - **Frozen artwork fixed.** The server now resolves the running game from the OSD's own launch signals, corroborated against an actual core load, instead of trusting `/tmp` tracker state — which anything on the MiSTer can rewrite. Guards cover system folders, stale mirrors and folder displacement, so a mirrored path can no longer pin the display to the previous game.
-            - **Screenshot capture stays responsive during artwork downloads** (Tab5 and both 2.8" boards): the HTTP screenshot server is pumped through long transfers instead of timing out.
-            - **`mix` tokens reach the right API.** `mix1` and `mix2` in the media-order keys now map to ScreenScraper's `mixrbv1`/`mixrbv2`; plain `mix` keeps working as an alias of `mix2`.
-
             ### New
 
-            - **Version check on screen.** The server exposes its version in the snapshot and at `/status/version`; the firmware shows both versions in the HUD and turns the panel red while they differ. One half updated without the other now announces itself instead of failing silently — and an older server that sends no version keeps the display quiet rather than crying wolf.
-            - **`flip_display`** — new `[ui]` key on all five boards that rotates the panel *and the touch layer* 180° for cases that hold the board upside down (microSD slot at the bottom, for example). Landscape only, off by default.
-            - **Three more systems resolve** — Apple Macintosh LC, Nintendo Virtual Boy and the PCXT core's EGA variant now map to their ScreenScraper systems, both on the server and in the firmware's own fallback leg.
-            - **Core coverage keeps auditing itself** — the weekly bot's `CONF_STR` mapping proposal was merged with proper display names, and the memtest variants, 3DO and the Paprium/VGMDrive rbf aliases are triaged in `known_cores.json`.
+            - **Setup and launcher merged.** `MiSTer_Monitor_setup` and `start_monitor` are now a single **`MiSTer_Monitor`** entry in the Scripts menu: run it to configure auto-start and restart the server. It no longer needs the executable bit, so a copy made over the network works too. Existing installs keep running untouched and migrate the first time it is run.
+            - **Sharper artwork, and no more size ceiling.** Images are streamed to the SD card and decoded from file instead of being held whole in RAM, which lifts the contiguous-heap limit that made large covers fail, and each one is resampled to the exact destination size rather than the nearest power-of-two scale.
+
+            ### Fixes
+
+            - **Single-ROM zips resolve.** A core that reports the archive with no member after it left the ROM unidentified, which also meant RetroAchievements hashed the whole archive instead of the ROM inside. Reported by @kadafi916 in #18.
+            - **Neo Geo Pocket Color** is its own system rather than sharing Neo Geo's, and the newer NGPC core — which reports `NGPC` instead of `NeoGeoPocket-Color` — reaches it too.
+            - **The running game is identified more carefully.** A ROM resolved into the root of the SD card, a browsed folder reaching identity through `CURRENTPATH`, and zip virtual paths mid-launch are all handled now; arcade sets resolve by `.mra` setname, Neo Geo romsets by the id embedded in the filename, and rom-details candidates are corroborated against the committed game before being trusted.
+            - **`known_cores.json` was malformed** and the weekly core audit could not read it.
 
             ### Notes
 
-            - Update both halves as usual: firmware from the web flasher, server through *Update All* / Downloader. If the version panel turns red afterwards, one of the two did not update — that is the new check doing its job.
+            - The display's microSD card must be formatted as **FAT32**. exFAT is not read, and cards over 32 GB usually ship as exFAT.
+            - Update both halves as usual: firmware from the web flasher, server through *Update All* / Downloader. If the version panel turns red afterwards, one of the two did not update.
 
       - name: Build flasher site
         run: |
