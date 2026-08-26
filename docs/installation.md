@@ -37,14 +37,14 @@ everything with a single setup step.
    MiSTer SD card** (`/media/fat/`).
 3. Run *Update All* or *Downloader* from your MiSTer Scripts menu.
    The Downloader installs these files automatically:
-   - `/media/fat/Scripts/start_monitor.sh`
-   - `/media/fat/Scripts/MiSTer_Monitor_setup.sh`
+   - `/media/fat/Scripts/MiSTer_Monitor.sh`
    - `/media/fat/Scripts/MiSTer_Monitor_uninstall.sh`
    - `/media/fat/Scripts/.config/mister_monitor/mister_status_server.py`
-4. Back in the Scripts menu, run **`MiSTer_Monitor_setup`** once.
-   This makes the launcher executable, enables auto-start on boot, ensures
-   `log_file_entry=1` in `MiSTer.ini`, and starts the server. You can run it
-   again at any time; it is safe to repeat.
+4. Back in the Scripts menu, run **`MiSTer_Monitor`** once.
+   This enables auto-start on boot, ensures `log_file_entry=1` in
+   `MiSTer.ini`, and starts the server. You can run it again at any time; it
+   is safe to repeat, and it restarts the server so a freshly downloaded
+   update takes effect right away.
 
 That's it. Future updates to the server are picked up automatically whenever
 you run *Update All* or *Downloader* — no need to run the setup again unless
@@ -56,7 +56,7 @@ you have deactivated the monitor. Database repository:
 Run **`MiSTer_Monitor_uninstall`** from the Scripts menu. This *deactivates*
 the monitor: it stops the server and removes the auto-start entry, but leaves
 the program files in place so you can re-enable it later by running
-`MiSTer_Monitor_setup` again — no re-download needed.
+`MiSTer_Monitor` again — no re-download needed.
 
 To remove MiSTer Monitor **completely**, after running the uninstall script
 also delete the drop-in file
@@ -79,17 +79,13 @@ automatically.
 1. Copy `MiSTer/Scripts/.config/mister_monitor/mister_status_server.py` to
    `/media/fat/Scripts/.config/mister_monitor/` on your MiSTer (create the
    directory if it doesn't exist).
-2. Copy `MiSTer/Scripts/start_monitor.sh` to `/media/fat/Scripts/`.
-3. Make the script executable:
-```bash
-   chmod +x /media/fat/Scripts/start_monitor.sh
-```
-4. Add the following line to `/media/fat/linux/user-startup.sh` to launch
+2. Copy `MiSTer/Scripts/MiSTer_Monitor.sh` to `/media/fat/Scripts/`.
+3. Add the following line to `/media/fat/linux/user-startup.sh` to launch
    the server automatically on boot:
 ```bash
-   /media/fat/Scripts/start_monitor.sh start
+   bash /media/fat/Scripts/MiSTer_Monitor.sh start
 ```
-5. Enable log_file_entry in `/media/fat/MiSTer.ini` by setting (under
+4. Enable log_file_entry in `/media/fat/MiSTer.ini` by setting (under
    the `[MiSTer]` section):
 ```ini
 log_file_entry=1
