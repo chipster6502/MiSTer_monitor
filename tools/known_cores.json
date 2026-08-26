@@ -1,5 +1,5 @@
 {
-  "comment": "Cores already looked at, keyed on the .rbf name the audit sees. Presence here means 'we have seen it and decided', NOT 'supported' - and NOT that the mapping key matches: some cores ship an .rbf whose stem differs from the CORENAME they write, so both spellings appear (Paprium and MegaDrive_Paprium -> PapriumMD; MegaVGMdrive_MiSTer -> MegaVGMDrive). Do not 'deduplicate' those.",
+  "comment": "Cores already triaged, keyed on the .rbf name. Means 'seen and decided', not 'supported'. An .rbf stem can differ from the CORENAME it writes, so both spellings may appear - do not deduplicate.",
   "updated": "2026-07-30",
   "triaged": [
     "3DO",
@@ -88,6 +88,7 @@
     "N64_80MHz",
     "NES",
     "NES_NativeCVBS",
+    "NGPC",
     "NeoGeo",
     "NeoGeoPocket",
     "NeoGeo_24MHz_cpu_only",
@@ -99,7 +100,7 @@
     "Oric",
     "PC88",
     "PCXT",
-    "PCXT-EGA"
+    "PCXT-EGA",
     "PCjr",
     "PDP1",
     "PET2001",
@@ -142,7 +143,7 @@
     "VT52",
     "Vector-06C",
     "Vectrex",
-    "VirtualBoy"
+    "VirtualBoy",
     "WonderSwan",
     "X68000",
     "ZX-Spectrum",
