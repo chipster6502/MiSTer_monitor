@@ -44,7 +44,7 @@ from urllib.parse import urlparse
 # is on disk. Bump this on every release, together with FIRMWARE_VERSION in
 # the sketches.
 # =============================================================================
-SERVER_VERSION = "2.7.1"
+SERVER_VERSION = "2.8.0"
 
 # RetroAchievements status resolver (sibling module). Imported lazily-safe:
 # if the file is missing the server still starts; the route reports the error.
