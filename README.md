@@ -83,7 +83,7 @@ See `docs/PORTING.md` for porting guidelines.
 **Hardware**
 - Supported ESP32-based display
 - MiSTer FPGA with network connectivity
-- microSD card for the display (image storage)
+- microSD card for the display (image storage), formatted as **FAT32** — exFAT is not read by the display
 
 **Software**
 - [ScreenScraper](https://www.screenscraper.fr) member account (free, instant signup)

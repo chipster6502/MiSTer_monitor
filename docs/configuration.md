@@ -10,6 +10,10 @@
 
 ## SD Card content
 
+The microSD card must be formatted as **FAT32**. exFAT is not read by the
+display, and cards larger than 32 GB are often shipped as exFAT, so reformat
+before use if in doubt.
+
 The repository includes a ready-to-use microSD card layout under
 `SD_card_content/`. Choose the subfolder that matches your hardware,
 copy its contents to the **root** of your microSD card, and edit

@@ -115,7 +115,8 @@ The fastest way to install the firmware. No Arduino IDE, no compiling.
    and explains how to tell the CYD variants apart (2.8" ILI9341 vs ST7789,
    and 3.5" capacitive vs resistive). It installs the latest released firmware,
    with the ScreenScraper credentials already built in.
-5. Prepare the display's microSD card with `config.ini` and the asset images
+5. Prepare the display's microSD card — formatted as **FAT32**, not exFAT —
+   with `config.ini` and the asset images
    (see [`configuration.md`](configuration.md)), then insert it and power on.
 
 ### Alternative: Building from source (advanced)
@@ -213,8 +214,9 @@ The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
    - LovyanGFX
    - XPT2046_Touchscreen
    - JPEGDEC
-3. Copy `config.ini` to the root of the CYD's microSD card and fill in
-   your values (see [`configuration.md`](configuration.md)).
+3. Copy `config.ini` to the root of the CYD's microSD card — formatted as
+   **FAT32**, not exFAT — and fill in your values
+   (see [`configuration.md`](configuration.md)).
 4. Copy the required asset images to the microSD card (see the
    [Asset images](configuration.md#asset-images) section in
    `configuration.md`).
