@@ -1601,22 +1601,29 @@ def _pack_dir(system_folder):
     return ''
 
 
+def _pack_title(name):
+    """A dump name without its parenthesised tags, so collections that tag
+    differently still match: 'F-18 Hornet (NTSC) (Absolute) (1988)' and
+    'F-18 Hornet (USA)' both reduce to 'f-18 hornet'."""
+    return re.sub(r'\s+', ' ', re.sub(r'\([^)]*\)', ' ', name)).strip().lower()
+
+
 def _pack_index(pack_dir):
-    """(by_name, by_hash) for a pack folder. Empty dicts when there is no
-    index.tsv — a pack built before the index existed still resolves by exact
-    filename, so a missing index degrades rather than breaks."""
+    """(by_name, by_hash, by_title) for a pack folder. Empty dicts when there
+    is no index.tsv — a pack built before the index existed still resolves by
+    exact filename, so a missing index degrades rather than breaks."""
     index_path = os.path.join(pack_dir, 'index.tsv')
     try:
         stamp = os.stat(index_path).st_mtime_ns
     except OSError:
-        return {}, {}
+        return {}, {}, {}
 
     with _pack_index_lock:
         cached = _pack_index_cache.get(pack_dir)
         if cached and cached[0] == stamp:
-            return cached[1], cached[2]
+            return cached[1], cached[2], cached[3]
 
-    by_name, by_hash = {}, {}
+    by_name, by_hash, by_title = {}, {}, {}
     try:
         with io.open(index_path, encoding='utf-8', errors='replace') as f:
             for line in f:
@@ -1630,6 +1637,12 @@ def _pack_index(pack_dir):
                     continue
                 if name:
                     by_name[name.strip().lower()] = key
+                    # '' marks a title two different games share: matching it
+                    # would be a coin flip, so it is left unresolved.
+                    title = _pack_title(name)
+                    if title:
+                        by_title[title] = key if by_title.get(
+                            title, key) == key else ''
                 # Arcade rows carry no crc or size: a MAME set is a zip of many
                 # files, so there is no single hash for the set. Those rows
                 # resolve by name only, which is exact anyway — the .mra
@@ -1638,22 +1651,24 @@ def _pack_index(pack_dir):
                     by_hash['%s:%s' % (crc.strip().lower(), size.strip())] = key
     except Exception as e:
         print("\u26a0\ufe0f pack index read failed: %s" % e)
-        return {}, {}
+        return {}, {}, {}
 
     with _pack_index_lock:
-        _pack_index_cache[pack_dir] = (stamp, by_name, by_hash)
-    return by_name, by_hash
+        _pack_index_cache[pack_dir] = (stamp, by_name, by_hash, by_title)
+    return by_name, by_hash, by_title
 
 
 def _pack_lookup(pack_dir, key, crc, size):
     """(abs_path, resolved_key) for a game, ('', '') when the pack has no
-    image. Three steps, cheapest first:
+    image. Four steps, cheapest first:
 
       1. the exact key as a filename — the common case, one stat();
       2. the index by variant name — catches the user holding a dump the pack
          did not pick as representative;
       3. the index by crc+size — catches a renamed file, and costs nothing
-         extra because rom-details already computed the CRC.
+         extra because rom-details already computed the CRC;
+      4. the index by title alone — catches collections that tag their dumps
+         differently, and is skipped when the title is not unique.
     """
     if not pack_dir:
         return '', ''
@@ -1663,7 +1678,7 @@ def _pack_lookup(pack_dir, key, crc, size):
         if os.path.isfile(direct):
             return direct, key
 
-    by_name, by_hash = _pack_index(pack_dir)
+    by_name, by_hash, by_title = _pack_index(pack_dir)
 
     if key:
         mapped = by_name.get(key.strip().lower())
@@ -1676,6 +1691,13 @@ def _pack_lookup(pack_dir, key, crc, size):
     # lowercase. Normalise both sides rather than trusting either.
     if crc and size:
         mapped = by_hash.get('%s:%s' % (str(crc).strip().lower(), str(size).strip()))
+        if mapped:
+            candidate = os.path.join(pack_dir, mapped + '.jpg')
+            if os.path.isfile(candidate):
+                return candidate, mapped
+
+    if key:
+        mapped = by_title.get(_pack_title(key))
         if mapped:
             candidate = os.path.join(pack_dir, mapped + '.jpg')
             if os.path.isfile(candidate):
