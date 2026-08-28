@@ -4418,6 +4418,59 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
     # ========== HTTP RESPONSE HELPERS ==========
     
+    def _artwork_by_hash(self, seq_at_start):
+        """Second attempt at the pack image, using the CRC the state commit did
+        not have. Returns '' when there is nothing to serve.
+
+        Never raises, for the same reason _pack_annotate never does: artwork is
+        a nice-to-have and must not be able to break the endpoint.
+
+        Arcade is deliberately excluded. A MAME set is a zip of many files, so
+        it has no single hash; its pack key is the .mra setname, which the state
+        commit already resolves exactly. There is nothing a hash could add.
+        """
+        try:
+            with _state_lock:
+                if _state['seq'] != seq_at_start:
+                    return ''
+                if _state['is_arcade']:
+                    return ''
+                friendly = _state['game_system'] or _state['core']
+
+            system_folder = _PACK_SYSTEM.get(friendly, '')
+            if not system_folder:
+                return ''
+
+            details = self.get_rom_details()
+            if not details or not details.get('crc32'):
+                return ''
+
+            # Hashing is slow enough that another game can be committed while
+            # it runs; serving that result would be exactly the stale-artwork
+            # bug the freshness guard above exists to prevent.
+            with _state_lock:
+                if _state['seq'] != seq_at_start:
+                    return ''
+
+            key = os.path.splitext(details.get('filename') or '')[0]
+            found, resolved = _pack_lookup(_pack_dir(system_folder), key,
+                                           details.get('crc32'),
+                                           details.get('size'))
+            if not found:
+                return ''
+
+            with _state_lock:
+                if _state['seq'] != seq_at_start:
+                    return ''
+                _state['artwork_path'] = found
+                _state['artwork_seq'] = seq_at_start
+            print("\U0001f5bc\ufe0f local artwork by hash: %s/%s.jpg"
+                  % (system_folder, resolved))
+            return found
+        except Exception as e:
+            print("\u26a0\ufe0f local artwork hash lookup failed: %s" % e)
+            return ''
+
     def send_artwork_response(self):
         """Sends the pack image for the loaded game, or 404.
 
@@ -4428,7 +4481,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         """
         with _state_lock:
             artwork_path = _state.get('artwork_path', '')
-            fresh = (_state.get('artwork_seq', -1) == _state['seq'])
+            seq_at_start = _state['seq']
+            fresh = (_state.get('artwork_seq', -1) == seq_at_start)
 
         # Serving an image resolved for a PREVIOUS game is worse than serving
         # none: the display would cache confident-looking wrong artwork under
@@ -4436,6 +4490,18 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         if not fresh:
             self.send_error_response(404, 'Artwork not resolved for the current game')
             return
+
+        # Fresh but EMPTY is not the same as "no artwork exists". The state
+        # commit resolves the pack from the game's NAME alone -- the CRC does
+        # not exist yet at that moment -- so _pack_lookup's crc+size step, the
+        # one that catches a renamed or differently-tagged dump, never runs on
+        # this path. Those games used to be sent to ScreenScraper for an image
+        # already sitting on the card. Retry here with the hash instead: it
+        # costs once per game (get_rom_details caches and coalesces) and only
+        # when the cheap name lookup has already missed, which is strictly
+        # cheaper than the network round trip it replaces.
+        if not artwork_path:
+            artwork_path = self._artwork_by_hash(seq_at_start)
 
         if not artwork_path or not os.path.isfile(artwork_path):
             self.send_error_response(404, 'No local artwork for the loaded game')
