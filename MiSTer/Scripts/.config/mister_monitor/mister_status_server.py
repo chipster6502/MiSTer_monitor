@@ -1564,6 +1564,7 @@ _PACK_SYSTEM = {
     'Atari Lynx (2P)':                 'AtariLynx',
     'Atari Jaguar':                    'Jaguar',
     'Neo-Geo':                         'NeoGeo',
+    'Neo-Geo CD':                      'NeoGeo-CD',
     'Nintendo Virtual Boy':            'VirtualBoy',
     'Sega SG-1000':                    'SG-1000',
     'Sega Genesis/Megadrive 32X':      'S32X',
@@ -1579,6 +1580,9 @@ _PACK_SYSTEM = {
     'Mattel/INTV Intellivision':       'Intellivision',
     'Vectrex':                         'VECTREX',
     'Videopac G7000/Odyssey 2':        'ODYSSEY2',
+    '3DO Interactive Multiplayer':     '3DO',
+    'Philips CD-i':                    'CD-i',
+    'Amiga CD32':                      'AmigaCD32',
 }
 
 _PACK_MOUNTS = ['/media/fat'] + ['/media/usb%d' % i for i in range(8)]
