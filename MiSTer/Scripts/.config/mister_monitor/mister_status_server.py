@@ -595,6 +595,25 @@ def _md_or_sms(game_path):
 # Disc formats the NeoGeo core accepts for its CD side. '.pbp' is deliberately
 # absent: it is a PSX EBOOT container and never a Neo Geo CD image.
 _NEOGEO_CD_EXTS = ('.cue', '.chd', '.iso')
+_FDS_EXTS = ('.fds', '.qd')
+
+
+def _nes_or_fds(game_path):
+    """Real system of a game loaded through the NES core, which serves both.
+
+    Famicom Disk System titles are their own ScreenScraper catalogue with
+    their own boxes, and they live in games/FDS, but the core reports itself
+    as NES whatever it loads. The extension decides with no header sniffing:
+    a disk image is always .fds or .qd and a cartridge never is.
+
+    The answer travels in game_system rather than in the core name, unlike
+    _neogeo_cart_or_cd(): the panel should keep reading 'NES', which is the
+    machine actually on the desk, and game_system is what the pack lookup
+    keys off.
+    """
+    if game_path.lower().endswith(_FDS_EXTS):
+        return 'Famicom Disk System'
+    return 'Nintendo NES/Famicom'
 
 
 def _neogeo_cart_or_cd(game_path):
@@ -1545,8 +1564,8 @@ _PACK_SYSTEM = {
     'Famicom Disk System':             'FDS',
     'Super Nintendo/Super Famicom':    'SNES',
     'Nintendo 64':                     'N64',
-    'Nintendo Game Boy':               'GameBoy',
-    'Nintendo Game Boy Color':         'GameBoyColor',
+    'Nintendo Game Boy':               'GAMEBOY',
+    'Nintendo Game Boy Color':         'GBC',
     'Nintendo Game Boy Advance':       'GBA',
     'Nintendo Game Boy Advance 2P':    'GBA',
     'Sega Genesis/Mega Drive':         'Genesis',
@@ -1603,6 +1622,50 @@ def _pack_dir(system_folder):
         if os.path.isdir(candidate):
             return candidate
     return ''
+
+
+# Catalogues that share a core. Each keeps its own docs/ folder, and the
+# consumer falls back to the sibling when its own folder has no image.
+# This is not cosmetic: ScreenScraper splits dual-mode cartridges between
+# catalogues on its own criteria, so a 'GB Compatible' game the pack HAS
+# would otherwise read as missing. FDS falls back to NES but not the other
+# way round: a cartridge must never receive the disk release's box.
+_PACK_SIBLINGS = {
+    'GAMEBOY': ('GBC',),
+    'GBC': ('GAMEBOY',),
+    'FDS': ('NES',),
+}
+
+# Cores with no catalogue of their own. The Super Game Boy core runs Game Boy
+# cartridges — games/SGB holds .gb and .gbc files — and ScreenScraper's SGB
+# catalogue carries poorer media than Game Boy's for the same title, so it
+# borrows the Game Boy folders instead of getting a pack of its own.
+_PACK_BORROWS = {
+    'Nintendo Super Game Boy': ('GAMEBOY', 'GBC'),
+}
+
+
+def _pack_folders(friendly):
+    """Pack folders to try for a system, most specific first."""
+    borrowed = _PACK_BORROWS.get(friendly)
+    if borrowed:
+        return list(borrowed)
+    folder = _PACK_SYSTEM.get(friendly, '')
+    if not folder:
+        return []
+    return [folder] + list(_PACK_SIBLINGS.get(folder, ()))
+
+
+def _pack_lookup_any(folders, key, crc, size):
+    """First (path, resolved_key, folder) any of the folders yields."""
+    for folder in folders:
+        pack_dir = _pack_dir(folder)
+        if not pack_dir:
+            continue
+        found, resolved = _pack_lookup(pack_dir, key, crc, size)
+        if found:
+            return found, resolved, folder
+    return '', '', (folders[0] if folders else '')
 
 
 def _pack_title(name):
@@ -1738,11 +1801,11 @@ def _pack_resolve_for_state(game_path, is_arcade, game_system, core, seq):
     correct before the display asks."""
     path = ''
     try:
-        system_folder = 'Arcade' if is_arcade else _PACK_SYSTEM.get(
-            game_system or core, '')
-        if system_folder:
+        folders = (['Arcade'] if is_arcade
+                   else _pack_folders(game_system or core))
+        if folders:
             key = _pack_key_from_state(game_path, is_arcade)
-            path, resolved = _pack_lookup(_pack_dir(system_folder), key, '', '')
+            path, resolved, system_folder = _pack_lookup_any(folders, key, '', '')
             if path:
                 print("\U0001f5bc\ufe0f local artwork: %s/%s.jpg" % (system_folder, resolved))
     except Exception as e:
@@ -1768,9 +1831,10 @@ def _pack_annotate(result):
             friendly = _state['game_system'] or _state['core']
             path_for_name = _state['game_path']
 
-        system_folder = 'Arcade' if is_arcade else _PACK_SYSTEM.get(friendly, '')
-        if not system_folder:
+        folders = ['Arcade'] if is_arcade else _pack_folders(friendly)
+        if not folders:
             return result
+        system_folder = folders[0]
 
         if is_arcade:
             # The .mra names its romset in <setname>, and that id is the pack's
@@ -1785,9 +1849,8 @@ def _pack_annotate(result):
             # Consoles: the No-Intro name without its extension.
             key = os.path.splitext(result.get('filename') or '')[0]
 
-        pack_dir = _pack_dir(system_folder)
-        found, resolved = _pack_lookup(pack_dir, key,
-                                       result.get('crc32'), result.get('size'))
+        found, resolved, system_folder = _pack_lookup_any(
+            folders, key, result.get('crc32'), result.get('size'))
         result['artwork_system'] = system_folder
         if found:
             result['artwork_local'] = True
@@ -2543,6 +2606,8 @@ def _update_state():
                 game_system = _atari_78_or_26(game_path)
             elif friendly_name == 'Sega Genesis/Mega Drive':
                 game_system = _md_or_sms(game_path)
+            elif friendly_name == 'Nintendo NES/Famicom':
+                game_system = _nes_or_fds(game_path)
         if game_system == friendly_name:
             game_system = ''      # the game belongs to its own core: nothing to say
 
@@ -4441,8 +4506,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                     return ''
                 friendly = _state['game_system'] or _state['core']
 
-            system_folder = _PACK_SYSTEM.get(friendly, '')
-            if not system_folder:
+            folders = _pack_folders(friendly)
+            if not folders:
                 return ''
 
             details = self.get_rom_details()
@@ -4457,9 +4522,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                     return ''
 
             key = os.path.splitext(details.get('filename') or '')[0]
-            found, resolved = _pack_lookup(_pack_dir(system_folder), key,
-                                           details.get('crc32'),
-                                           details.get('size'))
+            found, resolved, system_folder = _pack_lookup_any(
+                folders, key, details.get('crc32'), details.get('size'))
             if not found:
                 return ''
 
