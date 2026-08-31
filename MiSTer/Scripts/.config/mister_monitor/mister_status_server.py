@@ -1656,15 +1656,22 @@ def _pack_folders(friendly):
     return [folder] + list(_PACK_SIBLINGS.get(folder, ()))
 
 
-def _pack_lookup_any(folders, key, crc, size):
-    """First (path, resolved_key, folder) any of the folders yields."""
+def _pack_lookup_any(folders, keys, crc, size):
+    """First (path, resolved_key, folder) any folder yields for any key.
+
+    Folders come from the shared-catalogue rule; several keys appear when the
+    reported game name is ambiguous as a path (see _pack_key_from_state).
+    """
+    if isinstance(keys, str):
+        keys = [keys]
     for folder in folders:
         pack_dir = _pack_dir(folder)
         if not pack_dir:
             continue
-        found, resolved = _pack_lookup(pack_dir, key, crc, size)
-        if found:
-            return found, resolved, folder
+        for key in keys or ['']:
+            found, resolved = _pack_lookup(pack_dir, key, crc, size)
+            if found:
+                return found, resolved, folder
     return '', '', (folders[0] if folders else '')
 
 
@@ -1793,7 +1800,7 @@ def _pack_lookup(pack_dir, key, crc, size):
 
 
 def _pack_key_from_state(game_path, is_arcade):
-    """The pack key for the loaded game, derived from state ALONE.
+    """Pack key candidates for the loaded game, derived from state ALONE.
 
     Deliberately independent of rom-details: the display asks for artwork
     before (and sometimes without) triggering a hash, so tying resolution to
@@ -1802,16 +1809,33 @@ def _pack_key_from_state(game_path, is_arcade):
     does, and that runs later as a refinement.
     """
     if not game_path:
-        return ''
+        return []
     if is_arcade:
         if game_path.lower().endswith('.mra'):
             setname = _mra_setname(game_path).strip().lower()
             if setname and re.match(r'^[a-z0-9][a-z0-9_-]*$', setname):
-                return setname
-        return ''
+                return [setname]
+        return []
     # Consoles: the No-Intro name without its extension. Zip-internal paths
     # carry the real name at the end, so basename() covers them too.
-    return os.path.splitext(os.path.basename(game_path))[0]
+    keys = [os.path.splitext(os.path.basename(game_path))[0]]
+
+    # A game NAME may contain a slash, and then it is not a path component at
+    # all: the Neo Geo core reports 'Metal Slug 2: Super Vehicle-001/II' from
+    # its romsets.xml, and basename() cuts that down to 'II'. Rebuild the
+    # candidate by taking everything after the last directory that actually
+    # exists on disk.
+    if '/' in game_path:
+        head = game_path
+        while '/' in head:
+            head = head.rsplit('/', 1)[0]
+            if os.path.isdir(head) or os.path.isdir('/media/fat/' + head):
+                tail = game_path[len(head) + 1:]
+                whole = os.path.splitext(tail)[0]
+                if whole and whole not in keys:
+                    keys.append(whole)
+                break
+    return keys
 
 
 def _pack_resolve_for_state(game_path, is_arcade, game_system, core, seq):
@@ -1823,8 +1847,8 @@ def _pack_resolve_for_state(game_path, is_arcade, game_system, core, seq):
         folders = (['Arcade'] if is_arcade
                    else _pack_folders(game_system or core))
         if folders:
-            key = _pack_key_from_state(game_path, is_arcade)
-            path, resolved, system_folder = _pack_lookup_any(folders, key, '', '')
+            keys = _pack_key_from_state(game_path, is_arcade)
+            path, resolved, system_folder = _pack_lookup_any(folders, keys, '', '')
             if path:
                 print("\U0001f5bc\ufe0f local artwork: %s/%s.jpg" % (system_folder, resolved))
     except Exception as e:
