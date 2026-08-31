@@ -1582,7 +1582,7 @@ _PACK_SYSTEM = {
     'Atari Lynx':                      'AtariLynx',
     'Atari Lynx (2P)':                 'AtariLynx',
     'Atari Jaguar':                    'Jaguar',
-    'Neo-Geo':                         'NEOGEO',
+    'Neo-Geo':                         'NeoGeo',
     'Neo-Geo CD':                      'NeoGeo-CD',
     'Nintendo Virtual Boy':            'VirtualBoy',
     'Sega SG-1000':                    'SG-1000',
@@ -1732,9 +1732,11 @@ def _pack_lookup(pack_dir, key, crc, size):
       1. the exact key as a filename — the common case, one stat();
       2. the index by variant name — catches the user holding a dump the pack
          did not pick as representative;
-      3. the index by crc+size — catches a renamed file, and costs nothing
+      3. a trailing '(setname)' as a key — catches rom packs that prefix the
+         identifier with a title of their own invention;
+      4. the index by crc+size — catches a renamed file, and costs nothing
          extra because rom-details already computed the CRC;
-      4. the index by title alone — catches collections that tag their dumps
+      5. the index by title alone — catches collections that tag their dumps
          differently, and is skipped when the title is not unique.
     """
     if not pack_dir:
@@ -1753,6 +1755,23 @@ def _pack_lookup(pack_dir, key, crc, size):
             candidate = os.path.join(pack_dir, mapped + '.jpg')
             if os.path.isfile(candidate):
                 return candidate, mapped
+
+    # A rom pack that names its files '<title> (<setname>)' resolves on the
+    # setname alone. The @MiSTer Neo Geo add-on does exactly that, and its
+    # titles are its own — 'Shock Troopers (set 1) (shocktro)' where the
+    # catalogue says just 'Shock Troopers' — so no amount of aliasing in the
+    # pack can predict them, while the bracketed tail is exact.
+    #
+    # It fires only when that tail IS a key in this folder, which is what
+    # makes it safe: the tail of 'Tetris (World) (Rev 1)' is 'Rev 1', and no
+    # pack has an image called that.
+    if key:
+        tail = re.search(r'\(([^()]+)\)\s*$', key)
+        if tail:
+            setname = tail.group(1).strip()
+            candidate = os.path.join(pack_dir, setname + '.jpg')
+            if setname and os.path.isfile(candidate):
+                return candidate, setname
 
     # The server formats CRC32 uppercase ('05FBB855'), the index stores it
     # lowercase. Normalise both sides rather than trusting either.
