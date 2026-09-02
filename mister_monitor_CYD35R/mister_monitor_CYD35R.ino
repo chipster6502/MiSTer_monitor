@@ -8996,12 +8996,12 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
 // Tries a media type with all region suffixes in user-preferred order.
 // The preferred region comes from config.ini [screenscraper] region=
 //
-// Order: preferred region first, then the remaining three in fixed order
-//        (wor -> us -> eu -> jp skipping the preferred one), then generic
-//        (no suffix) if includeGeneric is true.
+// Order: preferred region first, then the rest of ALL_REGIONS in fixed
+//        order (wor -> us -> eu -> jp -> ss, skipping the preferred one),
+//        then generic (no suffix) if includeGeneric is true.
 //
 // Example with region=eu and mediaBase="box-3D":
-//   box-3D(eu)  box-3D(wor)  box-3D(us)  box-3D(jp)  box-3D
+//   box-3D(eu)  box-3D(wor)  box-3D(us)  box-3D(jp)  box-3D(ss)  box-3D
 //
 // includeGeneric=false is used when the generic variant was already tried
 // before calling this function (e.g. marquee), or when it does not exist
@@ -9010,7 +9010,14 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
 bool tryMediaTypeWithRegions(String baseUrl, String savePath,
                               const char* mediaBase, const char* mediaLabel,
                               bool includeGeneric) {
-  const char* ALL_REGIONS[] = {"wor", "us", "eu", "jp"};
+  // 'ss' is ScreenScraper's own region: what an upload carries when the
+  // contributor set none. It is often the ONLY region a box exists in --
+  // the Satellaview Actraiser has box-2D and box-3D under 'ss' and nothing
+  // else -- and no geographic preference can ever reach it, so it closes
+  // the chain: after the real regions, before the unsuffixed generic. The
+  // pack builder falls back the same way (pick_media: 'else any region').
+  const char* ALL_REGIONS[] = {"wor", "us", "eu", "jp", "ss"};
+  const int   ALL_REGIONS_N = sizeof(ALL_REGIONS) / sizeof(ALL_REGIONS[0]);
   String pref = _boxart_region_str;  // from config.ini region=
 
   // 1. Preferred region first
@@ -9019,7 +9026,7 @@ bool tryMediaTypeWithRegions(String baseUrl, String savePath,
   if (tryDownloadMediaTypeWorking(baseUrl, savePath, type.c_str(), label.c_str())) return true;
 
   // 2. Remaining regions in fixed order, skipping the preferred one
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < ALL_REGIONS_N; i++) {
     if (String(ALL_REGIONS[i]) != pref) {
       type  = String(mediaBase) + "(" + String(ALL_REGIONS[i]) + ")";
       label = String(mediaLabel) + " " + String(ALL_REGIONS[i]);
