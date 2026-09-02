@@ -132,6 +132,7 @@ CORE_NAME_MAPPING = {
     'SNES': 'Super Nintendo/Super Famicom',
     'N64': 'Nintendo 64',
     'FDS': 'Famicom Disk System',
+    'Satellaview': 'Satellaview',
     'GAMEBOY': 'Nintendo Game Boy',
     'GB': 'Nintendo Game Boy',
     'GBC': 'Nintendo Game Boy Color',
@@ -596,6 +597,7 @@ def _md_or_sms(game_path):
 # absent: it is a PSX EBOOT container and never a Neo Geo CD image.
 _NEOGEO_CD_EXTS = ('.cue', '.chd', '.iso')
 _FDS_EXTS = ('.fds', '.qd')
+_SATELLAVIEW_EXTS = ('.bs',)
 
 
 def _nes_or_fds(game_path):
@@ -614,6 +616,22 @@ def _nes_or_fds(game_path):
     if game_path.lower().endswith(_FDS_EXTS):
         return 'Famicom Disk System'
     return 'Nintendo NES/Famicom'
+
+
+def _snes_or_satellaview(game_path):
+    """Real system of a game loaded through the SNES core, which serves both.
+
+    Satellaview titles are their own ScreenScraper catalogue with their own
+    art, shipped in docs/Satellaview, but the core reports itself as SNES
+    whatever it loads. The extension decides with no header sniffing: a
+    Satellaview dump is always .bs and a cartridge never is.
+
+    Same shape as _nes_or_fds(): the answer travels in game_system, the
+    panel keeps reading 'SNES', and the pack lookup keys off game_system.
+    """
+    if game_path.lower().endswith(_SATELLAVIEW_EXTS):
+        return 'Satellaview'
+    return 'Super Nintendo/Super Famicom'
 
 
 def _neogeo_cart_or_cd(game_path):
@@ -1562,6 +1580,7 @@ def _path_names_game(candidate, game):
 _PACK_SYSTEM = {
     'Nintendo NES/Famicom':            'NES',
     'Famicom Disk System':             'FDS',
+    'Satellaview':                     'Satellaview',
     'Super Nintendo/Super Famicom':    'SNES',
     'Nintendo 64':                     'N64',
     'Nintendo Game Boy':               'GAMEBOY',
@@ -1634,6 +1653,9 @@ _PACK_SIBLINGS = {
     'GAMEBOY': ('GBC',),
     'GBC': ('GAMEBOY',),
     'FDS': ('NES',),
+    # Same asymmetry: a BS title ScreenScraper filed under SNES is rescued
+    # from that folder, and a cartridge never receives a Satellaview box.
+    'Satellaview': ('SNES',),
 }
 
 # Cores with no catalogue of their own. The Super Game Boy core runs Game Boy
@@ -2651,6 +2673,8 @@ def _update_state():
                 game_system = _md_or_sms(game_path)
             elif friendly_name == 'Nintendo NES/Famicom':
                 game_system = _nes_or_fds(game_path)
+            elif friendly_name == 'Super Nintendo/Super Famicom':
+                game_system = _snes_or_satellaview(game_path)
         if game_system == friendly_name:
             game_system = ''      # the game belongs to its own core: nothing to say
 
