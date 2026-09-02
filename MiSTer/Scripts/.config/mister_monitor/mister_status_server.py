@@ -1582,7 +1582,7 @@ _PACK_SYSTEM = {
     'Atari Lynx':                      'AtariLynx',
     'Atari Lynx (2P)':                 'AtariLynx',
     'Atari Jaguar':                    'Jaguar',
-    'Neo-Geo':                         'NeoGeo',
+    'Neo-Geo':                         'NEOGEO',
     'Neo-Geo CD':                      'NeoGeo-CD',
     'Nintendo Virtual Boy':            'VirtualBoy',
     'Sega SG-1000':                    'SG-1000',
