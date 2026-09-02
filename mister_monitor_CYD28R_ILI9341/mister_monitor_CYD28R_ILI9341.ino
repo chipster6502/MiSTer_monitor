@@ -8242,6 +8242,17 @@ String ssSystemForRom(const String& coreName, const RomDetails& rd, String* altO
     if (ext == "po" || ext == "2mg" || ext == "woz") { if (altOut) *altOut = "86";  return "217"; }
   }
 
+  // --- SNES (4) also runs Satellaview (107) broadcasts ---------------------
+  // The BS-X adapter sits on a Super Famicom and the SNES core loads its
+  // broadcast dumps directly, so CORENAME stays SNES. ScreenScraper files
+  // them as their own system with their own art, and .bs is decisive: nothing
+  // else on this core uses that extension. 4 is the sibling for the same
+  // reason the server falls back from docs/Satellaview to docs/SNES --
+  // ScreenScraper occasionally files a BS title under the cartridge system.
+  if (base == "4") {
+    if (ext == "bs") { if (altOut) *altOut = "4"; return "107"; }
+  }
+
   // --- Neo Geo (142) also runs Neo Geo CD (70) --------------------------------
   // One core, two platforms: the cartridge side arrives as a .neo file, a
   // Darksoft romset ZIP or a romset folder, while the CD side is a disc image.
@@ -8284,6 +8295,7 @@ String mapCoreToScreenScraperId(String coreName) {
   if (core == "Nintendo Game Boy Color" || core == "Game Boy Color") return "10";
   if (core == "Nintendo Game Boy Advance" || core == "Game Boy Advance" || core == "Nintendo Game Boy Advance 2P") return "12";
   if (core == "Famicom Disk System" || core == "Family Computer Disk System") return "106";
+  if (core == "Satellaview" || core == "Nintendo Satellaview") return "107";
   if (core == "Nintendo Super Game Boy" || core == "Super Game Boy") return "127";
   if (core == "Nintendo Game & Watch" || core == "Game & Watch") return "52";
   if (core == "Nintendo Virtual Boy") return "11";
@@ -8428,6 +8440,7 @@ String mapCoreToScreenScraperId(String coreName) {
   if (coreLower == "gbc" || coreLower == "gameboycolor") return "10";
   if (coreLower == "gba" || coreLower == "gameboyadvance") return "12";
   if (coreLower == "fds") return "106";
+  if (coreLower == "satellaview") return "107";
   if (coreLower == "sgb") return "127";
   if (coreLower == "genesis" || coreLower == "megadrive" || coreLower == "md") return "1";
   if (coreLower == "s32x") return "19";
