@@ -167,7 +167,7 @@ _FRIENDLY_RULES = [
     (("gameboy",),                                     "gameboy"),
     (("32x",),                                         "s32x"),
     (("megadrive", "genesis"),                         "genesis"),
-    (("supernintendo", "superfamicom", "snes"),        "snes"),
+    (("supernintendo", "superfamicom", "snes", "satellaview"), "snes"),
     (("nesfamicom", "nintendones", "famicom", "nes"),  "nes"),
     (("nintendo64", "n64"),                            "n64"),
     (("turbografx", "pcengine", "tgfx"),               "tgfx16"),
