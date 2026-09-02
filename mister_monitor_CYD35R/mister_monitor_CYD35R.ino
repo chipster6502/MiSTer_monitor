@@ -7829,6 +7829,17 @@ String ssSystemForRom(const String& coreName, const RomDetails& rd, String* altO
     if (ext == "po" || ext == "2mg" || ext == "woz") { if (altOut) *altOut = "86";  return "217"; }
   }
 
+  // --- NES (3) also runs Famicom Disk System (106) images -------------------
+  // The disk system hangs off a Famicom and the NES core loads its images
+  // directly, so CORENAME stays NES. The "Famicom Disk System" entries in the
+  // name tables never fire for that reason -- no core is called that -- and a
+  // disk was being queried as a cartridge, under 3, where its CRC does not
+  // exist. .fds and .qd are decisive: nothing else on this core uses them.
+  // 3 is the sibling because ScreenScraper files some disk titles under NES.
+  if (base == "3") {
+    if (ext == "fds" || ext == "qd") { if (altOut) *altOut = "3"; return "106"; }
+  }
+
   // --- SNES (4) also runs Satellaview (107) broadcasts ---------------------
   // The BS-X adapter sits on a Super Famicom and the SNES core loads its
   // broadcast dumps directly, so CORENAME stays SNES. ScreenScraper files
