@@ -17,10 +17,7 @@
 # License along with this program.  If not, see
 # <https://www.gnu.org/licenses/>.
 
-"""
-MiSTer Status Server - COMPLETE OPTIMIZED VERSION
-Simplified arcade detection logic with all original functions
-"""
+"""MiSTer Status Server."""
 
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import json
@@ -38,16 +35,14 @@ import socket
 from urllib.parse import urlparse
 
 # =============================================================================
-# SERVER_VERSION — single source of truth for this file's release.
-# Exposed in /status/snapshot and /status/version so the display (and support
-# scripts) can tell exactly which server code is RUNNING, not just which file
-# is on disk. Bump this on every release, together with FIRMWARE_VERSION in
+# SERVER_VERSION — this file's release. Exposed in /status/snapshot and
+# /status/version. Bump on every release, together with FIRMWARE_VERSION in
 # the sketches.
 # =============================================================================
 SERVER_VERSION = "2.8.0"
 
-# RetroAchievements status resolver (sibling module). Imported lazily-safe:
-# if the file is missing the server still starts; the route reports the error.
+# RetroAchievements resolver (optional sibling module): if it is missing the
+# server still starts and the route reports the error.
 try:
     from ra_status import (get_ra_status, start_ra_polling,
                            get_ra_event, get_ra_achievements)
@@ -58,10 +53,7 @@ except Exception as _ra_e:
 import queue
 
 def _load_names_txt():
-    """
-    Reads /media/fat/names.txt and returns a dict {corename: friendly_name}.
-    File format: CORENAME:          Friendly Name
-    """
+    """Reads /media/fat/names.txt and returns {corename: friendly_name}."""
     names = {}
     try:
         with open('/media/fat/names.txt', 'r', encoding='utf-8', errors='ignore') as f:
@@ -82,16 +74,9 @@ def _load_names_txt():
 
 NAMES_TXT = _load_names_txt()
 
-# ---------------------------------------------------------------------------
-# System constants — moved to module level for access by _update_state()
-# ---------------------------------------------------------------------------
+# --- System constants (module level: used by _update_state) ----------------
 
-# Membership is tested with `corename.lower() in KNOWN_NON_ARCADE_SYSTEMS`, so
-# every entry here MUST already be lowercase — a capitalised addition would sit
-# in the set and never match anything. A frozenset rather than a list because
-# the old list carried 60 duplicates (three batches pasted in over the years,
-# some entries present in two capitalisations) and its only consumer rebuilt a
-# lowercased copy of all 216 on every single call.
+# Entries MUST be lowercase: membership is tested with corename.lower().
 KNOWN_NON_ARCADE_SYSTEMS = frozenset({
     'nes', 'nintendo', 'famicom', 'snes', 'super nintendo', 'n64', 'nintendo64',
     'gameboy', 'gbc', 'gba', 'fds', 'sgb',
@@ -313,15 +298,9 @@ CORE_NAME_MAPPING = {
     '3DO': '3DO Interactive Multiplayer',
 }
 
-# names.txt fills in cores not already in CORE_NAME_MAPPING.
-# Membership is tested CASE-INSENSITIVELY: CORE_NAME_MAPPING_LOWER (built
-# below) collapses keys to lowercase with last-insert-wins, so a names.txt
-# key differing only in case ('ao486' vs curated 'AO486') would silently
-# replace the curated value on every lowercase lookup — which is the path
-# SAM detection takes. The curated names are load-bearing: the firmware's
-# ScreenScraper table is keyed on them, so letting a user label win here
-# costs that core its artwork. names.txt keeps its legitimate job — naming
-# cores the curated table has never heard of.
+# names.txt only names cores the curated table does not know. Lookups are
+# case-insensitive and the curated names are the key of the firmware's
+# ScreenScraper table, so a user label must never replace one.
 _curated_lower = {k.lower() for k in CORE_NAME_MAPPING}
 for k, v in NAMES_TXT.items():
     if k.lower() not in _curated_lower:
@@ -338,24 +317,10 @@ CORE_NAME_MAPPING_LOWER = {k.lower(): v for k, v in CORE_NAME_MAPPING.items()}
 # ---------------------------------------------------------------------------
 # Unknown cores
 # ---------------------------------------------------------------------------
-# A core we cannot name shows its raw string and gets no artwork. Finding out
-# has always meant waiting for a user to notice (z386 arrived via a forum post),
-# and a scheduled scan of the distributions only half-solves it: it sees .rbf
-# FILENAMES, which are not the CORENAME — ZX-Spectrum.rbf announces itself as
-# 'Spectrum' — and it cannot see a manually-installed core at all, which is
-# exactly what z386 is.
-#
-# So the running server records what it actually saw. That string IS the key a
-# mapping needs: no inference, no guessing.
-#
-# Deliberately NOT telemetry. The file never leaves the MiSTer; the endpoint is
-# there so a user can paste it into a report if they choose to. The counter and
-# the timestamps exist to tell a core someone genuinely plays from one they
-# opened once by accident.
-# threading is imported again further down, next to the watcher threads; the
-# duplicate is deliberate. This block runs at line ~250, that import lands at
-# ~378, and a module-level Lock() here would raise NameError before the server
-# ever answered a request. Re-importing is free (sys.modules is a cache).
+# Records the CORENAMEs this server cannot name, so the exact key a mapping
+# needs is known without guessing. Local only: the file never leaves the MiSTer.
+# threading is re-imported here because the real import lands further down,
+# after this block runs (sys.modules makes the repeat free).
 import threading
 
 _UNKNOWN_CORES_FILE = os.path.join(
@@ -369,14 +334,8 @@ _unknown_cores_loaded = False
 def _core_resolves(name):
     """
     True when `name` already yields a friendly name through the same chain the
-    evaluator uses to fill the HUD.
-
-    Single source of truth for 'is this core known?', so the diagnostic log can
-    never disagree with what the screen actually shows. It used to: the log
-    tested membership only, while the evaluator additionally falls back to the
-    MGL/setname prefix. 'X68K-Algarna' therefore displayed correctly as
-    'Sharp X68000' and was reported as unknown at the same time — a false
-    finding, and per-game setnames generate an unbounded number of them.
+    evaluator uses, so the diagnostic log cannot disagree with the screen: the
+    fallback on the MGL/setname prefix is part of that chain.
 
     RA_ is not stripped here: the caller passes the already-stripped
     lookup_name, matching the evaluator.
@@ -404,12 +363,8 @@ def _load_unknown_cores():
         if isinstance(data.get('cores'), dict):
             _unknown_cores = data['cores']
             print(f"📋 Unknown-core log restored: {len(_unknown_cores)} entries")
-            # Entries are recorded when a core has no name, but the log is
-            # persistent and mappings keep arriving: a core resolved by a later
-            # update stayed listed forever, and the endpoint filled with work
-            # already done. Measured on a real machine, 6 of 10 entries were
-            # already mapped. Dropping them is safe — 'seen once, unnamed' has
-            # no value once the core has a name.
+            # Drop entries a later update has since mapped: "seen once,
+            # unnamed" has no value once the core has a name.
             resolved = [k for k in _unknown_cores if _core_resolves(k)]
             if resolved:
                 for k in resolved:
@@ -427,11 +382,9 @@ def _load_unknown_cores():
 
 def _save_unknown_cores_locked():
     """
-    Atomic write: temp file + os.replace.
-
-    The MiSTer loses power by having its plug pulled, which is precisely when a
-    half-written JSON would be left behind — and _load_unknown_cores() would
-    then discard the whole history.
+    Atomic write (temp file + os.replace): the MiSTer loses power by having
+    its plug pulled, and a half-written JSON would make
+    _load_unknown_cores() discard the whole history.
     """
     tmp = _UNKNOWN_CORES_FILE + '.tmp'
     try:
@@ -452,14 +405,12 @@ def _save_unknown_cores_locked():
 
 def _note_unknown_core(raw_corename):
     """
-    Record a core name that resolves to nothing in CORE_NAME_MAPPING.
+    Record a core name absent from CORE_NAME_MAPPING. Membership is the
+    test, NOT 'friendly == raw': several cores map to themselves
+    ('MSX' -> 'MSX') and would be filed as unknown forever.
 
-    Membership in the mapping is the test, NOT 'friendly == raw': several cores
-    map to themselves ('MSX' -> 'MSX'), and comparing the strings would file
-    those as unknown forever.
-
-    Disk is touched only on a genuinely new name or once a minute, so a core
-    left running cannot turn this into a write loop on the SD card.
+    Disk is touched only on a new name or once a minute, so a core left
+    running cannot turn this into a write loop on the SD card.
     """
     name = (raw_corename or '').strip()
     if not name or name.upper() == 'MENU':
@@ -508,30 +459,20 @@ def get_unknown_cores():
 
 import threading
 
-# ---------------------------------------------------------------------------
-# Centralized state. All access must hold _state_lock.
-# ---------------------------------------------------------------------------
+# --- Centralized state (all access must hold _state_lock) ------------------
 _state_lock = threading.Lock()
 
-# Serializes ROM-detail computation so a firmware retry can't start a second
-# hash/CRC while the first is still running (the two would then fight over SD and
-# CPU). A second caller blocks here, then picks up the cache the first one wrote.
+# Serializes rom-details computation: a second caller blocks here and picks up
+# the cache the first one wrote, instead of starting a duplicate hash/CRC.
 _rom_details_compute_lock = threading.Lock()
 
 _state = {
     'core':              'Menu',   # friendly name — used for display, image lookup, and ScreenScraper mapping
-    'core_raw':          '',       # raw CORENAME at commit time ('AO486', 'neogeo', ...). Mapping key for
-                                   # firmware that understands it; display and SD paths never use it. Empty
-                                   # when unknown (legacy paths) — consumers must fall back to 'core'.
+    'core_raw':          '',       # raw CORENAME at commit time ('AO486', 'neogeo'); '' when unknown
     'system_name':       'Menu',   # alias of 'core' (same value); kept for backward compatibility
-    'game_system':       '',       # the GAME's real system when a backwards-compatible core is running
+    'game_system':       '',       # the GAME's real system when a backwards-compatible core opened it
     'artwork_path':      '',       # absolute path of the pack image for the loaded game, '' when none
     'artwork_seq':       -1,       # the seq that artwork_path was resolved for; a mismatch means stale
-                                   # something older than itself (a Master System cartridge in the
-                                   # MegaDrive core, a 2600 cartridge in the Atari 7800 core). Empty
-                                   # whenever the game belongs to the core that opened it. 'core' stays
-                                   # the machine on screen; this is what consumers that must key off the
-                                   # GAME use — the RA console lookup above all.
     'game':              '',       # game name (filename without extension)
     'game_path':         '',       # absolute path to ROM file
     'is_arcade':         False,    # True if current core is arcade
@@ -542,9 +483,8 @@ _state = {
     'last_event':        'boot',   # 'boot' | 'load' | 'core' | 'menu' | 'sam'
 }
 
-# Raw CORENAME as seen at the last evaluation — a core change must always
-# bypass the navigation gate (stale coupled nav timestamps would otherwise
-# mask a core-only load).
+# Raw CORENAME at the last evaluation: a core change must always bypass the
+# navigation gate.
 _last_evaluated_corename = None
 
 # Error tracking — exposed via /status/error_state and /status/all
@@ -554,10 +494,9 @@ last_valid_core_timestamp = 0.0   # epoch time of last valid state update
 
 def _atari_78_or_26(game_path):
     """Real system of a game loaded through the Atari7800 core (plays both).
-    .a26 -> 2600; .a78 -> 7800; else sniff the A78 header signature
-    ('ATARI7800' at offset 1) when the file is directly readable; headerless
-    dumps default to 2600 (real 7800 dumps virtually always carry the header).
-    ZIP-internal paths fall through to the extension rules only."""
+    .a26 -> 2600; .a78 -> 7800; else sniff the A78 header signature ('ATARI7800'
+    at offset 1) when the file is readable. Headerless dumps and ZIP-internal
+    paths fall back to 2600."""
     p = game_path.lower()
     if p.endswith('.a26'):
         return 'Atari 2600'
@@ -576,25 +515,18 @@ def _atari_78_or_26(game_path):
 
 def _md_or_sms(game_path):
     """Real system of a game loaded through the MegaDrive core (plays both).
-    Unlike the Atari case no header sniffing is needed: the core exposes two
-    SEPARATE file slots in its CONF_STR ("FS1,BINGENMD " and "FS2,SMS"), so a
-    .sms could only ever have come through the Master System slot. Anything
-    else is a Mega Drive title. ZIP-internal paths carry the real extension at
-    the end, so endswith() covers them too.
+    No header sniffing needed: the core exposes two separate file slots, so a
+    .sms can only have come through the Master System one.
 
-    Returning the very same string the stock SMS core resolves to
-    (CORE_NAME_MAPPING['SMS']) is the whole point: artwork, the game-image
-    cache folder and ra_status._friendly_to_key() all key off this name, so the
-    game behaves identically whichever core opened it — including the RA
-    console lookup, which otherwise stays on Mega Drive ([1]) and can never
-    find a Master System set ([11, 15])."""
+    Returns the same string the stock SMS core resolves to, so artwork, the
+    image cache folder and the RA console lookup behave identically whichever
+    core opened the game."""
     if game_path.lower().endswith('.sms'):
         return 'Sega Master System'
     return 'Sega Genesis/Mega Drive'
 
 
-# Disc formats the NeoGeo core accepts for its CD side. '.pbp' is deliberately
-# absent: it is a PSX EBOOT container and never a Neo Geo CD image.
+# Disc formats of the NeoGeo CD side ('.pbp' excluded: it is a PSX container).
 _NEOGEO_CD_EXTS = ('.cue', '.chd', '.iso')
 _FDS_EXTS = ('.fds', '.qd')
 _SATELLAVIEW_EXTS = ('.bs',)
@@ -603,15 +535,9 @@ _SATELLAVIEW_EXTS = ('.bs',)
 def _nes_or_fds(game_path):
     """Real system of a game loaded through the NES core, which serves both.
 
-    Famicom Disk System titles are their own ScreenScraper catalogue with
-    their own boxes, and they live in games/FDS, but the core reports itself
-    as NES whatever it loads. The extension decides with no header sniffing:
-    a disk image is always .fds or .qd and a cartridge never is.
-
-    The answer travels in game_system rather than in the core name, unlike
-    _neogeo_cart_or_cd(): the panel should keep reading 'NES', which is the
-    machine actually on the desk, and game_system is what the pack lookup
-    keys off.
+    The core reports itself as NES whatever it loads; the extension decides
+    (.fds/.qd = disk, anything else = cartridge). The answer travels in
+    game_system, not in the core name: the panel keeps reading 'NES'.
     """
     if game_path.lower().endswith(_FDS_EXTS):
         return 'Famicom Disk System'
@@ -621,13 +547,9 @@ def _nes_or_fds(game_path):
 def _snes_or_satellaview(game_path):
     """Real system of a game loaded through the SNES core, which serves both.
 
-    Satellaview titles are their own ScreenScraper catalogue with their own
-    art, shipped in docs/Satellaview, but the core reports itself as SNES
-    whatever it loads. The extension decides with no header sniffing: a
-    Satellaview dump is always .bs and a cartridge never is.
-
-    Same shape as _nes_or_fds(): the answer travels in game_system, the
-    panel keeps reading 'SNES', and the pack lookup keys off game_system.
+    The extension decides: a Satellaview dump is always .bs. Same shape as
+    _nes_or_fds() — the answer travels in game_system and the panel keeps
+    reading 'SNES'.
     """
     if game_path.lower().endswith(_SATELLAVIEW_EXTS):
         return 'Satellaview'
@@ -637,27 +559,14 @@ def _snes_or_satellaview(game_path):
 def _neogeo_cart_or_cd(game_path):
     """Real console of a game loaded through the stock NEOGEO core (serves both).
 
-    Neo Geo CD is a separate retail console, not a Neo Geo fed different media,
-    and the core's two sides never share a container: cartridges arrive as .neo
-    files, Darksoft romset ZIPs or romset folders, while the CD side is always a
-    disc image. So the extension alone decides, with no header sniffing.
+    Neo Geo CD is a separate console and the two sides never share a container
+    (cartridges: .neo, romset ZIP or romset folder; CD: a disc image), so the
+    extension alone decides.
 
-    Unlike _md_or_sms() and _atari_78_or_26(), the answer here belongs in the
-    CORE name rather than in game_system, for two independent reasons:
-
-      * SAM already says 'Neo-Geo CD'. It writes its own mnemonic ('neogeocd')
-        to /tmp/SAM_Games.log and CORE_NAME_MAPPING translates it, so a SAM
-        rotation through a CD title already yields ScreenScraper id 70, the Neo
-        Geo CD platform art and its own /cores/N/neo-geo cd/ cache folder.
-        Leaving a manual load on 'Neo-Geo' would make the same disc resolve two
-        different ways depending on who opened it.
-      * The firmware does not read game_system at all. It keys artwork off the
-        core name and off file extensions inside ssSystemForRom(), so a
-        game_system of 'Neo-Geo CD' would change precisely nothing on screen.
-
-    Returning the exact string CORE_NAME_MAPPING['neogeocd'] yields is the whole
-    point: it is what makes the SAM path and the manual path converge on one
-    ScreenScraper system, one platform image and one cache folder.
+    Unlike _md_or_sms(), the answer belongs in the CORE name: SAM already
+    reports 'Neo-Geo CD' for the same disc, and the firmware does not read
+    game_system at all. Returning CORE_NAME_MAPPING['neogeocd'] makes both
+    paths converge on one ScreenScraper system, image and cache folder.
     """
     if game_path.lower().endswith(_NEOGEO_CD_EXTS):
         return 'Neo-Geo CD'
@@ -667,8 +576,7 @@ def _neogeo_cart_or_cd(game_path):
 def _commit_state(core, game, game_path, is_arcade, event, core_raw='', game_system=''):
     """
     Atomically commits a derived state. Bumps 'seq' and invalidates the
-    rom-details cache ONLY when the identity actually changed, so a spurious
-    re-evaluation can no longer wipe a hash computed for the same game.
+    rom-details cache ONLY when the identity actually changed.
     Returns True if the state changed.
     """
     with _state_lock:
@@ -676,15 +584,11 @@ def _commit_state(core, game, game_path, is_arcade, event, core_raw='', game_sys
                    _state['game']      != game or
                    _state['game_path'] != game_path or
                    _state['is_arcade'] != is_arcade)
-        # core_raw refreshes even when the identity did not change, and stays
-        # OUT of the 'changed' computation: AO486 and Z386 share the friendly
-        # 'PC Dos' on purpose, and a raw-only flip must not bump seq or wipe a
-        # rom_details hash computed for the very same game.
+        # Refreshed even when the identity did not change, and kept OUT of
+        # 'changed': a raw-only flip must not bump seq nor wipe rom_details.
         _state['core_raw'] = core_raw
-        # Derived from the same game_path that produced this identity, so it
-        # can never disagree with an unchanged state — refreshed unconditionally
-        # alongside core_raw for the same reason: a stale value would be a bug,
-        # an identical rewrite is free.
+        # Derived from the same game_path as this identity, so rewriting it
+        # unconditionally is free and can never disagree.
         _state['game_system'] = game_system
         if changed:
             _state['core']              = core
@@ -699,18 +603,15 @@ def _commit_state(core, game, game_path, is_arcade, event, core_raw='', game_sys
             _state['last_event']        = event
         seq_now = _state['seq']
     if changed:
-        # Resolve the pack image now, not when rom-details is computed: the
-        # display fetches artwork first, and a later resolution would serve
-        # the previous game's image.
+        # Resolve the pack image now: the display fetches artwork before
+        # rom-details, so a later resolution would serve the previous game's.
         _pack_resolve_for_state(game_path, is_arcade, game_system, core, seq_now)
         print(f"✅ State committed (seq={seq_now}, {event}): core='{core}' game='{game}' arcade={is_arcade}")
     else:
         print(f"♻️ Evaluation confirmed current state (seq={seq_now}) — rom cache preserved")
     return changed
 
-# ---------------------------------------------------------------------------
-# Background watcher thread — monitors /tmp/ files via inotifywait
-# ---------------------------------------------------------------------------
+# --- Background watcher thread: monitors /tmp/ files via inotifywait -------
 _WATCHED_FILES = [
     '/tmp/CORENAME',
     '/tmp/ACTIVEGAME',
@@ -718,18 +619,14 @@ _WATCHED_FILES = [
     '/tmp/FILESELECT',
     '/tmp/FULLPATH',
     '/tmp/STARTPATH',   # arcade ROM path — needed to detect arcade game changes
-    '/tmp/SAM_Games.log',  # SAM's own game log: the only signal when SAM rotates
-                           # between two games of the SAME core (ao486 DOS hops
-                           # load an .mgl without touching CORENAME)
+    '/tmp/SAM_Games.log',  # SAM's own log: the only signal on same-core hops
 ]
 
 def _ensure_watched_files():
     """
-    inotifywait aborts entirely if ANY watched path is missing. On setups
-    without MiSTer Remote, /tmp/ACTIVEGAME (and others) may never be created,
-    which traps the watcher in an endless restart loop and detection never
-    runs. Create any missing target as an empty file so the watch can attach;
-    MiSTer overwrites it with real content the moment it writes.
+    inotifywait aborts if ANY watched path is missing, which traps the watcher
+    in a restart loop on setups without MiSTer Remote. Create the missing ones
+    as empty files; MiSTer overwrites them as soon as it writes.
     """
     for path in _WATCHED_FILES:
         try:
@@ -756,19 +653,11 @@ def _read_file(path):
 # ─────────────────────────────────────────────────────────────────────────────
 # ROM-load contention guard
 #
-# Hashing a ROM reads it off the same SD/USB the core is loading from, so doing
-# it while the core's "Loading" progress bar is still filling steals bandwidth
-# and stutters the load. The core load is the MiSTer binary reading the file in a
-# chunked read() loop (the progress bar tracks that loop), so we know the load
-# has finished when that process stops reading.
-#
-# We watch /proc/<pid>/io 'rchar' (bytes read at the syscall level). Unlike
-# 'read_bytes' (block layer only), 'rchar' also covers network-backed storage
-# (CIFS/NAS), so this works regardless of where the user keeps their ROMs.
-#
-# Best-effort and fails OPEN: if the process or counter can't be read, it returns
-# at once and hashing proceeds exactly as before. It never blocks detection,
-# never holds a lock, and never raises.
+# Hashing reads from the same SD the core is loading from, so wait until that
+# process stops reading. Watched through 'rchar' in /proc/<pid>/io, which also
+# covers network-backed storage.
+# Best-effort and fails OPEN: never blocks detection, never holds a lock and
+# never raises.
 # ─────────────────────────────────────────────────────────────────────────────
 _LOAD_POLL_INTERVAL  = 0.25         # seconds between rchar samples
 _LOAD_ACTIVITY_BYTES = 512 * 1024   # per-poll growth above this = "still loading"
@@ -817,8 +706,8 @@ def _read_mister_rchar(pid):
 
 def _wait_for_rom_load_to_settle():
     """
-    Block until the MiSTer core has finished copying the ROM to SDRAM, so hashing
-    doesn't compete with the load. Returns promptly when the system is idle, when
+    Block until the core has finished copying the ROM to SDRAM, so hashing does
+    not compete with the load. Returns promptly when the system is idle, when
     the signal is unavailable, or after _LOAD_MAX_WAIT.
     """
     pid = _find_mister_pid()
@@ -870,15 +759,10 @@ def _get_mtime_ns(path):
 
 def _sam_looks_like_path(s):
     """
-    True when a SAM_Games.log third field is a real filesystem path, not a
-    bare game name. SAM logs some content by name only — no absolute path on
-    disk — e.g. Amiga WHDLoad/MGL demos: "10:09:18 - amiga - Demo: Bayeu (OCS)".
-    Feeding that bare name to the hasher yields "ROM file not found"; worse, it
-    poisons game_path in the snapshot with a value that is not openable.
-
-    A genuine SAM path is always absolute ("/media/fat/games/..."). Requiring a
-    leading '/' is enough to tell the two apart, and is stricter than a mere
-    "contains a slash" test (a title could, in theory, contain one).
+    True when a SAM_Games.log third field is a real path and not a bare game
+    name. SAM logs some content by name only (Amiga WHDLoad/MGL demos), which
+    poisons game_path with a value nothing can open. A genuine SAM path is
+    always absolute, so requiring a leading '/' is enough.
     """
     return bool(s) and s.startswith('/')
 
@@ -886,8 +770,8 @@ def _sam_looks_like_path(s):
 def _sam_get_current():
     """
     Reads SAM_Games.log and returns (is_active, core, game, path).
-    Format: "HH:MM:SS - corename - /full/path/to/game"
-    Returns False tuple if log doesn't exist, is too old, or has no valid entry.
+    Format: "HH:MM:SS - corename - /full/path/to/game".
+    False tuple if the log is missing, too old, or has no valid entry.
     """
     sam_log_path = '/tmp/SAM_Games.log'
 
@@ -913,10 +797,8 @@ def _sam_get_current():
         if len(parts) >= 3:
             sam_core_raw = parts[1].strip()
             sam_field    = ' - '.join(parts[2:])
-            # SAM sometimes logs by name only (no path on disk). Keep the
-            # name for display, but never propagate a non-path as game_path
-            # — a bare name is not openable and must fall through to the
-            # firmware's name search instead of the (failing) hash path.
+            # SAM sometimes logs by name only. Keep the name for display, but
+            # never propagate a non-path as game_path: it is not openable.
             game_filename = sam_field.split('/')[-1]
             sam_game      = os.path.splitext(game_filename)[0]
             sam_path      = sam_field if _sam_looks_like_path(sam_field) else ''
@@ -932,19 +814,16 @@ def _sam_get_current():
 
 def _sam_is_current():
     """
-    Returns True if SAM_Games.log is active AND is the most recent detection
-    source (i.e. CORENAME/ACTIVEGAME are not significantly newer than the log).
+    True if SAM_Games.log is active AND the most recent detection source
+    (CORENAME/ACTIVEGAME are not significantly newer than the log).
     """
     sam_log_path = '/tmp/SAM_Games.log'
     if not os.path.exists(sam_log_path):
         return False
 
     sam_ts = os.path.getmtime(sam_log_path)
-    # Max expected lag between SAM's log write and CORENAME/ACTIVEGAME
-    # landing (observed 2-5 s on rbf loads and same-core MGL hops).
-    # Was 30 s: that window let a MANUAL load made shortly after a SAM
-    # rotation be misattributed to SAM's stale log entry until the log
-    # aged out of _sam_get_current()'s 300 s ceiling.
+    # Max expected lag between SAM's log write and CORENAME/ACTIVEGAME landing
+    # (2-5 s observed). A longer window misattributes a later manual load to SAM.
     grace  = 10  # seconds
 
     for fname in ['CORENAME', 'ACTIVEGAME']:
@@ -1002,31 +881,16 @@ _KNOWN_ROM_EXTS = {
     '.pdp', '.rim',
 }
 
-# Containers whose CRC is never indexed by ScreenScraper (0MHz DOS packs
-# build per-pack VHDs, so their CRCs exist in no database — and the guest OS
-# rewrites them, so the CRC is unstable anyway). Extensible.
+# Containers whose CRC ScreenScraper never indexes (per-pack VHDs, whose CRC is
+# unstable anyway because the guest OS rewrites them). Extensible.
 _NO_HASH_EXTS = {'.vhd'}
 
-# Extensions worth hashing on MOST cores but not on specific ones. Keyed by the
-# RAW CORENAME, never the friendly name: names.txt lets any user rename 'AO486'
-# to whatever they like, and a friendly-name key would then miss silently.
+# Extensions worth hashing on most cores but not on specific ones. Keyed by the
+# RAW CORENAME, since names.txt lets a user rename the friendly one.
 #
-# .chd on ao486: the 0MHz collection builds its own CHDs (64 of its 327 games
-# mount one), so the container's CRC exists in no database and the search always
-# falls through to the name query anyway. Hashing CRC32+MD5+SHA1 over a ~700 MB
-# CHD costs ~35 s of DE10-Nano ARM — longer than the firmware's 12 s HTTP
-# timeout, which is why CD-based DOS games visibly cycle through retries while
-# .vhd games resolve instantly. RetroAchievements does not cover DOS, so nothing
-# depends on that MD5 here.
-#
-# Deliberately NOT global: on console CD cores (PSX, Saturn, MegaCD, Neo Geo CD)
-# the CHD's MD5 is exactly what resolves the RetroAchievements set. Putting
-# '.chd' in _NO_HASH_EXTS would trade a DOS-only annoyance for broken RA across
-# every CD core — reasoning by extension instead of by context, the same mistake
-# that made 'boot' match 'Boot Camp'.
-#
-# .iso/.img on ao486 stay hashed on purpose: only 7 files in the collection, they
-# are small, and a raw rip's CRC may legitimately be indexed by ScreenScraper.
+# .chd on ao486: pack-built CHDs are in no database, and hashing ~700 MB costs
+# ~35 s of ARM — longer than the firmware's HTTP timeout. NOT global: on console
+# CD cores the CHD's MD5 is exactly what resolves the RetroAchievements set.
 _NO_HASH_EXTS_BY_CORE = {
     'AO486': {'.chd'},
 }
@@ -1047,11 +911,9 @@ def _is_no_hash(ext, corename):
     """
     True when hashing this file can never yield a usable CRC/MD5.
 
-    MUST be the single source of truth for both the hashing decision in
-    get_rom_details_from_file() and the no_hash flag in _enrich_rom_result().
-    If the two ever disagree, the server skips the hash while still reporting
-    no_hash=false, and the firmware burns its full 5 x 20 s retry budget waiting
-    for a CRC that is never coming.
+    Single source of truth for the hashing decision and for the no_hash flag:
+    if the two disagree, the firmware burns its whole retry budget waiting for
+    a CRC that is never coming.
     """
     ext = (ext or '').lower()
     if ext in _NO_HASH_EXTS:
@@ -1062,35 +924,18 @@ def _is_no_hash(ext, corename):
 # ---------------------------------------------------------------------------
 # NeoGeo -> ScreenScraper romnom
 # ---------------------------------------------------------------------------
-# ScreenScraper indexes NeoGeo as MAME romsets ('mslug2.zip'). MiSTer runs .neo
-# containers whose CRC exists in no database, so for this system the CRC route
-# can never match — verified against gameid 37605, whose 37 rom entries are all
-# .zip of 17-19 MB while the .neo on disk is 45 MB. Different universes.
-#
-# What actually resolves NeoGeo today is ScreenScraper's OWN fuzzy fallback on
-# romnom: it strips '(mslug).neo' and matches the leftover title. That only
-# works when the pack happens to name the file the way ScreenScraper does, and
-# packs are inconsistent about it. All three observed on the same @MiSTer Pack:
-#   'Metal Slug - Super Vehicle-001 (mslug).neo' -> hit  (gameid 37604)
-#   'Metal Slug 2 (mslug2).neo'                  -> miss (SS calls it
-#                                                   'Metal Slug 2 - Super Vehicle-001/ii')
-#   'Metal Slug X (mslugx).neo'                  -> miss (HTTP 404)
-# 48 of the 281 romsets carry a subtitle, so this is a systemic gap, not one
-# unlucky game.
-#
-# The romset id is the one identifier that is always present and always right:
-# it sits in the parentheses in pack layouts and IS the stem in Darksoft ones.
-# Sending it as romnom matches exactly, with no CRC and no fuzzy search —
-# verified: romnom=mslug2.zip returns gameid 37605 / rom id 21808.
+# ScreenScraper indexes NeoGeo as MAME romsets ('<romset>.zip') while MiSTer runs
+# .neo containers whose CRC is in no database, so the CRC route can never match.
+# SS's fuzzy fallback on romnom only works when the pack names the file the way
+# SS does, and 48 of the 281 romsets carry a subtitle it does not expect.
+# The romset id is always present and always right, so it is sent as romnom:
+# an exact match, with no CRC and no fuzzy search.
 _NEOGEO_CORENAMES = frozenset({'neogeo'})
 
 
-# NeoGeo packs that keep a human-readable filename and park the romset id in
-# trailing parentheses: 'Garou - Mark of the Wolves (garou).neo'. The id is
-# the only stable key here — the title MiSTer displays comes from the .neo
-# header and can contain characters no filename can hold (a ':' in Garou's
-# case), so it cannot be matched against disk. Scanned lazily and only after
-# the direct probes miss, so no layout that resolves today pays for it.
+# Rom packs that keep a readable filename and park the romset id in trailing
+# parentheses: '<Title> (<romset>).neo'. Scanned lazily, and only after the
+# direct probes miss.
 _NEOGEO_ROM_EXTS = ('.neo', '.zip')
 
 
@@ -1119,10 +964,8 @@ def _neogeo_file_with_embedded_id(directory, romset_id):
 
 
 
-# Installed by the MiSTer Downloader itself: |games/NEOGEO/romsets.xml is in the
-# official Distribution DB (md5 9b5536a3b95bcd755a4904d34e55582d). Both files
-# are read because a user may own either collection: romsets.xml describes the
-# Darksoft pack, gog-romsets.xml the GOG/Humble one.
+# Both files are read because a user may own either collection: each rom
+# distribution ships its own romset list under a different name.
 _ROMSET_XML_NAMES = ('romsets.xml', 'gog-romsets.xml')
 
 _romset_cache = {}                    # directory -> (mtime_stamp, frozenset)
@@ -1130,17 +973,10 @@ _romset_cache_lock = threading.Lock()
 
 
 # --- .mra <setname> corroboration --------------------------------------------
-# Main_MiSTer writes the romset's <setname> to /tmp/CORENAME when it loads an
-# arcade .mra (field-verified: 'smashtv', 'raidenu', 'holo'). That makes the
-# .mra at STARTPATH self-identifying: when its setname equals the running
-# CORENAME it IS the current launch, no matter how long the core took to
-# assemble — positive identity rather than a timing guess, so it needs no
-# freshness window of its own. A stale STARTPATH cannot satisfy it: a console
-# core's CORENAME is never an arcade romset id.
-#
-# Cached by (path, mtime) for the same reason the romset ids are: evaluate()
-# runs on every inotify burst and would otherwise re-read the file hundreds of
-# times per session.
+# Main_MiSTer writes the romset's <setname> to /tmp/CORENAME on an arcade .mra
+# load, so a .mra at STARTPATH whose setname equals CORENAME IS the current
+# launch: positive identity, with no freshness window of its own.
+# Cached by (path, mtime): evaluate() runs on every inotify burst.
 _MRA_SETNAME_RE = re.compile(
     rb'<\s*setname\s*>\s*([^<]+?)\s*<\s*/\s*setname\s*>', re.IGNORECASE)
 _MRA_READ_CAP = 262144                # generous: real .mra files are 2-50 KB
@@ -1192,13 +1028,9 @@ def _mra_confirms_corename(startpath, corename):
 def _load_romset_names(directory):
     """
     Every romset id declared by the NeoGeo core's own data files.
-
-    A 'name' may carry comma-separated aliases ('mslug3b6,mslug6',
-    'burningfh,brningfh'); each alias is registered, since any of them can be
-    the filename on disk.
-
-    Cached per directory, invalidated by mtime: the file is 41 KB and would
-    otherwise be re-parsed on every single game load.
+    A 'name' may carry comma-separated aliases; each one is registered, since
+    any of them can be the filename on disk.
+    Cached per directory and invalidated by mtime (the file is 41 KB).
     """
     if not directory or not os.path.isdir(directory):
         return frozenset()
@@ -1242,12 +1074,9 @@ def _load_romset_names(directory):
 
 def _neogeo_games_dir(rom_path):
     """
-    The directory holding romsets.xml for this ROM.
-
-    The ROM can be nested — inside a pack ZIP, inside a 'World A-Z/' subfolder —
-    while romsets.xml always sits at the games/NEOGEO root, so walk upwards from
-    the ROM until a romset file appears. Bounded to 4 levels: covers every
-    observed layout and stops the walk from wandering up to /media/fat.
+    The directory holding romsets.xml for this ROM. The ROM can be nested while
+    romsets.xml always sits at the games/NEOGEO root, so walk upwards until a
+    romset file appears. Bounded to 4 levels.
     """
     if not rom_path:
         return None
@@ -1265,10 +1094,9 @@ def _neogeo_games_dir(rom_path):
 
 def _resolve_neogeo_probe(mister_path):
     """
-    Filesystem path for a MiSTer-relative path like 'games/NEOGEO/x/sonicwi2'.
-
+    Filesystem path for a MiSTer-relative path like 'games/NEOGEO/x/<romset>'.
     Only used to answer "is this a romset folder?" from the naming code, which
-    runs outside the request handler and so cannot call its resolver.
+    runs outside the request handler and cannot call its resolver.
     """
     if not mister_path:
         return ''
@@ -1281,15 +1109,10 @@ def _neogeo_romset_label(path, corename):
     """
     The romset id when the path's own name IS the romset id, else ''.
 
-    Covers all three shapes the core accepts: an unzipped Darksoft folder
-    (`mslug2/`), a zipped one (`mslug2.zip`), and a `.neo` named after the
-    romset (`sonicwi2.neo`). Says nothing about whether the thing can be
-    hashed — that is _neogeo_romset_dir()'s job, and the two questions only
-    looked like one until bare-romset `.neo` files turned up: those hash fine
-    but still need the title looked up.
-
-    Returns '' for `Aero Fighters 2 (sonicwi2).neo`, and rightly so: that stem
-    is not a romset id, and the filename already carries the title.
+    Covers the three shapes the core accepts: an unzipped romset folder, a
+    zipped one, and a '.neo' named after the romset. Says nothing about
+    hashability — that is _neogeo_romset_dir()'s job.
+    Returns '' for '<Title> (<romset>).neo', whose stem is a title.
     """
     core = (corename or '').strip()
     if core.upper().startswith('RA_'):
@@ -1311,11 +1134,9 @@ def _neogeo_romset_label(path, corename):
 
 
 def _is_sd_root_file(path):
-    """True when the path is a file sitting directly in the card's root.
-
-    Root holds configuration, scripts and documentation; every game lives at
-    least one directory down. Both mount points are covered because a path can
-    be resolved through either.
+    """True when the path is a file sitting directly in the card's root, where
+    configuration, scripts and documentation live but no game does. Both mount
+    points are covered because a path can be resolved through either.
     """
     try:
         parent = os.path.dirname(os.path.normpath(path)).rstrip('/')
@@ -1327,12 +1148,9 @@ def _is_sd_root_file(path):
 
 def _neogeo_romset_dir(path, corename):
     """
-    The romset id when `path` is a romset CONTAINER — an unzipped Darksoft
-    folder or a zipped one — else ''.
-
-    Narrower than _neogeo_romset_label() on purpose: this one drives no_hash
-    and the hashing short circuit, and a container has no single file to hash
-    while a plain `.neo` does.
+    The romset id when `path` is a romset CONTAINER (a romset folder, zipped
+    or not), else ''. Narrower than _neogeo_romset_label() on purpose: this one
+    drives no_hash, and a container has no single file to hash.
     """
     if not path:
         return ''
@@ -1341,30 +1159,21 @@ def _neogeo_romset_dir(path, corename):
     if not is_container:
         return ''
     return _neogeo_romset_label(path, corename)
-    # The RA_ prefix is stripped here rather than trusted to every caller: the
-    # RetroAchievements toolkit ships the core as RA_NeoGeo, and while the path
-    # and romnom call sites pass an already-stripped name, the display-name one
-    # passes the raw CORENAME. Normalising inside the gate means no caller can
-    # get it wrong.
+    # The RA_ prefix is stripped here rather than in every caller: the
+    # display-name call site passes the raw CORENAME.
 
 
 def _neogeo_ss_romnom(rom_path, filename, corename):
     """
     ScreenScraper romnom for a NeoGeo ROM: '<romset>.zip', or '' when unknown.
 
-    Two candidates, most confident first:
-      1. the parenthesised group at the end of the stem —
-         'Metal Slug 2 (mslug2).neo' — the pack layouts, unambiguous;
-      2. the bare stem — 'mslug2.neo' — the Darksoft layout.
+    Two candidates, most confident first: the parenthesised group at the end of
+    the stem ('<Title> (<romset>).neo'), then the bare stem. Both are confirmed
+    against romsets.xml before use; '' leaves the firmware's current behaviour
+    untouched.
 
-    Both are confirmed against the core's own romsets.xml before use, so a
-    stray '(rev 1)' or an arbitrary filename can never be sent as a romset.
-    When nothing validates, '' is returned and the firmware keeps its current
-    behaviour: games that already resolve keep resolving.
-
-    Prefix matching is deliberately NOT attempted. 'Metal Slug 2' prefixes both
-    'mslug2' and 'mslug2t' (Metal Slug 2 Turbo); guessing between them is the
-    very mistake _lookup_neogeo_romset already refuses to make.
+    Prefix matching is deliberately not attempted: a title can prefix two
+    different romset ids, and guessing between them is not acceptable.
     """
     if (corename or '').strip().lower() not in _NEOGEO_CORENAMES:
         return ''
@@ -1393,17 +1202,12 @@ def _neogeo_ss_romnom(rom_path, filename, corename):
     return ''
 
 # --- Container-image denylist -------------------------------------------------
-# A DOS .vhd usually holds an entire environment or a multi-game compilation,
-# not a single title. jeuRecherche has no notion of "no match": it returns the
-# best fuzzy hit for whatever string it gets, so 'boot' yields a real game id
-# (observed: 170580) and the firmware shows wrong artwork with every appearance
-# of success. No similarity threshold fixes this — the query itself denotes no
-# game. This is NOT an extension check: 0MHz ships one .vhd per game with a real
-# title ('Prince of Persia (1990).vhd'), where name search is exactly right.
-#
-# All matching happens AFTER _clean_search_name(), against a name that is
-# lowercased and has -/_/whitespace collapsed to single spaces, so one entry
-# covers 'top-300', 'Top 300' and 'top_300'.
+# A DOS .vhd usually holds a whole environment or a compilation rather than a
+# title, but jeuRecherche always returns its best fuzzy hit (observed: id 170580
+# for 'boot'), so the firmware would show wrong artwork. Not an extension check:
+# some collections ship one .vhd per game with a real title, where name search
+# is right. Matching happens AFTER _clean_search_name(), i.e. lowercased and
+# with -/_/whitespace collapsed, so one entry covers 'pack-1' and 'Pack 1'.
 
 # Whole-name matches: the cleaned name IS the container, no suffix possible.
 GENERIC_MEDIA_NAMES = {'hdd', 'harddisk', 'system'}
@@ -1411,23 +1215,17 @@ GENERIC_MEDIA_NAMES = {'hdd', 'harddisk', 'system'}
 # OS designators that may qualify a bare container marker: 'BOOT-DOS98'.
 _OS_TOKEN = r'(?:(?:ms)?dos ?\d*(?:\.\d+)?|win ?(?:31|3\.1|95|98|me|xp)|w9[58])'
 
-# Bare container names, optionally qualified by an OS designator.
-# 'boot' is deliberately NOT a free prefix: 'Boot Camp' is a real DOS title, so
-# only 'boot' alone or 'boot <os>' counts. Asymmetric cost drives this — a false
-# positive silently kills artwork for a real game forever, a false negative
-# merely leaves the existing bug on a name we have not seen yet. So 'BOOT-386'
-# or 'BOOT-Games' would escape by design: widen only with a filename in hand.
+# Bare container names, optionally qualified by an OS designator. 'boot' is not
+# a free prefix: real DOS titles begin with that word, so only 'boot' alone or
+# 'boot <os>' counts. A false positive kills artwork for a real game forever.
 GENERIC_MEDIA_RE = re.compile(
     r'^(?:hdd?\d*|disk\d*|drive ?[a-z]|' + _OS_TOKEN + r'|boot(?: ' + _OS_TOKEN + r')?)$',
     re.I,
 )
 
-# Leading-marker matches: a collection marker plus a per-distribution builder or
-# variant suffix — 'Shareware Pack-fbit', 'Top 300 DOS Games'. Chasing the
-# literals is hopeless (every builder picks a different suffix), so match the
-# whole leading marker. Never mid-name: 'Doom Shareware' is a real game and must
-# still reach the search. Unlike 'boot', these are implausible as the START of a
-# real title, which is what makes free-prefix matching safe here.
+# Leading-marker matches: a collection marker plus any builder or variant
+# suffix, which every distribution writes differently. Leading only: a real
+# title may contain the same marker mid-name and must still reach the search.
 GENERIC_MEDIA_PREFIXES = ('shareware', 'top 300')
 
 
@@ -1441,17 +1239,10 @@ def is_generic_media_name(stem):
     return any(s == p or s.startswith(p + ' ') for p in GENERIC_MEDIA_PREFIXES)
 
 
-# 0MHz glues variant markers onto the stem as pseudo-extensions that splitext()
-# does not remove, so they survive into the query and guarantee a jeuRecherche
-# miss on a game that IS in the database — the mirror image of the container
-# denylist: a false negative on a real game, not wrong art on a non-game.
-# Censused over all 387 image names in the 0mhz-net/0mhz-collection MGLs:
-#   .mt32  x87   Roland MT-32 audio build
-#   .r2/.r3/.r4  x35 total   setup revision
-# No other dotted markers exist there. They stack in EITHER order, hence the
-# loop: 'cannon fodder 1.r2.mt32' and 'day of the tentacle.mt32.r2' both occur.
-# The revision marker is restricted to a dot separator (that is how the whole
-# collection writes it); allowing ' r2' would risk eating a real title's tail.
+# Some collections glue variant markers onto the stem as pseudo-extensions that
+# splitext() does not remove, so they survive into the query and miss a game
+# that IS in the database. Only two are in use: '.mt32' (Roland MT-32 build) and
+# '.r2/.r3/.r4' (setup revision). They stack in either order, hence the loop.
 _VARIANT_RE = re.compile(
     r'(?:'
     r'[.\-_ ]+(?:mt32|mt-32)'   # audio build; separator varies in community packs
@@ -1460,16 +1251,10 @@ _VARIANT_RE = re.compile(
     re.I,
 )
 
-# A trailing '-<n>' is a CD disc number, not part of the title: '7th guest-1.chd'
-# is disc 1 of The 7th Guest, and querying '7th guest-1' misses. Two guards, both
-# earned by counterexamples rather than intuition:
-#   * at most 2 digits — 'top-300' is a compilation marker the container denylist
-#     needs intact, not a disc; real discs are single-digit in the whole corpus.
-#   * the remainder must be more than one word — a bare 'F-15.vhd' would otherwise
-#     be decapitated to 'F', the same catastrophic false positive as 'Boot Camp'.
-# Safe because the collection numbers SERIES with a space ('dune 2', 'doom 2' —
-# 98 of them) and NEVER with a hyphen; the only two hyphen-numbered names in the
-# whole set are '7th guest-1' and 'thunder in paradise-1', both discs.
+# A trailing '-<n>' is a CD disc number, not part of the title.
+# Two guards: at most 2 digits, so a '-300' compilation marker survives; and
+# the remainder must be more than one word, so a short hyphenated title is not
+# decapitated to its first letter.
 _DISC_RE = re.compile(r'(.*)-\d{1,2}$')
 
 
@@ -1479,7 +1264,7 @@ def _strip_disc_number(base):
     if not mo:
         return base
     title = mo.group(1)
-    return title if ' ' in title else base   # one-word remainder: keep, 'F-15' stays
+    return title if ' ' in title else base   # one-word remainder: keep the original
 
 
 def _strip_variant_markers(base):
@@ -1493,22 +1278,20 @@ def _strip_variant_markers(base):
 
 def _clean_search_name(name):
     """
-    Derives a ScreenScraper text-search query from a game/file name:
-    strips extension, variant markers, disc numbers, bracketed tags and ALL
+    Derives a ScreenScraper text-search query from a game/file name: strips the
+    extension, variant markers, disc numbers, bracketed tags and ALL
     parenthesised groups, then collapses separators.
-      'Prince of Persia (1990)(Broderbund).vhd' -> 'Prince of Persia'
-      '7th guest-1.mt32.chd'                    -> '7th guest'
-      'cannon fodder 1.r2.mt32.vhd'             -> 'cannon fodder 1'
-      'Doom_[0MHz].mgl'                         -> 'Doom'
-    Recall beats precision here: jeuRecherche matches best on bare titles.
-    Validated against the real 0mhz-dos item listing on archive.org.
+      'Some Title (1990)(Publisher).vhd' -> 'Some Title'
+      'some title-1.mt32.chd'            -> 'some title'
+      'Some Title_[tag].mgl'             -> 'Some Title'
+    Recall beats precision: jeuRecherche matches best on bare titles.
     """
     base = os.path.splitext(os.path.basename(name or ''))[0]
     base = _strip_variant_markers(base)        # '.mt32', '.r2' audio/revision siblings
     base = _strip_disc_number(base)            # '-1' CD disc number
     base = re.sub(r'\[[^\]]*\]', '', base)     # [tags]
     base = re.sub(r'\([^)]*\)', '', base)      # (Year)(Publisher)(Region)
-    base = base.lstrip('~ ')                   # 0MHz marks broken setups with a leading '~'
+    base = base.lstrip('~ ')                   # some collections mark broken setups with '~'
     base = base.replace('_', ' ')
     base = re.sub(r'\s{2,}', ' ', base).strip(' -.')
     return base
@@ -1520,23 +1303,15 @@ def _norm_game_label(s):
 
 def _path_names_game(candidate, game):
     """
-    True when a tracker path plausibly NAMES the committed game.
+    True when a tracker path plausibly NAMES the committed game. Matching is
+    deliberately generous — a false accept costs nothing, a false reject blocks
+    a legitimate hash:
 
-    The committed game name was derived from a path exactly like these at
-    commit time, so in steady state equality holds by construction; the only
-    divergence is OSD noise (the cursor resting on another title). Matching
-    is therefore deliberately generous — a false accept costs nothing new,
-    a false reject blocks a legitimate hash:
-
-      suffix    — normalized candidate equals the game, or ends with
-                  '/' + game. Whole-string first because NeoGeo titles can
-                  legally contain '/' ('... Super Vehicle-001/II'), which a
-                  component split would destroy.
-      stem      — same test with the last component's extension stripped
-                  ('games/SNES/Chrono Trigger (USA).sfc').
-      component — any single path component equals the game, raw or with
-                  its own extension stripped ('.../Game (E)/track01.cue',
-                  'games/X/Game.zip/rom.bin').
+      suffix    — the normalized candidate equals the game, or ends with
+                  '/' + game (whole string first: NeoGeo titles can contain '/').
+      stem      — same test with the last component's extension stripped.
+      component — any single component equals the game, raw or without its own
+                  extension ('.../Game (E)/track01.cue').
     """
     ng = _norm_game_label(game)
     if not ng:
@@ -1559,24 +1334,17 @@ def _path_names_game(candidate, game):
 # ---------------------------------------------------------------------------
 # Boxart Pack — local artwork resolution
 #
-# The pack ships one image per GAME (not per dump) at
-# docs/<System>/Artwork/<key>.jpg, alongside an index.tsv whose rows are
-# (name, crc, size, key): every known dump of that game mapped to the image
-# that represents it. 'Super Mario World (Europe)' has no file of its own; the
-# index sends it to the (USA) image.
-#
-# Installed with path 'pext', so it may live on the SD or on any USB — the
-# mount points are probed, never assumed.
+# One image per GAME (not per dump) at docs/<System>/Artwork/<key>.jpg, plus an
+# index.tsv of (name, crc, size, key) rows mapping every known dump of a game to
+# the image that represents it, so a regional variant with no file of its own
+# is sent to the image of the dump the pack picked.
+# Installed with path 'pext', so the mount points are probed, never assumed.
 # ---------------------------------------------------------------------------
 
-# Friendly system name -> pack folder. The friendly name is what
-# get_game_system() resolves: game_system when a backwards-compatible core
-# opened something older, the core's own name otherwise. Keying off core_raw
-# instead would send a Master System cartridge to the Genesis folder.
-#
-# Grows one line per system added to the builder's scope.ini. The two must
-# move together: a system present in one and absent from the other is a game
-# that silently falls through to ScreenScraper.
+# Friendly system name -> pack folder. Keyed on what get_game_system() resolves,
+# not on core_raw, which would send a Master System cartridge to the Genesis
+# folder. Must move together with the builder's scope.ini: a system present in
+# one and absent from the other falls through to ScreenScraper.
 _PACK_SYSTEM = {
     'Nintendo NES/Famicom':            'NES',
     'Famicom Disk System':             'FDS',
@@ -1625,9 +1393,8 @@ _PACK_SYSTEM = {
 
 _PACK_MOUNTS = ['/media/fat'] + ['/media/usb%d' % i for i in range(8)]
 
-# dir -> (mtime_ns, {name_lower: key}, {'crc:size': key}). Arcade's index is
-# 12k rows; parsing it on every game change would be pointless work, and the
-# file only changes when the Downloader rewrites it.
+# dir -> (mtime_ns, {name_lower: key}, {'crc:size': key}). Arcade's index is 12k
+# rows and only changes when the Downloader rewrites it.
 _pack_index_cache = {}
 _pack_index_lock = threading.Lock()
 
@@ -1643,24 +1410,20 @@ def _pack_dir(system_folder):
     return ''
 
 
-# Catalogues that share a core. Each keeps its own docs/ folder, and the
-# consumer falls back to the sibling when its own folder has no image.
-# This is not cosmetic: ScreenScraper splits dual-mode cartridges between
-# catalogues on its own criteria, so a 'GB Compatible' game the pack HAS
-# would otherwise read as missing. FDS falls back to NES but not the other
-# way round: a cartridge must never receive the disk release's box.
+# Catalogues that share a core: each keeps its own docs/ folder and falls back to
+# its sibling. ScreenScraper splits dual-mode cartridges between catalogues, so a
+# game the pack HAS would otherwise read as missing. FDS falls back to NES but
+# not the other way round: a cartridge must never receive the disk release's box.
 _PACK_SIBLINGS = {
     'GAMEBOY': ('GBC',),
     'GBC': ('GAMEBOY',),
     'FDS': ('NES',),
-    # Same asymmetry: a BS title ScreenScraper filed under SNES is rescued
-    # from that folder, and a cartridge never receives a Satellaview box.
+    # Same asymmetry: a cartridge never receives a Satellaview box.
     'Satellaview': ('SNES',),
 }
 
 # Cores with no catalogue of their own. The Super Game Boy core runs Game Boy
-# cartridges — games/SGB holds .gb and .gbc files — and ScreenScraper's SGB
-# catalogue carries poorer media than Game Boy's for the same title, so it
+# cartridges and ScreenScraper's SGB catalogue carries poorer media, so it
 # borrows the Game Boy folders instead of getting a pack of its own.
 _PACK_BORROWS = {
     'Nintendo Super Game Boy': ('GAMEBOY', 'GBC'),
@@ -1680,7 +1443,6 @@ def _pack_folders(friendly):
 
 def _pack_lookup_any(folders, keys, crc, size):
     """First (path, resolved_key, folder) any folder yields for any key.
-
     Folders come from the shared-catalogue rule; several keys appear when the
     reported game name is ambiguous as a path (see _pack_key_from_state).
     """
@@ -1698,16 +1460,14 @@ def _pack_lookup_any(folders, keys, crc, size):
 
 
 def _pack_title(name):
-    """A dump name without its parenthesised tags, so collections that tag
-    differently still match: 'F-18 Hornet (NTSC) (Absolute) (1988)' and
-    'F-18 Hornet (USA)' both reduce to 'f-18 hornet'."""
+    """A dump name without its parenthesised tags, so '<Title> (NTSC)
+    (Publisher) (1988)' and '<Title> (USA)' both reduce to '<title>'."""
     return re.sub(r'\s+', ' ', re.sub(r'\([^)]*\)', ' ', name)).strip().lower()
 
 
 def _pack_index(pack_dir):
-    """(by_name, by_hash, by_title) for a pack folder. Empty dicts when there
-    is no index.tsv — a pack built before the index existed still resolves by
-    exact filename, so a missing index degrades rather than breaks."""
+    """(by_name, by_hash, by_title) for a pack folder. Empty dicts when there is
+    no index.tsv: a pack without one still resolves by exact filename."""
     index_path = os.path.join(pack_dir, 'index.tsv')
     try:
         stamp = os.stat(index_path).st_mtime_ns
@@ -1739,10 +1499,8 @@ def _pack_index(pack_dir):
                     if title:
                         by_title[title] = key if by_title.get(
                             title, key) == key else ''
-                # Arcade rows carry no crc or size: a MAME set is a zip of many
-                # files, so there is no single hash for the set. Those rows
-                # resolve by name only, which is exact anyway — the .mra
-                # setname IS the key space.
+                # Arcade rows carry no crc or size (a MAME set is a zip of many
+                # files), so they resolve by name, which is exact anyway.
                 if crc and size:
                     by_hash['%s:%s' % (crc.strip().lower(), size.strip())] = key
     except Exception as e:
@@ -1755,18 +1513,18 @@ def _pack_index(pack_dir):
 
 
 def _pack_lookup(pack_dir, key, crc, size):
-    """(abs_path, resolved_key) for a game, ('', '') when the pack has no
-    image. Four steps, cheapest first:
+    """(abs_path, resolved_key) for a game, ('', '') when the pack has no image.
+    Steps, cheapest first:
 
-      1. the exact key as a filename — the common case, one stat();
-      2. the index by variant name — catches the user holding a dump the pack
-         did not pick as representative;
-      3. a trailing '(setname)' as a key — catches rom packs that prefix the
-         identifier with a title of their own invention;
-      4. the index by crc+size — catches a renamed file, and costs nothing
-         extra because rom-details already computed the CRC;
-      5. the index by title alone — catches collections that tag their dumps
-         differently, and is skipped when the title is not unique.
+      1. the exact key as a filename — one stat();
+      2. the index by variant name — the user holds a dump the pack did not
+         pick as representative;
+      3. a trailing '(setname)' as a key — rom packs that prefix the identifier
+         with a title of their own;
+      4. the index by crc+size — a renamed file; free, rom-details already
+         computed the CRC;
+      5. the index by title alone — collections that tag their dumps
+         differently; skipped when the title is not unique.
     """
     if not pack_dir:
         return '', ''
@@ -1785,14 +1543,9 @@ def _pack_lookup(pack_dir, key, crc, size):
             if os.path.isfile(candidate):
                 return candidate, mapped
 
-    # A rom pack that names its files '<title> (<setname>)' resolves on the
-    # setname alone. The @MiSTer Neo Geo add-on does exactly that, and its
-    # titles are its own — 'Shock Troopers (set 1) (shocktro)' where the
-    # catalogue says just 'Shock Troopers' — so no amount of aliasing in the
-    # pack can predict them, while the bracketed tail is exact.
-    #
-    # It fires only when that tail IS a key in this folder, which is what
-    # makes it safe: the tail of 'Tetris (World) (Rev 1)' is 'Rev 1', and no
+    # A rom pack naming its files '<title> (<setname>)' resolves on the setname
+    # alone. It only fires when that tail IS a key in this folder, which is what
+    # makes it safe: the tail of '<Title> (World) (Rev 1)' is 'Rev 1', and no
     # pack has an image called that.
     if key:
         tail = re.search(r'\(([^()]+)\)\s*$', key)
@@ -1803,7 +1556,7 @@ def _pack_lookup(pack_dir, key, crc, size):
                 return candidate, setname
 
     # The server formats CRC32 uppercase ('05FBB855'), the index stores it
-    # lowercase. Normalise both sides rather than trusting either.
+    # lowercase, so both sides are normalised.
     if crc and size:
         mapped = by_hash.get('%s:%s' % (str(crc).strip().lower(), str(size).strip()))
         if mapped:
@@ -1824,11 +1577,10 @@ def _pack_lookup(pack_dir, key, crc, size):
 def _pack_key_from_state(game_path, is_arcade):
     """Pack key candidates for the loaded game, derived from state ALONE.
 
-    Deliberately independent of rom-details: the display asks for artwork
-    before (and sometimes without) triggering a hash, so tying resolution to
-    rom-details left /media/artwork serving the PREVIOUS game's image. The
-    exact-filename step never needed the hash anyway — only the CRC fallback
-    does, and that runs later as a refinement.
+    Deliberately independent of rom-details: the display asks for artwork before
+    (and sometimes without) triggering a hash, so tying resolution to it left
+    /media/artwork serving the PREVIOUS game. Only the CRC fallback needs the
+    hash, and that runs later as a refinement.
     """
     if not game_path:
         return []
@@ -1838,15 +1590,13 @@ def _pack_key_from_state(game_path, is_arcade):
             if setname and re.match(r'^[a-z0-9][a-z0-9_-]*$', setname):
                 return [setname]
         return []
-    # Consoles: the No-Intro name without its extension. Zip-internal paths
-    # carry the real name at the end, so basename() covers them too.
+    # Consoles: the standard dump name without its extension. Zip paths carry
+    # the real name at the end, so basename() covers them too.
     keys = [os.path.splitext(os.path.basename(game_path))[0]]
 
-    # A game NAME may contain a slash, and then it is not a path component at
-    # all: the Neo Geo core reports 'Metal Slug 2: Super Vehicle-001/II' from
-    # its romsets.xml, and basename() cuts that down to 'II'. Rebuild the
-    # candidate by taking everything after the last directory that actually
-    # exists on disk.
+    # A game NAME may contain a slash (NeoGeo titles from romsets.xml do), which
+    # basename() would cut down to the last segment, so the candidate is rebuilt
+    # from the last directory that actually exists on disk.
     if '/' in game_path:
         head = game_path
         while '/' in head:
@@ -1862,8 +1612,7 @@ def _pack_key_from_state(game_path, is_arcade):
 
 def _pack_resolve_for_state(game_path, is_arcade, game_system, core, seq):
     """Resolves the pack image at state-commit time and records which seq it
-    belongs to. Called the moment the game changes, so /media/artwork is
-    correct before the display asks."""
+    belongs to, so /media/artwork is correct before the display asks."""
     path = ''
     try:
         folders = (['Arcade'] if is_arcade
@@ -1881,11 +1630,11 @@ def _pack_resolve_for_state(game_path, is_arcade, game_system, core, seq):
 
 
 def _pack_annotate(result):
-    """Adds artwork_local / artwork_key / artwork_system to a rom-details
-    result, and caches the resolved path for /media/artwork to serve.
+    """Adds artwork_local / artwork_key / artwork_system to a rom-details result
+    and caches the resolved path for /media/artwork to serve.
 
-    Never raises: artwork is a nice-to-have and a pack problem must not be
-    able to break rom-details, which the firmware needs for everything else.
+    Never raises: a pack problem must not be able to break rom-details, which
+    the firmware needs for everything else.
     """
     result['artwork_local'] = False
     result['artwork_key'] = ''
@@ -1903,7 +1652,7 @@ def _pack_annotate(result):
 
         if is_arcade:
             # The .mra names its romset in <setname>, and that id is the pack's
-            # arcade key — the same identifier ss_romnom already extracts above.
+            # arcade key — the same identifier ss_romnom extracts above.
             arc_path = result.get('path') or path_for_name or ''
             key = ''
             if arc_path.lower().endswith('.mra'):
@@ -1911,7 +1660,7 @@ def _pack_annotate(result):
                 if setname and re.match(r'^[a-z0-9][a-z0-9_-]*$', setname):
                     key = setname
         else:
-            # Consoles: the No-Intro name without its extension.
+            # Consoles: the standard dump name without its extension.
             key = os.path.splitext(result.get('filename') or '')[0]
 
         found, resolved, system_folder = _pack_lookup_any(
@@ -1920,10 +1669,9 @@ def _pack_annotate(result):
         if found:
             result['artwork_local'] = True
             result['artwork_key'] = resolved
-            # Only ever UPGRADES what the state commit already resolved: the
-            # CRC step can find an image the name step missed, but a miss here
-            # must not wipe a good path (this runs per rom-details request,
-            # while the commit runs once per game).
+            # Only ever UPGRADES what the state commit resolved: the CRC step
+            # can find an image the name step missed, but a miss here must not
+            # wipe a good path.
             with _state_lock:
                 if _state['artwork_path'] != found:
                     _state['artwork_path'] = found
@@ -1939,28 +1687,20 @@ def _enrich_rom_result(result, detection_method=None):
     Adds name-search metadata to a rom-details result (success OR failure):
       search_name      — clean title for jeuRecherche.php. Always populated:
                          the firmware displays it even when it must not search.
-      no_hash          — True when the CRC can NEVER arrive (unindexable,
-                         mutable container). Distinct from hash_calculated,
-                         which is also False while a hash is still in flight —
-                         an ambiguity that costs the firmware 5x20s of pointless
-                         retries on every .vhd load.
-      ss_romnom        — ScreenScraper romnom override ('mslug2.zip'). Only
-                         populated when a romset id could be confirmed against
-                         the core's own data files; '' means "use the filename",
-                         i.e. exactly today's behaviour.
+      no_hash          — True when the CRC can NEVER arrive. Distinct from
+                         hash_calculated, which is also False while a hash is
+                         still in flight.
+      ss_romnom        — ScreenScraper romnom override ('<romset>.zip'); '' means
+                         "use the filename", i.e. exactly today's behaviour.
       container_image  — True when search_name denotes a whole-environment or
-                         compilation image rather than a game ('boot',
-                         'BOOT-DOS98', 'Shareware Pack-fbit'). The firmware must
-                         never text-search these: jeuRecherche has no "no match"
-                         and returns a fuzzy hit (observed: id 170580 for
-                         'boot'), i.e. confident-looking wrong artwork.
-      name_search_hint — True when the CRC route cannot work: no ROM resolvable,
-                         no CRC computed, or an unindexed container.
+                         compilation image rather than a game ('boot', a
+                         collection marker). These must never be
+                         text-searched: jeuRecherche has no "no match" and
+                         returns confident-looking wrong artwork.
+      name_search_hint — True when the CRC route cannot work.
 
-    These two flags are deliberately independent. A DOS game with a valid but
-    unindexed CRC (pack-built CHDs) has container_image=False and hint=False,
-    and must STILL reach the text search after the CRC path misses twice —
-    conflating them into one boolean would silently kill that path.
+    The last two are independent: a DOS game with a valid but unindexed CRC has
+    both False and must STILL reach the text search after the CRC path misses.
     """
     with _state_lock:
         game_for_name = _state['game']
@@ -1971,23 +1711,17 @@ def _enrich_rom_result(result, detection_method=None):
     corename_raw = _read_corename_raw()
     no_hash = _is_no_hash(ext, corename_raw)
     # A romset folder has no single file to hash, so the CRC can never arrive.
-    # Saying so here is what stops the firmware spending its whole retry budget
-    # waiting for one.
+    # Saying so stops the firmware spending its retry budget waiting for one.
     _ng_path = result.get('path') or path_for_name
 
-    # Whenever the path's name is a romset id ('cyberlip', 'sonicwi2'), that id
-    # is useless as a ScreenScraper text search — search the title the core
-    # resolved from romsets.xml instead. Independent of hashability: a bare
-    # '.neo' hashes perfectly well and still needs this.
-    #
-    # Used verbatim: _clean_search_name() is built for FILENAMES — it starts
-    # with os.path.basename(), which would truncate
-    # 'Metal Slug 2: Super Vehicle-001/II' to 'II' — and strips extensions and
-    # parenthesised tags a curated XML title does not carry.
+    # When the path's name is a romset id it is useless as a ScreenScraper text
+    # search: use the title the core resolved from romsets.xml instead. Used
+    # verbatim — _clean_search_name() is built for FILENAMES and would truncate
+    # a title containing a slash to its last segment.
     if game_for_name and _neogeo_romset_label(_ng_path, corename_raw):
         search_name = ' '.join(game_for_name.split())
 
-    # A romset CONTAINER (folder or Darksoft zip) has no single file to hash.
+    # A romset CONTAINER (folder or zip) has no single file to hash.
     if not no_hash and _neogeo_romset_dir(_ng_path, corename_raw):
         no_hash = True
 
@@ -1998,17 +1732,10 @@ def _enrich_rom_result(result, detection_method=None):
         result.get('path') or path_for_name,
         result.get('filename'),
         corename_raw)
-    # Arcade: the launched .mra names its romset in <setname>, and that
-    # id IS ScreenScraper's key — SS indexes arcade as MAME romsets,
-    # exactly like the NeoGeo override above ('mslug2.zip', field-
-    # verified). Until now arcade queries carried the .mra FILENAME as
-    # romnom plus a CRC of the .mra itself, surviving only on SS's fuzzy
-    # matching — which parses 'Smash T.V. (rev 8.00) [...].mra' but
-    # chokes on 'Raiden.US.mra', a 404 for a game SS has. The setname is
-    # exact and immune to pack filename cosmetics. Same contract as
-    # NeoGeo: '' means "use the filename" (today's behaviour), so a
-    # missing or malformed setname changes nothing; the shape guard is
-    # ra_hash's arcade rule, because a wrong romnom is worse than none.
+    # Arcade: the launched .mra names its romset in <setname>, and that id IS
+    # ScreenScraper's key (SS indexes arcade as MAME romsets), exactly like the
+    # NeoGeo override above. Same contract: '' means "use the filename", so a
+    # missing or malformed setname changes nothing.
     if not result['ss_romnom']:
         _arc_p = (result.get('path') or path_for_name or '')
         if _arc_p.lower().endswith('.mra'):
@@ -2022,45 +1749,31 @@ def _enrich_rom_result(result, detection_method=None):
         no_hash
     )
 
-    # no_rom_on_disk — the game has a NAME to show but NO rom file on disk,
-    # so the CRC route is not merely unindexed (that is name_search_hint):
-    # there is nothing to hash at all. Set for SAM name-only content
-    # (Amiga demos, WHDLoad, some MGL) where the guard in
-    # _get_enhanced_rom_path returned None. The firmware uses it to skip
-    # the 'DOWNLOADING -> download failed' flash and show a stable
-    # NOT-IN-DATABASE card if the (still-attempted) name search misses.
-    # Must NOT fire for a legitimate CD32/DOS title, which resolves a real
-    # file (available=True) and whose name search must run — hence keying
-    # on detection_method, not on available alone.
+    # no_rom_on_disk — there is a NAME to show but no rom file to hash at all
+    # (SAM name-only content: Amiga demos, WHDLoad, some MGL). The firmware uses
+    # it to show a stable NOT-IN-DATABASE card instead of the
+    # "DOWNLOADING -> download failed" flash. Keyed on detection_method and not
+    # on available: a legitimate CD32/DOS title resolves a real file and its
+    # name search must still run.
     result['no_rom_on_disk'] = bool(detection_method == 'sam_no_path')
 
-    # Local-first artwork. Runs last: it consumes filename, crc32 and
-    # size, all of which the block above has already settled.
+    # Local-first artwork. Runs last: it consumes filename, crc32 and size.
     _pack_annotate(result)
     return result
 
 # ---------------------------------------------------------------------------
 # MiSTer system folders that can never contain the RUNNING game. The OSD file
-# browser is one generic component reused for scripts, video filters, gamma
-# tables, shadow masks, audio filters, documentation, SoundFonts and core
-# selection — and every confirmed selection there emits the very same
-# FILESELECT='selected' + CURRENTPATH/FULLPATH breadcrumbs as a game launch,
-# because fs_MenuSelect in menu.cpp is a per-selector VARIABLE, not a
-# game-only state. Companion daemons that mirror browser state into
-# ACTIVEGAME amplify the noise: merely running a script can leave
-# ACTIVEGAME='Scripts' behind (observed in the field on a core-only launch
-# right after a script run).
-# Any path whose first component (after the mount prefix) lands in this set,
-# or starts with '_' (the core/menu folder convention: _Console, _Utility,
-# _@Favorites …), is browser debris, not a game.
+# browser is one generic component reused for scripts, filters, gamma tables,
+# documentation and core selection, and every confirmed selection emits the very
+# same FILESELECT + CURRENTPATH breadcrumbs as a game launch. Companion daemons
+# amplify the noise: running a script can leave ACTIVEGAME='Scripts' behind.
+# Any path whose first component (after the mount prefix) lands in this set, or
+# starts with '_' (_Console, _Utility, _@Favorites …), is browser debris.
 # ---------------------------------------------------------------------------
-# How much OLDER than ACTIVEGAME the 'selected' witness may be and still be
-# trusted as belonging to the same launch. Trackers that mirror browser
-# state write their ACTIVEGAME copy a settle delay (well under 2 s) AFTER
-# menu.cpp writes 'selected', so a live selection is always slightly older
-# than its own mirror copy. A launcher that bypasses the OSD and MGL leaves
-# 'selected' minutes or hours behind its ACTIVEGAME write instead — and then
-# ACTIVEGAME must win, exactly as it did before the FILESELECT branches.
+# How much OLDER than ACTIVEGAME the 'selected' witness may be and still count
+# as the same launch. Trackers mirror browser state a settle delay AFTER
+# menu.cpp writes 'selected'; a launcher that bypasses the OSD leaves it minutes
+# behind instead, and then ACTIVEGAME must win.
 _SELECTED_STALENESS_MARGIN_S = 5.0
 
 _MISTER_SYSTEM_DIRS = frozenset({
@@ -2081,20 +1794,15 @@ def _is_system_path(path):
                             or first.startswith('_'))
 
 # ---------------------------------------------------------------------------
-# ZIP virtual paths for the state machine. Pack zips (alphabet packs:
-# games/Amstrad/a.zip/a/<title>) put the browser INSIDE an archive, where
-# os.path probing is blind: the composed launch candidate is neither a file
-# nor an isdir, and the daemon-mirrored browse location ('a.zip/a') slips
-# the folder gate and gets minted as the game name. The zip's central
-# directory is the authority for both questions, cached by (path, mtime_ns)
-# because the evaluator runs on every inotify burst — one directory read per
-# zip per change, O(1) lookups after.
+# ZIP virtual paths for the state machine. Inside a pack zip
+# (games/<System>/a.zip/a/<title>) os.path probing is blind: the composed
+# candidate is neither a file nor an isdir, and the browsed location would be
+# minted as the game name. The zip's central directory answers both questions,
+# cached by (path, mtime_ns) because the evaluator runs on every inotify burst.
 #
-# Splitting mirrors is_zip_path (greedy '.zip', case-insensitive); member
-# matching mirrors get_zip_file_info_enhanced: exact, then case-insensitive,
-# then stem (CURRENTPATH drops the extension) preferring _KNOWN_ROM_EXTS.
-# The basename-only strategy is deliberately NOT mirrored here: for
-# establishing IDENTITY the path must agree, not just the filename.
+# Splitting mirrors is_zip_path; member matching mirrors
+# get_zip_file_info_enhanced (exact, case-insensitive, then stem). The
+# basename-only strategy is NOT mirrored: identity needs the whole path to agree.
 # ---------------------------------------------------------------------------
 _ZIP_SPLIT_RE = re.compile(r'(.+\.zip)', re.IGNORECASE)
 
@@ -2184,9 +1892,8 @@ def _zip_internal_is_folder(zip_abs, internal):
 
 def _game_name_from_path(path):
     """
-    Extracts game name from a file path.
-    Only strips the extension if it is a known ROM extension.
-    Avoids stripping version suffixes like '.000' or '.001'.
+    Extracts the game name from a file path. Only strips the extension when it
+    is a known ROM extension, so version suffixes like '.000' survive.
     """
     base = os.path.basename(path)
     ext  = os.path.splitext(base)[1].lower()
@@ -2200,29 +1907,23 @@ def _update_state():
     corename    = _read_file('/tmp/CORENAME')
     activegame  = _read_file('/tmp/ACTIVEGAME')
     currentpath = _read_file('/tmp/CURRENTPATH')
-    # FILESELECT's CONTENT, not just its mtime. Main_MiSTer writes 'active'
-    # while the file browser is open and 'selected' at the moment a file is
-    # actually launched (menu.cpp, guarded by log_file_entry). That single word
-    # separates navigation from a load without any timing heuristics.
+    # FILESELECT's CONTENT, not just its mtime: Main_MiSTer writes 'active'
+    # while the browser is open and 'selected' at the moment of a real launch.
     fileselect  = _read_file('/tmp/FILESELECT')
     fullpath    = _read_file('/tmp/FULLPATH')
 
     # --- Navigation vs real load (tolerant gate) ---
-    # Empirical MiSTer behaviour: during OSD navigation FILESELECT and
-    # CURRENTPATH are written back-to-back (sub-millisecond apart); on a real
-    # load only FILESELECT is touched.
-    # A tolerance window separates the two cases robustly: coupled writes are
-    # microseconds apart, a human cursor-move followed by Enter is >= ~100 ms.
+    # During OSD navigation FILESELECT and CURRENTPATH are written back-to-back
+    # (sub-millisecond apart); on a real load only FILESELECT is touched. A
+    # tolerance window separates them: a cursor move plus Enter is >= ~100 ms.
     global _last_evaluated_corename
 
     # --- SAM detection runs BEFORE the OSD guard ---
-    # SAM is authoritative whenever active and current. It loads games in bursts
-    # that write FILESELECT and CURRENTPATH microseconds apart — indistinguishable
-    # from OSD navigation by timing alone — so if the guard ran first it would
-    # swallow every same-core SAM hop (e.g. ao486 DOS rotation) as "navigation".
-    # When SAM owns the state, a burst IS a real load, so decide here and return
-    # before the guard is consulted. _last_evaluated_corename is advanced so a
-    # later non-SAM event still has a correct baseline for the guard.
+    # SAM loads in bursts that timing alone cannot tell apart from OSD
+    # navigation, so the guard would swallow every same-core SAM hop. When SAM
+    # owns the state a burst IS a real load: decide here and return.
+    # _last_evaluated_corename is advanced so a later non-SAM event still has a
+    # correct baseline for the guard.
     if _sam_is_current():
         sam_active, sam_core_raw, sam_core_friendly, sam_game, sam_path = _sam_get_current()
         if sam_active and sam_core_raw:
@@ -2243,11 +1944,9 @@ def _update_state():
     core_changed      = (corename != _last_evaluated_corename)
     activegame_recent = (time.time_ns() - ag_ns) <= 3_000_000_000  # explicit launch (Remote/Zaparoo)
 
-    # Both navigation and launch write FILESELECT and CURRENTPATH microseconds
-    # apart, so the coupling delta alone cannot tell them apart; the file's
-    # CONTENT can. 'selected' is written only on an actual launch, so it vetoes
-    # the navigation verdict outright — and it needs no tracker, which matters
-    # for the many setups without Remote/Zaparoo running.
+    # Timing cannot separate navigation from launch here, but content can:
+    # 'selected' is written only on an actual launch, so it vetoes the
+    # navigation verdict — and it needs no tracker running.
     fileselect_load = (fileselect == 'selected')
 
     if (delta_ms <= _NAV_COUPLING_MS and not core_changed
@@ -2265,13 +1964,10 @@ def _update_state():
         return
 
     # --- Resolve friendly core name ---
-    # RA_-prefixed cores: the RetroAchievements toolkit (odelot fork via
-    # MiSTer Companion) loads adapted cores through MGLs whose <setname>
-    # prefixes the stock name with 'RA_' (RA_SNES, RA_MegaDrive, ...).
-    # Strip the prefix for the lookup so they resolve exactly like their
-    # stock counterparts (friendly name, images, ScreenScraper mapping,
-    # RA panel). The raw corename keeps flowing to the arcade/ACTIVEGAME
-    # logic below, which already handles it.
+    # The RetroAchievements toolkit loads adapted cores through MGLs whose
+    # <setname> prefixes the stock name with 'RA_'. Strip it so they resolve
+    # exactly like their stock counterparts; the raw corename keeps flowing to
+    # the arcade/ACTIVEGAME logic below.
     lookup_name = corename[3:] if corename.startswith('RA_') else corename
     friendly_name = (CORE_NAME_MAPPING.get(lookup_name) or
                     CORE_NAME_MAPPING_LOWER.get(lookup_name.lower()) or
@@ -2291,7 +1987,7 @@ def _update_state():
     corename_ts   = _get_mtime_ns('/tmp/CORENAME') / 1e9
     activegame_ts = _get_mtime_ns('/tmp/ACTIVEGAME') / 1e9
     fileselect_ts = _get_mtime_ns('/tmp/FILESELECT') / 1e9
-    # 'selected' is only testimony about the CURRENT launch while it is not
+    # 'selected' is testimony about the CURRENT launch only while it is not
     # staler than the freshest tracker write (see _SELECTED_STALENESS_MARGIN_S).
     fileselect_fresh = (fileselect == 'selected' and
                         fileselect_ts >= activegame_ts
@@ -2304,12 +2000,10 @@ def _update_state():
         activegame_ts >= corename_ts - ARCADE_FRESHNESS
     )
 
-    # STARTPATH points at the launched .mra for arcade cores. The .mra
-    # extension is arcade-exclusive and independent of the launch folder,
-    # so this catches arcades started from _@Favorites, custom folders,
-    # etc. — cases where FULLPATH doesn't contain "arcade". Freshness is
-    # checked against CORENAME so a stale STARTPATH from a previous arcade
-    # session doesn't misclassify a console game loaded afterwards.
+    # STARTPATH points at the launched .mra for arcade cores, and the .mra
+    # extension is arcade-exclusive, so this also catches arcades started from
+    # _@Favorites or custom folders. Freshness is checked against CORENAME so a
+    # stale STARTPATH cannot misclassify a console game loaded afterwards.
     startpath = ''
     try:
         with open('/tmp/STARTPATH', 'r') as f:
@@ -2323,12 +2017,9 @@ def _update_state():
         startpath_ts >= corename_ts - ARCADE_FRESHNESS
     )
 
-    # Slow arcade romsets (large MRAs assembling from many ROM parts) can
-    # take longer than ARCADE_FRESHNESS to write CORENAME, which makes the
-    # timing test fail on a launch that is perfectly real — the game is then
-    # dropped and the panel falls back to the bare core. The .mra's own
-    # <setname> settles it without reopening the window the freshness gate
-    # exists to close.
+    # Large MRAs can take longer than ARCADE_FRESHNESS to write CORENAME, which
+    # drops a launch that is perfectly real. The .mra's own <setname> settles it
+    # without reopening the window the freshness gate exists to close.
     if startpath_is_mra and not startpath_arcade_fresh:
         if _mra_confirms_corename(startpath, corename):
             startpath_arcade_fresh = True
@@ -2348,8 +2039,8 @@ def _update_state():
         print(f"🕹️ Arcade (Remote launch): {game_name}")
 
     elif startpath_arcade_fresh:
-        # Arcade launched via OSD — detected by the .mra in STARTPATH,
-        # works regardless of the launch folder (_Arcade, _@Favorites, …).
+        # Arcade launched via OSD, detected by the .mra in STARTPATH: works
+        # regardless of the launch folder (_Arcade, _@Favorites, …).
         is_arcade = True
         game_name = _game_name_from_path(startpath)
         game_path = startpath
@@ -2389,47 +2080,36 @@ def _update_state():
         
 
         # --- FILESELECT='selected': Main_MiSTer's own launch witness ---------
-        # Every code path in menu.cpp that writes 'selected' writes CURRENTPATH
-        # in the SAME event: the OSD hook fires while CURRENTPATH still holds
-        # the navigation write of the item being launched, and the three MGL
-        # states (any launcher that loads a .mgl: remotes, NFC, web) rewrite
-        # FULLPATH + CURRENTPATH + FILESELECT together. So while FILESELECT
-        # reads 'selected', CURRENTPATH is first-hand testimony of the launched
-        # item — a file, a folder, or a NeoGeo title — and needs no tracker at
-        # all. Resolved up front into one value so the chain below can still
-        # fall through to ACTIVEGAME when nothing here matches.
+        # Every menu.cpp path that writes 'selected' writes CURRENTPATH in the
+        # SAME event, so while FILESELECT reads it CURRENTPATH is first-hand
+        # testimony of the launched item and needs no tracker at all. Resolved
+        # up front so the chain below can still fall through to ACTIVEGAME when
+        # nothing here matches.
         base = fullpath.rstrip('/') if fullpath else ''
         if currentpath and base and not base.endswith(currentpath):
             cp_composed = base + '/' + currentpath        # browser: dir + item
         else:
             cp_composed = base or currentpath             # MGL: already the file
 
-        # System-path verdicts, shared by every branch below: a script,
-        # filter, gamma or cheat selection leaves these exact breadcrumbs and
-        # must never be adopted as a game — not from the browser files, and
-        # not from an ACTIVEGAME a tracker mirrored them into.
+        # System-path verdicts shared by every branch below: a script, filter,
+        # gamma or cheat selection leaves these breadcrumbs and is never a game,
+        # not from the browser files and not from a mirrored ACTIVEGAME.
         cp_is_system        = _is_system_path(cp_composed)
         activegame_is_system = _is_system_path(activegame)
 
-        # A directory is a location, not a game identity. Trackers that mirror
-        # the browser leave the browsed FOLDER here, and that value stays
-        # fresh after FILESELECT moves off 'selected' (opening the OSD writes
-        # 'active'/'cancelled'), so without this verdict the folder would
-        # displace the game committed a moment earlier. Folder values may
-        # still establish identity on a NEW core (degraded but pre-existing
-        # behaviour), and confirmed NeoGeo romset folders stay first-class.
+        # A directory is a location, not a game identity: trackers leave the
+        # browsed FOLDER here and it would displace the game committed a moment
+        # earlier. Folder values may still establish identity on a NEW core, and
+        # confirmed NeoGeo romset folders stay first-class.
         ag_probe = ((activegame if activegame.startswith('/')
                      else os.path.join('/media/fat', activegame))
                     if activegame else '')
-        # Zip-shaped variant of the same mirroring: browsing INSIDE a
-        # pack zip leaves 'games/Amstrad/a.zip/a' here — a location,
-        # not a game — but isdir() cannot see into archives, so it
-        # slipped this gate and its basename ('a') was minted as the
-        # game name. The central directory settles it: an internal path
-        # that is a directory prefix there is a browsed folder exactly
-        # like an isdir() one. Zip-ROOT mirrors (empty internal) are
-        # left alone — a single-game zip launched via ACTIVEGAME is
-        # legitimate, and NeoGeo romset zips stay first-class below.
+        # Zip-shaped variant: browsing INSIDE a pack zip leaves
+        # 'games/<System>/a.zip/a' here, which isdir() cannot see,
+        # so its basename was minted as the game name. The central
+        # directory settles it. Zip-ROOT mirrors (empty internal)
+        # are left alone: a single-game zip launched via ACTIVEGAME
+        # is legitimate.
         ag_zip_rel, ag_zip_internal = _zip_split(activegame)
         ag_zip_is_folder = False
         if ag_zip_rel and ag_zip_internal:
@@ -2442,15 +2122,11 @@ def _update_state():
                                      or ag_zip_is_folder)
                                 and not _neogeo_romset_dir(ag_probe, corename))
 
-        # Same verdict for CURRENTPATH, which had none. Browsing the OSD into
-        # a game folder leaves the FOLDER here, and the fallback at the end of
-        # the chain minted it as a game: browsing games/NeoGeoPocket under the
-        # NeoGeoPocket-Color core committed game='NeoGeoPocket', a title that
-        # does not exist. The core-name test above could not catch it -- the
-        # folder matches neither 'NeoGeoPocket-Color' nor 'Neo-Geo Pocket' --
-        # so the fact that it IS a directory is the only reliable witness, and
-        # rom-details already reaches that same verdict, just too late to stop
-        # the commit.
+        # Same verdict for CURRENTPATH: browsing into a game folder leaves the
+        # FOLDER here, and the fallback at the end of the chain minted it as a
+        # game (browsing games/NeoGeoPocket committed a game of that name).
+        # Being a directory is the only reliable witness — the core-name test
+        # above matches neither folder nor core.
         cp_probe = ((cp_composed if cp_composed.startswith('/')
                      else os.path.join('/media/fat', cp_composed))
                     if cp_composed else '')
@@ -2482,16 +2158,12 @@ def _update_state():
                 probe = candidate if candidate.startswith('/') \
                         else os.path.join('/media/fat', candidate)
                 if os.path.isdir(probe):
-                    # Enter pressed ON a folder. CD cores (PSX, Saturn, MegaCD,
-                    # NeoGeo CD, …) auto-select when the folder holds exactly
-                    # one image matching the core's extension filter, and they
-                    # launch with CURRENTPATH still holding the FOLDER name —
-                    # menu.cpp only rewrites it on MGL loads. Resolve the image
-                    # here so game_path names a real file: the snapshot stays
-                    # honest and _neogeo_cart_or_cd() can tell CD from cart.
-                    # A NeoGeo Darksoft romset folder has no disc image inside
-                    # and is kept as the folder itself, which is what actually
-                    # got launched.
+                    # Enter pressed ON a folder. CD cores auto-select when the
+                    # folder holds exactly one image matching their extension
+                    # filter, and launch with CURRENTPATH still holding the
+                    # FOLDER name. Resolve the image here so game_path names a
+                    # real file. A NeoGeo romset folder has no disc
+                    # inside and is kept as the folder itself.
                     disc = ''
                     try:
                         entries = sorted(os.listdir(probe))
@@ -2509,29 +2181,21 @@ def _update_state():
                           + (f" -> {os.path.basename(disc)}" if disc else ""))
                 elif corename.lower() in _NEOGEO_CORENAMES:
                     # NeoGeo romset via OSD: CURRENTPATH carries the display
-                    # TITLE from romsets.xml, not the folder/zip id on disk,
-                    # so the composed path does not exist. The title is kept
-                    # verbatim — it can legally contain '/' ('Metal Slug 2:
-                    # Super Vehicle-001/II') and any path-aware helper would
-                    # truncate it — because it is what the panel shows and
-                    # what ScreenScraper searches on. rom_details resolves the
-                    # real file later through its own romsets.xml reverse
-                    # lookup on this same composed path.
+                    # TITLE from romsets.xml, not the id on disk, so the
+                    # composed path does not exist. Kept verbatim — it can
+                    # legally contain '/' — because it is what the panel shows
+                    # and what ScreenScraper searches on; rom_details resolves
+                    # the real file later.
                     selected_launch = (currentpath.strip(), candidate)
                     print(f"🎯 NeoGeo title via FILESELECT=selected: "
                           f"{currentpath}")
                 elif _zip_split(candidate)[0]:
-                    # ZIP virtual path — the browser is INSIDE a pack
-                    # zip (alphabet packs: games/Amstrad/a.zip/a/<title>).
-                    # Neither the extension test nor isdir() can see it,
-                    # so this first-hand witness used to be thrown away
-                    # and the ACTIVEGAME fallback minted the browsed
-                    # FOLDER's name as the game. The zip's own central
-                    # directory settles it — same stem tolerance as
-                    # rom-details, because CURRENTPATH drops the
-                    # extension — and game_path lands on the REAL
-                    # member so the snapshot stays honest (folder-branch
-                    # doctrine above).
+                    # ZIP virtual path: the browser is INSIDE a pack
+                    # zip (games/<System>/a.zip/a/<title>), which
+                    # neither the extension test nor isdir() can see.
+                    # The zip's central directory settles it, with the
+                    # same stem tolerance as rom-details, and
+                    # game_path lands on the REAL member.
                     zip_rel, zip_internal = _zip_split(candidate)
                     zip_abs = (zip_rel if zip_rel.startswith('/')
                                else os.path.join('/media/fat', zip_rel))
@@ -2550,13 +2214,12 @@ def _update_state():
 
         if currentpath_is_core_name:
             # Core loaded without a game — clear game state. BUT a selector
-            # confirm can masquerade as this: picking a preset or filter whose
-            # NAME contains the core name ('SNES Interpolation') leaves the
-            # very same breadcrumbs without any core (re)load behind them. A
-            # real core load always (re)writes STARTPATH in the same burst,
-            # so when that witness is absent, the core is unchanged and a
-            # game is already established, the running game is kept instead
-            # of being wiped.
+            # confirm can masquerade as this: a preset whose name contains the
+            # core name leaves the same breadcrumbs with no core load behind
+            # them. A real core load
+            # always rewrites STARTPATH, so when that witness is absent, the
+            # core is unchanged and a game is established, the running game is
+            # kept instead of wiped.
             core_load_witness = (core_changed or
                                  (time.time() - startpath_ts) <= 15.0)
             prev_game, prev_path = '', ''
@@ -2571,45 +2234,37 @@ def _update_state():
                 game_name = ''
                 game_path = ''
                 print(f"🎮 Non-arcade: core={corename} loaded without game (CURRENTPATH='{currentpath}')")
-        # A launch witnessed by Main_MiSTer itself outranks every tracker:
-        # some trackers mirror FULLPATH — the FOLDER — into ACTIVEGAME on that
-        # very launch, so every game in one folder then looks identical and
-        # the display freezes on the first one. Resolution logic lives in the
-        # selected_launch block above.
+        # A launch witnessed by Main_MiSTer outranks every tracker: some mirror
+        # FULLPATH — the FOLDER — into ACTIVEGAME, and then every game in one
+        # folder looks identical. Resolution lives in the selected_launch block.
         elif selected_launch:
             game_name, game_path = selected_launch
 
         # ACTIVEGAME freshness gate (mirror of the arcade branch): a stale
-        # ACTIVEGAME surviving a later core-only load must not be paired
-        # with the new core — until now the currentpath heuristic above was
-        # the only defence. 30 s of tolerance covers launchers that announce
-        # the game seconds BEFORE the core lands (Remote/Zaparoo cross-core
-        # transient) and slow core loads, same rationale as ARCADE_FRESHNESS.
+        # ACTIVEGAME surviving a later core-only load must not be paired with the
+        # new core. 30 s covers launchers that announce the game seconds BEFORE
+        # the core lands, and slow core loads.
         elif (activegame and not activegame.lower().endswith('.ini') and
               not activegame_is_system and
               not (activegame_is_folder and not core_changed) and
               activegame_ts >= corename_ts - 30):
             game_name = _game_name_from_path(activegame)
             game_path = activegame
-            # NeoGeo Darksoft layout: ACTIVEGAME carries the romset id
-            # ('sonicwi2') while CURRENTPATH carries the title the core just
-            # resolved from romsets.xml ('Aero Fighters 2'). Show the title —
-            # it is also what ScreenScraper needs to search on. The path stays
-            # on ACTIVEGAME, which is the thing that actually exists on disk.
+            # NeoGeo romset-folder layout: ACTIVEGAME carries the romset id
+            # while CURRENTPATH carries the title the core resolved from
+            # romsets.xml. Show the title (also what ScreenScraper searches on);
+            # the path stays on ACTIVEGAME, which is what exists on disk.
             if (currentpath and currentpath != game_name and
                     _neogeo_romset_label(_resolve_neogeo_probe(activegame),
                                        corename)):
                 print(f"🎯 NeoGeo romset folder: showing title "
                       f"'{currentpath}' instead of romset id '{game_name}'")
-                # Used verbatim, NOT through _game_name_from_path(): CURRENTPATH
-                # here is already a bare title, and romsets.xml titles can carry
-                # a slash ('Metal Slug 2: Super Vehicle-001/II'), which any
-                # path-aware helper would truncate to the last segment.
+                # Used verbatim, NOT through _game_name_from_path(): this is
+                # already a bare title and can legally carry a slash.
                 game_name = currentpath.strip()
-        # Folder gate mirrors the ACTIVEGAME branch above, core_changed clause
+        # Folder gate mirrors the ACTIVEGAME branch, core_changed clause
         # included: on a genuinely NEW core a folder may still establish
-        # identity (degraded but pre-existing behaviour), while during an
-        # unchanged core -- plain OSD browsing -- it never may.
+        # identity, during plain browsing of an unchanged core it never may.
         elif (currentpath and not currentpath.lower().endswith('.ini')
               and not cp_is_system
               and not (cp_is_folder and not core_changed)):
@@ -2619,14 +2274,10 @@ def _update_state():
             game_name = ''
             game_path = ''
 
-        # Every source rejected as a system path leaves game_name empty, but
-        # that emptiness means two different things. On a genuinely new core
-        # (Remote 'launch system' right after a script run) empty is the
-        # truth: the core IS running without a game. When the core did NOT
-        # change — a script, filter or cheat picked during play — the running
-        # game is untouched and blanking it would wipe the panel mid-session,
-        # so the current identity is re-asserted instead (an identical commit
-        # is a no-op that also preserves the rom-details cache).
+        # Every source rejected as a system path leaves game_name empty, but on
+        # a genuinely new core that emptiness is the truth, while on an unchanged
+        # core (a script or cheat picked during play) blanking would wipe the
+        # panel mid-session — so the current identity is re-asserted instead.
         if (not game_name and not currentpath_is_core_name
                 and (activegame_is_system or cp_is_system)
                 and not core_changed):
@@ -2638,32 +2289,24 @@ def _update_state():
 
         print(f"🎮 Non-arcade: core={corename} game={game_name}")
 
-    # One core, two consoles. This is NOT the backwards-compatible case handled
-    # below — see _neogeo_cart_or_cd() for why the CD side changes the reported
-    # core instead of travelling in game_system.
+    # One core, two consoles. NOT the backwards-compatible case below: see
+    # _neogeo_cart_or_cd() for why the CD side changes the reported core.
     if not is_arcade and friendly_name == 'Neo-Geo' and game_path:
         friendly_name = _neogeo_cart_or_cd(game_path)
 
-    # Backwards-compatible cores run software older than themselves: the Atari
-    # 7800 takes 2600 cartridges, the MegaDrive takes Master System ones. The
-    # CORE NAME deliberately stays what is actually loaded, so the panel reads
-    # like the hardware on the desk — a Master System with a Game Gear cartridge
-    # in it, which is exactly what the SMS core already does. The game's real
-    # system travels in its own field instead, for the one consumer that must
-    # key off the GAME: the RetroAchievements console lookup, which cannot find
-    # a Master System set while it is asking Mega Drive's console list. Artwork
-    # does NOT read this field — the firmware resolves that from the core name
-    # and the file extension in its own ssSystemForRom().
+    # Backwards-compatible cores run software older than themselves (a 2600
+    # cartridge in the Atari 7800 core, a Master System one in the MegaDrive).
+    # The CORE NAME stays what is actually loaded, so the panel reads like the
+    # hardware on the desk; the game's real system travels in its own field for
+    # the one consumer that must key off the GAME: the RetroAchievements console
+    # lookup. Artwork does NOT read it — the firmware resolves that in
+    # ssSystemForRom().
     game_system = ''
     if not is_arcade:
-        # The 2-player Lynx core is Atari Lynx in every way that matters to the
-        # rest of the stack: it loads the same .lnx files (they live under
-        # games/AtariLynx/), so its real system is fixed, not game-dependent.
-        # This feeds the RetroAchievements console lookup only; the artwork side
-        # was fixed in the firmware, which now maps both 'Atari Lynx (2P)' and
-        # the raw AtariLynx2P to ScreenScraper id 28 directly. Set
-        # unconditionally (no game_path guard): the mapping holds even with the
-        # core sitting empty in the menu.
+        # The 2-player Lynx core loads the same .lnx files, so its real system
+        # is fixed rather than game-dependent. Feeds the RA console lookup only;
+        # artwork is mapped in the firmware. Set unconditionally: the mapping
+        # holds even with the core sitting empty in the menu.
         if friendly_name == 'Atari Lynx (2P)':
             game_system = 'Atari Lynx'
         elif game_path:
@@ -2678,15 +2321,15 @@ def _update_state():
         if game_system == friendly_name:
             game_system = ''      # the game belongs to its own core: nothing to say
 
-    # Arcade is excluded on purpose: those cores are addressed by .mra and
-    # are deliberately absent from CORE_NAME_MAPPING, so logging them would
-    # bury the real finds under 160 false positives.
+    # Arcade is excluded on purpose: those cores are addressed by .mra and are
+    # deliberately absent from CORE_NAME_MAPPING, so logging them would bury the
+    # real finds under 160 false positives.
     if not is_arcade:
         _note_unknown_core(lookup_name)
 
-    # Arcade keeps its raw too (the specific rbf, e.g. 'jtcps1'): the firmware
-    # will find it unmapped and fall back to the friendly 'Arcade' -> 75, which
-    # is the existing behavior — but the raw stays observable for diagnostics.
+    # Arcade keeps its raw name too (e.g. 'jtcps1'): the firmware finds it
+    # unmapped and falls back to the friendly 'Arcade' -> 75, but the raw stays
+    # observable for diagnostics.
     _commit_state('Arcade' if is_arcade else friendly_name,
                   game_name, game_path, is_arcade,
                   event='load' if game_name else 'core',
@@ -2729,12 +2372,10 @@ def _watcher_thread():
 
 def _evaluator_thread():
     """
-    Consumes events and calls _update_state() exactly once per settled burst.
-    The last event of a burst (the real game load) can never be lost.
-    A low-frequency safety poll re-checks FILESELECT and SAM_Games.log
-    while idle, so a missed inotify event (watcher restart, rare edge)
-    can never freeze the state
-    permanently — the design guarantees eventual convergence.
+    Consumes events and calls _update_state() exactly once per settled burst, so
+    the last event of a burst (the real game load) can never be lost. A
+    low-frequency idle poll re-checks FILESELECT and SAM_Games.log, so a missed
+    inotify event cannot freeze the state permanently.
     """
     print("🧠 Evaluator thread started")
     pending = False
@@ -2755,11 +2396,9 @@ def _evaluator_thread():
             last_evaluated_fs_ns  = _get_mtime_ns('/tmp/FILESELECT')
             last_evaluated_sam_ns = _get_mtime_ns('/tmp/SAM_Games.log')
         else:
-            # Idle safety net: FILESELECT or SAM_Games.log moved but was
-            # never evaluated. SAM matters here because a same-core SAM hop
-            # touches ONLY the log — without it, a watcher restart during a
-            # SAM session could leave the state frozen on the previous game
-            # until the next cross-file event.
+            # Idle safety net: FILESELECT or SAM_Games.log moved but was never
+            # evaluated. SAM matters here because a same-core hop touches ONLY
+            # the log.
             fs_ns  = _get_mtime_ns('/tmp/FILESELECT')
             sam_ns = _get_mtime_ns('/tmp/SAM_Games.log')
             if fs_ns > last_evaluated_fs_ns or sam_ns > last_evaluated_sam_ns:
@@ -2775,10 +2414,9 @@ DISCOVERY_REPLY   = b"MMON_SERVER_V1:8081"   # advertise the HTTP port too
 
 def _start_discovery_responder():
     """
-    Lets the display find this server with no hardcoded IP.
-    The display broadcasts DISCOVERY_REQUEST; we reply (unicast) with
-    DISCOVERY_REPLY directly to the sender, which reads our address
-    from the reply's source IP.
+    Lets the display find this server with no hardcoded IP: it broadcasts
+    DISCOVERY_REQUEST and we reply (unicast) with DISCOVERY_REPLY, whose source
+    IP is our address.
     """
     def _run():
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -2816,10 +2454,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         super().__init__(*args, **kwargs)
 
     def _is_ini_file(self, file_path):
-        """
-        Check if the file is an .ini file that should be ignored as a game
-        .ini files are configuration files, not games
-        """
+        """.ini files are configuration, not games."""
         if not file_path:
             return False
         
@@ -2859,9 +2494,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         elif path == '/status/session':
             self.send_json_response(self.get_session_stats())
         elif path == '/status/unknown_cores':
-            # Cores this server could not name. Read by a human (or pasted into
-            # an issue) to turn a "shows the raw name, no artwork" report into
-            # the exact key to add. Local only — nothing is ever sent anywhere.
+            # Cores this server could not name, to turn a "raw name, no artwork"
+            # report into the exact key to add. Local only.
             self.send_json_response(get_unknown_cores())
         elif path == '/status/retroachievements':
             if _RA_AVAILABLE:
@@ -2871,9 +2505,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                                          'status': 'module_unavailable',
                                          'timestamp': int(time.time())})
         elif path == '/status/retroachievements/event':
-            # ~60-byte payload for the firmware's 5 s micro-poll: just the
-            # monotonic unlock counter (bumped <1 s after a real unlock when
-            # the odelot debug-log tailer is active) plus the tail flag.
+            # ~60-byte payload for the firmware's 5 s micro-poll: the monotonic
+            # unlock counter plus the tail flag.
             if _RA_AVAILABLE:
                 self.send_json_response(get_ra_event())
             else:
@@ -2901,10 +2534,9 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             else:
                 self.send_json_response(self.get_rom_details())
         elif path == '/media/artwork':
-            # Serves the pack image for the loaded game. The display cannot
-            # read the MiSTer's SD, so the path alone would be useless: the
-            # bytes have to travel. 404 means "no local image" — the firmware
-            # then falls back to ScreenScraper exactly as it always has.
+            # Serves the pack image for the loaded game: the display cannot read
+            # the MiSTer's SD, so the bytes have to travel. 404 means "no local
+            # image" and the firmware falls back to ScreenScraper.
             self.send_artwork_response()
         elif path == '/status/error_state':
             # NEW ENDPOINT: Return current error state
@@ -2924,7 +2556,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         elif path == '/status/snapshot':
             # Atomic identity snapshot. Optional ?seq=N: if the caller already
             # has the current generation, reply with a tiny body so the ESP32
-            # skips re-parsing on the (common) no-change poll.
+            # skips re-parsing.
             from urllib.parse import parse_qs
             known_seq = parse_qs(parsed_path.query).get('seq', [None])[0]
             snap = self.get_state_snapshot()
@@ -2960,22 +2592,18 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             return _state['core']
 
     def get_game_system(self):
-        """The system the loaded GAME belongs to, which is the running core in
-        every ordinary case and its predecessor when a backwards-compatible core
-        opened something older (Master System cartridge in the MegaDrive core,
-        2600 cartridge in the Atari 7800 core). Consumers that must follow the
-        game rather than the machine use this; everything that describes what is
-        on screen keeps using get_current_core()."""
+        """The system the loaded GAME belongs to: the running core in every
+        ordinary case, its predecessor when a backwards-compatible core opened
+        something older. Everything that describes what is on screen keeps using
+        get_current_core()."""
         with _state_lock:
             return _state['game_system'] or _state['core']
         
     def get_state_snapshot(self):
         """
-        Single-lock atomic snapshot of the core/game identity. This is what
-        the firmware polls: one request, one lock acquisition, one coherent
-        state. rom_details is the CACHED value only — never computed here
-        (computation stays on /status/rom/details, which can take minutes
-        for large CHDs).
+        Single-lock atomic snapshot of the core/game identity — what the firmware
+        polls. rom_details is the CACHED value only; computation stays on
+        /status/rom/details, which can take minutes for large CHDs.
         """
         with _state_lock:
             return {
@@ -2996,9 +2624,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             }
         
     def resolve_zip_path(self, zip_path):
-        """
-        Enhanced ZIP path resolution - handles relative paths from MiSTer
-        """
+        """ZIP path resolution, handling relative paths from MiSTer."""
         if not zip_path:
             return None
         
@@ -3081,10 +2707,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
     # ========== HELPER FUNCTIONS ==========
 
     def extract_game_name(self, game_path, preserve_parentheses=True):
-        """
-        Extrae el nombre del juego de una ruta
-        For non-arcade games: preserves parentheses (complete information)
-        """
+        """Game name from a path (parentheses preserved for non-arcade)."""
         if not game_path:
             return ""
         
@@ -3100,10 +2723,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             return clean_name
 
     def _is_activegame_current(self, corename, activegame):
-        """
-        Verifica si ACTIVEGAME es actual para el core dado
-        FIXED: More intelligent consistency checking
-        """
+        """True when ACTIVEGAME is current for the given core."""
         try:
             # Step 1: Check timestamp (basic validation)
             activegame_stat = os.path.getmtime('/tmp/ACTIVEGAME')
@@ -3163,10 +2783,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
     # ========== ORIGINAL FUNCTIONS (NO CHANGES) ==========
     
     def get_current_rom(self):
-        """
-        Returns the current ROM filename from centralized state.
-
-        """
+        """Current ROM filename from centralized state."""
         with _state_lock:
             game_path = _state['game_path']
             game_name = _state['game']
@@ -3177,9 +2794,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         return "No ROM"
 
     def get_system_info(self):
-        """
-        System information (without temperature)
-        """
+        """System information (without temperature)."""
         info = {
             'cpu_usage': 0.0,
             'memory_usage': 0.0,
@@ -3218,9 +2833,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         return info
 
     def get_storage_info(self):
-        """
-        Storage information
-        """
+        """Storage information."""
         storage = {
             'sd_card': {'total_gb': 0, 'used_gb': 0, 'free_gb': 0, 'usage_percent': 0},
             'usb_drives': []
@@ -3247,9 +2860,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         return storage
 
     def get_usb_info(self):
-        """
-        USB device information
-        """
+        """USB device information."""
         usb_info = {
             'devices': [],
             'serial_ports': [],
@@ -3281,9 +2892,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         return usb_info
 
     def get_network_stats(self):
-        """
-        Network statistics
-        """
+        """Network statistics."""
         stats = {
             'connected': False,
             'interface': '',
@@ -3318,9 +2927,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         return stats
 
     def get_session_stats(self):
-        """
-        Session statistics
-        """
+        """Session statistics."""
         current_time = time.time()
         session_duration = current_time - _session_start
         
@@ -3336,9 +2943,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         return stats
 
     def format_duration(self, seconds):
-        """
-        Formats duration as readable text
-        """
+        """Formats a duration as readable text."""
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
         secs = int(seconds % 60)
@@ -3353,10 +2958,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
     # ========== ROM DETAILS WITH ZIP SUPPORT ==========
     
     def is_zip_path(self, path):
-        """
-        Check if the path contains a ZIP file
-        Returns tuple: (is_zip, zip_path, internal_path)
-        """
+        """Checks whether the path contains a ZIP file.
+        Returns (is_zip, zip_path, internal_path)."""
         if not path:
             return False, None, None
             
@@ -3371,11 +2974,9 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         return False, None, None
     
     def get_zip_file_info_enhanced(self, zip_path, internal_path):
-        """
-        ENHANCED: Get file info from ZIP with multiple search strategies.
-        Returns (filename, file_size, crc32_int) where crc32_int comes straight
-        from the ZIP central directory (ZipInfo.CRC) — no decompression needed.
-        """
+        """File info from inside a ZIP, using several search strategies.
+        Returns (filename, file_size, crc32_int); the CRC comes straight from the
+        ZIP central directory (ZipInfo.CRC), with no decompression."""
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_file:
                 zip_files = zip_file.namelist()
@@ -3414,9 +3015,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                         print(f"✅ File info (filename): {filename} ({info.file_size:,} bytes)")
                         return filename, info.file_size, info.CRC
                 
-                # Strategy 5: Stem match — handles cores that write the filename
-                # without extension to CURRENTPATH. Compare the path stem (without
-                # extension) case-insensitively;
+                # Strategy 5: stem match, for cores that write the filename
+                # without extension to CURRENTPATH.
                 target_stem = os.path.splitext(internal_path)[0].lower()
                 stem_matches = []
                 for zip_file_path in zip_files:
@@ -3447,8 +3047,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
     
     def get_rom_details(self):
         """
-        Returns ROM details (CRC, hashes, path).
-        Uses _state['rom_details'] as cache — refreshed when rom_details_stale is True.
+        ROM details (CRC, hashes, path). Uses _state['rom_details'] as cache,
+        refreshed when rom_details_stale is True.
         """
         print(f"[{time.strftime('%H:%M:%S')}] Getting ROM details...")
 
@@ -3461,9 +3061,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             print("📋 Using cached ROM details")
             return cached
 
-        # Coalesce concurrent requests: a second caller (e.g. the firmware's
-        # retry) blocks on this lock, then re-checks the cache and returns the
-        # first thread's result instead of starting a duplicate hash/CRC.
+        # Coalesce concurrent requests: a second caller blocks on this lock, then
+        # re-checks the cache instead of starting a duplicate hash/CRC.
         with _rom_details_compute_lock:
             with _state_lock:
                 stale   = _state['rom_details_stale']
@@ -3477,16 +3076,13 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
             if not rom_path:
                 if getattr(self, '_identity_unconfirmed', False):
-                    # Every tracker candidate named a DIFFERENT game than
-                    # the committed one — the OSD cursor is resting on
-                    # another title while the loaded game keeps running.
-                    # Transient by nature, so it is reported as its own
-                    # error and NEVER cached (see below). detection_method
-                    # is deliberately NOT 'sam_no_path': that is the one
-                    # value that sets no_rom_on_disk, and no_rom + a clean
-                    # name-search miss is the firmware's NOT-IN-DATABASE
-                    # verdict — a permanent card this transient state
-                    # must never be able to trigger.
+                    # Every tracker candidate named a DIFFERENT game than the
+                    # committed one: the OSD cursor is resting on another title
+                    # while the loaded game keeps running. Transient, so it is
+                    # reported as its own error and NEVER cached.
+                    # detection_method is deliberately NOT 'sam_no_path': that
+                    # value sets no_rom_on_disk, which would let this transient
+                    # state trigger the firmware's NOT-IN-DATABASE card.
                     result = {
                         "filename": "", "size": 0, "crc32": "", "md5": "", "sha1": "",
                         "path": "", "available": False,
@@ -3514,10 +3110,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             result['seq'] = seq_at_start
             with _state_lock:
                 if result.get('error') == 'identity_unconfirmed':
-                    # Caching this would freeze the miss until the next
-                    # state commit; the whole point is that the firmware's
-                    # 10 s recurrent recomputes until a corroborating
-                    # witness appears.
+                    # Not cached: the firmware's 10 s recurrent must keep
+                    # recomputing until a corroborating witness appears.
                     print("⏳ Identity unconfirmed — result NOT cached (transient; recompute on next request)")
                 elif _state['seq'] == seq_at_start:
                     _state['rom_details']       = result
@@ -3529,9 +3123,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
     
     def get_rom_details_forced(self):
         """
-        Forced ROM details: bypasses game-name detection and timestamp checks.
-        Goes directly to _get_non_arcade_rom_path() / _get_arcade_rom_path()
-        so that RESCAN GAME works even when FILESELECT timestamps are stale.
+        Forced ROM details: bypasses game-name detection and timestamp checks so
+        RESCAN GAME works even when FILESELECT timestamps are stale.
         """
         print("🔄 === FORCED ROM DETAILS (bypass timestamp check) ===")
         try:
@@ -3568,9 +3161,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             result["detection_method"] = "forced"
             _enrich_rom_result(result, getattr(self, '_last_detection_method', None))
             result['seq'] = seq_at_start
-            # Update cache so subsequent normal calls benefit — but only if the
-            # active game hasn't changed since we started hashing (a slow CHD
-            # hash could otherwise attach this result to a different game).
+            # Cache for later calls, but only if the active game hasn't changed
+            # since hashing started (a slow CHD could attach to another game).
             with _state_lock:
                 if _state['seq'] == seq_at_start:
                     _state['rom_details']       = result
@@ -3591,11 +3183,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
     def _get_enhanced_rom_path(self):
         """
-        Enhanced ROM path detection following the new logic:
-        1. Check /status/game endpoint
-        2. Verify SAM_Games.log for path extraction if game matches
-        3. Check CORENAME to determine arcade vs non-arcade
-        4. Use ACTIVEGAME for non-arcade or STARTPATH for arcade
+        ROM path detection: /status/game, then SAM_Games.log if the game matches,
+        then CORENAME to pick arcade (STARTPATH) or non-arcade (ACTIVEGAME).
         """
         print("🔍 === ENHANCED ROM PATH DETECTION ===")
         
@@ -3621,16 +3210,11 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 self._last_detection_method = "sam_games_log"
                 return sam_rom_path
 
-            # SAM is authoritative. If it is driving the state but its log
-            # entry has no path on disk (name-only content: Amiga demos,
-            # WHDLoad, some MGL), there is NO rom to hash — STOP HERE.
-            # Falling through to STEP 3+ would read /tmp/ACTIVEGAME|
-            # CURRENTPATH|FULLPATH, which still hold the LAST manual OSD
-            # session (stale). Field-observed damage: a CD32 SAM game hashed
-            # a leftover 218 MB AO486 DOS CHD ('alone in the dark 3'),
-            # burning ~15 s of ARM and risking wrong-game artwork if that
-            # stale CRC happened to be indexed. The /tmp/ path is only valid
-            # when SAM is NOT the current source.
+            # SAM is authoritative. If it drives the state but its log entry has
+            # no path on disk (Amiga demos, WHDLoad, some MGL), there is nothing
+            # to hash — STOP HERE. Falling through would read /tmp/ACTIVEGAME|
+            # CURRENTPATH|FULLPATH, which still hold the last manual OSD session
+            # and would hash a stale, unrelated file.
             if _sam_is_current():
                 print("⛔ SAM active with no path on disk — not hashing "
                       "stale /tmp/ ROM; deferring to name search")
@@ -3673,10 +3257,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         return rom_path
 
     def _check_sam_games_log_for_path(self, current_game):
-        """
-        Check SAM_Games.log to find the path for the current game
-        Returns the full ROM path if found, None otherwise
-        """
+        """Path for the current game from SAM_Games.log, or None."""
         try:
             sam_log_path = '/tmp/SAM_Games.log'
             
@@ -3716,17 +3297,15 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 if len(parts) >= 3:
                     sam_field = ' - '.join(parts[2:])  # Rejoin in case the field contains " - "
                     
-                    # Extract game name (works whether the field is a path
-                    # or a bare name)
+                    # Extract game name (path or bare name)
                     if sam_field:
                         game_filename = sam_field.split('/')[-1]
                         sam_game = os.path.splitext(game_filename)[0]
                         
                         print(f"🔍 SAM entry - Game: '{sam_game}', Field: '{sam_field}'")
                         
-                        # Only return a REAL path. SAM logs some content by
-                        # name only (Amiga demos etc.); returning that bare
-                        # name produced 'ROM file not found' downstream.
+                        # Only return a REAL path: SAM logs some content by name
+                        # only, which yields 'ROM file not found' downstream.
                         if self._games_match(current_game, sam_game):
                             if _sam_looks_like_path(sam_field):
                                 print(f"✅ Game match with real path in SAM: '{current_game}'")
@@ -3743,9 +3322,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             return None
 
     def _games_match(self, game1, game2):
-        """
-        Check if two game names match, accounting for variations in naming
-        """
+        """True when two game names match, allowing for naming variations."""
         if not game1 or not game2:
             return False
         
@@ -3767,10 +3344,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         return False
 
     def _is_arcade_system(self, corename):
-        """
-        Determine if the current core is an arcade system
-        SIMPLIFIED: Use existing get_current_core() logic instead of duplicating
-        """
+        """True when the current core is an arcade system."""
         try:
             current_core = self.get_current_core()
             print(f"🎮 Current core from detection: '{current_core}'")
@@ -3786,9 +3360,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             return False
 
     def _get_arcade_rom_path(self):
-        """
-        Get ROM path for arcade systems using STARTPATH
-        """
+        """ROM path for arcade systems, from STARTPATH."""
         try:
             with open('/tmp/STARTPATH', 'r') as f:
                 startpath = f.read().strip()
@@ -3806,22 +3378,17 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
     def _get_non_arcade_rom_path(self):
         """
-        Get ROM path for non-arcade systems.
+        ROM path for non-arcade systems.
 
-        MiSTer uses two separate files for path context:
-          - CURRENTPATH: the selected filename (may have no directory component)
-          - FULLPATH:    the current browser directory, which may include a ZIP path
-                         e.g. "games/Apple-II/Collection.zip/"
+        ACTIVEGAME (when present) always contains the full path and is tried
+        first. Otherwise CURRENTPATH holds the selected filename, which may have
+        no directory component, and FULLPATH the browser directory, which may
+        include a ZIP path. Joining them:
 
-        When CURRENTPATH has no directory component, FULLPATH provides the
-        missing context. Combining them:
             FULLPATH.rstrip('/') + '/' + CURRENTPATH
-        produces the complete virtual path, e.g.:
-            games/Apple-II/Collection.zip/221B Baker Street.do
 
-        which _resolve_mister_path() and is_zip_path() can parse correctly.
-
-        ACTIVEGAME (when present) always contains the full path and is tried first.
+        gives the complete virtual path that _resolve_mister_path() and
+        is_zip_path() can parse.
         """
         self._identity_unconfirmed = False   # set by the loop tail; read by get_rom_details
         activegame = ""
@@ -3859,9 +3426,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         if currentpath and not os.path.dirname(currentpath) and fullpath:
             fullpath_dir = fullpath.rstrip('/')
             if os.path.basename(fullpath_dir) == currentpath:
-                # MGL/CHD launches: FULLPATH already carries the
-                # complete file path INCLUDING the filename — joining would
-                # duplicate it ('.../game.chd/game.chd'). Use it as-is.
+                # MGL/CHD launches: FULLPATH already includes the filename, so
+                # joining would duplicate it. Use it as-is.
                 print(f"🔗 FULLPATH already ends with CURRENTPATH - using it as-is: '{fullpath_dir}'")
                 currentpath = fullpath_dir
             else:
@@ -3870,13 +3436,10 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 currentpath = combined
 
         # Preferred order: FILESELECT='selected' outranks any mtime. menu.cpp
-        # writes it on every real launch (the OSD hook and all three MGL
-        # states) in the same event as a CURRENTPATH naming the launched item,
-        # so CURRENTPATH is first-hand testimony. Some trackers then mirror
-        # FULLPATH — the FOLDER — into ACTIVEGAME a moment LATER, so the
-        # 'newest file wins' heuristic below would prefer that folder copy
-        # and hash the same first game forever. Content beats timing. Without
-        # log_file_entry the file never reads 'selected' and the timestamp
+        # writes it on every real launch together with a CURRENTPATH naming the
+        # launched item, while some trackers mirror the FOLDER into ACTIVEGAME a
+        # moment later, so 'newest file wins' would hash the same game forever.
+        # Without log_file_entry the file never reads it and the timestamp
         # ordering applies exactly as before.
         fileselect_selected = False
         try:
@@ -3884,8 +3447,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 fileselect_selected = (f.read().strip() == 'selected')
             if fileselect_selected:
                 # Same corroboration as _update_state: a leftover 'selected'
-                # from an old OSD session must not outrank a fresh ACTIVEGAME
-                # written by an OSD-less launcher.
+                # must not outrank a fresh ACTIVEGAME from an OSD-less launcher.
                 fs_ts = os.path.getmtime('/tmp/FILESELECT')
                 fileselect_selected = (fs_ts >= activegame_timestamp
                                        - _SELECTED_STALENESS_MARGIN_S)
@@ -3904,29 +3466,22 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             print("⏱️ Preferred source: CURRENTPATH (newer)")
 
         # --- Identity corroboration (rom-details poisoning fix) --------------
-        # Recency alone chose the witness above, but CURRENTPATH is rewritten
-        # by merely RESTING the OSD cursor on a title — no launch, no commit,
-        # no seq bump. A details request landing in that moment used to hash
-        # the highlighted game and cache it under the running one (field
-        # capture: Gran Turismo hashed, cached and saved as Destruction
-        # Derby's .jpg/.meta). Content beats timing here exactly as it does
-        # for FILESELECT: a candidate that does not NAME the committed game
-        # is testimony about the browser, not about the running game, and is
-        # dropped in the loop below.
+        # CURRENTPATH is rewritten by merely RESTING the OSD cursor on a title,
+        # so a details request landing then used to hash the highlighted game and
+        # cache it under the running one. A candidate that does not NAME the
+        # committed game is testimony about the browser and is dropped below.
         #
-        # game_path was resolved in the same commit that produced the game
-        # name (folder launches even store the actual disc file), so it is
-        # coherent with the identity by construction. Appended LAST: every
-        # healthy flow keeps today's source order byte for byte, and the
-        # rescue only acts when the trackers fail identity or resolution —
-        # e.g. while the cursor keeps resting on another title.
+        # game_path comes from the same commit as the game name, so it is
+        # coherent by construction. Appended LAST so every healthy flow keeps
+        # the existing source order and the rescue only acts when the trackers
+        # fail identity or resolution.
         with _state_lock:
             committed_game      = _state['game']
             committed_game_path = _state['game_path']
         identity_dropped = 0
         identity_passed  = 0   # candidates that survived the filter and
-                               # were actually attempted — identity is
-                               # only the verdict when this stays zero
+                               # were actually attempted: identity is the
+                               # verdict only when this stays zero
         if committed_game and committed_game_path:
             sources.append(('STATE', committed_game_path))
 
@@ -3958,9 +3513,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                       f"'{source_path}'")
                 continue
 
-            # Survived the identity filter and is about to be
-            # resolved: from here on, any failure is about the
-            # FILE, not about identity.
+            # Survived the identity filter: from here on, any
+            # failure is about the FILE, not about identity.
             identity_passed += 1
 
             try:
@@ -3979,11 +3533,9 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                         continue
                 else:
                     if os.path.isfile(final_path) and _is_sd_root_file(final_path):
-                        # A game is never loose in the card's root; that is where
-                        # MiSTer.ini, scripts and readmes live. Reached when a bare
-                        # name picks up a ROM extension by accident -- 'ROMS' under
-                        # the MegaDrive core resolving to the readme ROMS.md, which
-                        # would otherwise be hashed and passed off as a real game.
+                        # A game is never loose in the card's root, where
+                        # MiSTer.ini, scripts and readmes live. Reached when a
+                        # bare name picks up a ROM extension by accident.
                         print(f"🛡️ {source_name} resolved into the SD root, not a "
                               f"game: {final_path}")
                         continue
@@ -3991,10 +3543,9 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                         print(f"✅ ROM file found via {source_name}: {final_path}")
                         return final_path
                     elif os.path.isdir(final_path):
-                        # Folder-per-game layout: the game lives in a folder named
-                        # after it. os.path.exists()
-                        # is also true for directories, so without this branch the
-                        # server would try to hash the folder itself (Errno 21).
+                        # Folder-per-game layout. os.path.exists() is also true
+                        # for directories, so without this branch the server
+                        # would try to hash the folder itself (Errno 21).
                         print(f"📁 {source_name} resolved to a directory — searching disc image inside")
                         try:
                             entries = sorted(os.listdir(final_path))
@@ -4007,10 +3558,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                                 chosen = os.path.join(final_path, matches[0])
                                 print(f"✅ Disc image found in folder ({source_name}): {chosen}")
                                 return chosen
-                        # NeoGeo Darksoft layout: the romset IS the folder,
-                        # holding loose ROM parts rather than a disc image.
-                        # Confirmed against romsets.xml so only a real romset
-                        # folder can take this path.
+                        # NeoGeo romset-folder layout: the romset IS the folder,
+                        # holding loose ROM parts. Confirmed against romsets.xml.
                         _rs = _neogeo_romset_dir(final_path, _read_corename_raw())
                         if _rs:
                             print(f"✅ NeoGeo romset folder ({source_name}): "
@@ -4073,13 +3622,10 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 print(f"❌ Error resolving {source_name}: {e} - trying next source")
                 continue
 
-        # Identity is the cause ONLY when nothing survived the filter to
-        # be tried. Keying on identity_dropped alone was wrong: the OSD
-        # browse folder in ACTIVEGAME is dropped on virtually every
-        # FILESELECT launch, so a plain missing-file failure was being
-        # reported as 'cursor resting on another title' (field capture:
-        # Garou, where CURRENTPATH and STATE both passed identity and
-        # failed because the file genuinely is not there).
+        # Identity is the cause ONLY when nothing survived the filter to be
+        # tried: the OSD browse folder in ACTIVEGAME is dropped on virtually
+        # every launch, so keying on identity_dropped alone reported plain
+        # missing-file failures as 'cursor resting on another title'.
         self._identity_unconfirmed = (identity_dropped > 0
                                       and identity_passed == 0)
         if self._identity_unconfirmed:
@@ -4093,16 +3639,13 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
     def _lookup_neogeo_romset(self, directory, title):
         """
         Reverse lookup in romsets.xml (NEOGEO): display title -> romset name.
-        The core shows the title from the .neo header / romsets.xml and writes
-        that TITLE to CURRENTPATH, so the file on disk (e.g. 'blazstar.neo')
-        can have a completely different name. Punctuation also differs between
-        sources (':' in the XML vs ' - ' in CURRENTPATH), so titles are
-        compared on their alphanumeric characters only.
+        The core writes the TITLE to CURRENTPATH, so the file on disk can have a
+        completely different name. Punctuation also differs
+        between sources, so titles are compared on alphanumerics only.
         """
-        # romsets.xml normally sits at the games/NEOGEO ROOT while the user
-        # may be browsing a pack subfolder (Darksoft dumps, 'World A-Z'
-        # collections), so look locally first and then walk upwards with the
-        # same bounded search the id loader uses.
+        # romsets.xml normally sits at the games/NEOGEO root while the user may
+        # be browsing a pack subfolder, so look locally first and then walk up
+        # with the same bounded search the id loader uses.
         xml_path = None
         for d in (directory, _neogeo_games_dir(os.path.join(directory, '_'))):
             if not d:
@@ -4130,9 +3673,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         if not wanted:
             return None
         # Pass 1: exact match on normalized title (altname or romset name).
-        # Pass 2: prefix match. A prefix candidate only counts if its file
-        # actually exists on disk, and if more than one qualifies we refuse
-        # to guess.
+        # Pass 2: prefix match, which only counts if the file exists on disk;
+        # if more than one qualifies we refuse to guess.
         exact_file = None
         prefix_files = []
         for rs in root.iter('romset'):
@@ -4154,13 +3696,13 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                     found = p
                     break
             if not found:
-                # Darksoft layout: the romset is a FOLDER named after the id.
+                # Romset-folder layout: the folder is named after the id.
                 p = os.path.join(directory, name)
                 if os.path.isdir(p):
                     found = p
             if not found:
                 # Pack layout: readable filename with the id in trailing
-                # parentheses ('Garou - Mark of the Wolves (garou).neo').
+                # parentheses ('<Title> (<romset>).neo').
                 p = _neogeo_file_with_embedded_id(directory, name)
                 if p:
                     print(f"📁 NeoGeo romset '{name}' found via "
@@ -4184,9 +3726,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         return None
 
     def _resolve_mister_path(self, path):
-        """
-        Intelligently resolve MiSTer paths handling various relative path patterns
-        """
+        """Resolves MiSTer paths, handling the various relative patterns."""
         if not path:
             return path
         
@@ -4198,10 +3738,9 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             print(f"✅ Already absolute: {resolved}")
             return resolved
         
-        # Leading ../ sequences are relative to /media/fat, so '../usb0/...'
-        # means /media/usb0/... and '../fat/...' means /media/fat/... itself.
-        # Without this, the generic cleanup prepends /media/fat and produces
-        # /media/fat/fat/... (or /media/fat/usb0/...), which don't exist.
+        # Leading ../ is relative to /media/fat, so '../usb0/...' means
+        # /media/usb0/... Without this the generic cleanup would prepend
+        # /media/fat and produce /media/fat/fat/..., which does not exist.
         m = re.match(r'(?:\.\./)+((?:usb[0-7]|fat)/.*)$', path)
         if m:
             resolved = os.path.normpath('/media/' + m.group(1))
@@ -4249,9 +3788,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         return resolved
     
     def get_rom_details_from_file(self, rom_path):
-        """
-        Get ROM details from regular file (not in ZIP)
-        """
+        """ROM details for a regular file (not inside a ZIP)."""
         # Verify file exists
         if not os.path.exists(rom_path):
             print(f"ROM file not found: {rom_path}")
@@ -4267,7 +3804,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 "timestamp": int(time.time())
             }
         
-        # A romset can be a FOLDER (Darksoft layout): its identity is the
+        # A romset can be a FOLDER: its identity is the
         # romset name — there is no single file whose bytes could be hashed.
         if os.path.isdir(rom_path):
             print(f"📁 Romset folder — name-based identity, no byte hash: "
@@ -4295,16 +3832,13 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             md5 = ""
             sha1 = ""
             
-            # Size limit to avoid blocking the server with very large files.
-            # 1GB safely covers any single CD image (CDs cap at ~700MB, and a CHD
-            # is compressed) while still guarding against a corrupt or mis-resolved
-            # path pointing at something huge.
+            # Size limit so a corrupt or mis-resolved path cannot block the
+            # server. 1GB covers any single CD image (a CHD is compressed).
             MAX_SIZE_FOR_HASH = 1024 * 1024 * 1024  # 1GB
             
             # Mutable containers (.vhd) are never worth hashing: ScreenScraper
-            # does not index them AND the guest OS rewrites them (save files),
-            # so their CRC is unstable by nature. Skip the minutes of
-            # CRC+MD5+SHA1 on the ARM entirely — same outcome as file_too_large.
+            # does not index them and the guest OS rewrites them, so the CRC is
+            # unstable by nature. Same outcome as file_too_large.
             _ext      = os.path.splitext(filename)[1].lower()
             _corename = _read_corename_raw()
             skip_hash = (_is_no_hash(_ext, _corename)
@@ -4404,9 +3938,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             }
     
     def get_rom_details_from_zip(self, full_path, zip_path, internal_path):
-        """
-        ENHANCED: Get ROM details from file inside ZIP with better path resolution
-        """
+        """ROM details for a file inside a ZIP."""
         print(f"\n🔍 === ENHANCED ZIP ROM DETAILS ===")
         print(f"Full path: {full_path}")
         print(f"ZIP path: {zip_path}")
@@ -4449,9 +3981,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             filename, file_size, zip_crc = self.get_zip_file_info_enhanced(resolved_zip_path, internal_path)
             
             if not filename:
-                # A NeoGeo Darksoft ZIP has no ROM member to find: the archive
-                # IS the romset. Same shape as the folder layout — valid,
-                # unhashable, identified by its name.
+                # A NeoGeo romset ZIP has no ROM member: the archive IS the
+                # romset. Valid, unhashable, identified by its name.
                 _rs = _neogeo_romset_dir(resolved_zip_path, _read_corename_raw())
                 if _rs:
                     print(f"✅ NeoGeo romset ZIP: "
@@ -4501,12 +4032,10 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             
             print(f"📁 File found in ZIP: {filename} ({file_size:,} bytes)")
 
-            # CRC32 comes straight from the ZIP central directory (ZipInfo.CRC) —
-            # no decompression. ScreenScraper matches on CRC, so this is all the
-            # firmware needs, and it returns in milliseconds instead of minutes.
-            # MD5/SHA1 are not stored in the directory; we leave them empty (a CRC
-            # match is enough). With no payload read there is also no SD/CPU
-            # contention with the core load, so the load watcher isn't needed here.
+            # CRC32 comes straight from the ZIP central directory (ZipInfo.CRC),
+            # with no decompression: milliseconds instead of minutes, and no
+            # SD/CPU contention with the core load. MD5/SHA1 are not stored
+            # there and stay empty; a CRC match is all ScreenScraper needs.
             crc32 = format(zip_crc & 0xffffffff, '08X')
             md5 = ""
             sha1 = ""
@@ -4556,14 +4085,11 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
     
     def _artwork_by_hash(self, seq_at_start):
         """Second attempt at the pack image, using the CRC the state commit did
-        not have. Returns '' when there is nothing to serve.
+        not have. Returns '' when there is nothing to serve, and never raises.
 
-        Never raises, for the same reason _pack_annotate never does: artwork is
-        a nice-to-have and must not be able to break the endpoint.
-
-        Arcade is deliberately excluded. A MAME set is a zip of many files, so
-        it has no single hash; its pack key is the .mra setname, which the state
-        commit already resolves exactly. There is nothing a hash could add.
+        Arcade is excluded: a MAME set is a zip of many files and has no single
+        hash, and its pack key is the .mra setname, which the state commit
+        already resolves exactly.
         """
         try:
             with _state_lock:
@@ -4581,9 +4107,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             if not details or not details.get('crc32'):
                 return ''
 
-            # Hashing is slow enough that another game can be committed while
-            # it runs; serving that result would be exactly the stale-artwork
-            # bug the freshness guard above exists to prevent.
+            # Hashing is slow enough that another game can be committed while it
+            # runs; serving that result would be the stale-artwork bug.
             with _state_lock:
                 if _state['seq'] != seq_at_start:
                     return ''
@@ -4609,10 +4134,9 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
     def send_artwork_response(self):
         """Sends the pack image for the loaded game, or 404.
 
-        The path is resolved during rom-details, not here: this handler must
-        stay cheap enough for the display to hit it on every game change.
-        Content-Length is mandatory — the ESP32 HTTP client needs it to size
-        its read, and a chunked reply would stall the decoder.
+        The path is resolved during rom-details, not here, so this handler stays
+        cheap enough to hit on every game change. Content-Length is mandatory:
+        the ESP32 HTTP client needs it to size its read.
         """
         with _state_lock:
             artwork_path = _state.get('artwork_path', '')
@@ -4620,21 +4144,16 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             fresh = (_state.get('artwork_seq', -1) == seq_at_start)
 
         # Serving an image resolved for a PREVIOUS game is worse than serving
-        # none: the display would cache confident-looking wrong artwork under
-        # the current game's name. 404 sends it to ScreenScraper instead.
+        # none: 404 sends the display to ScreenScraper instead.
         if not fresh:
             self.send_error_response(404, 'Artwork not resolved for the current game')
             return
 
-        # Fresh but EMPTY is not the same as "no artwork exists". The state
-        # commit resolves the pack from the game's NAME alone -- the CRC does
-        # not exist yet at that moment -- so _pack_lookup's crc+size step, the
-        # one that catches a renamed or differently-tagged dump, never runs on
-        # this path. Those games used to be sent to ScreenScraper for an image
-        # already sitting on the card. Retry here with the hash instead: it
-        # costs once per game (get_rom_details caches and coalesces) and only
-        # when the cheap name lookup has already missed, which is strictly
-        # cheaper than the network round trip it replaces.
+        # Fresh but EMPTY is not the same as "no artwork exists": the state
+        # commit resolves the pack from the game's NAME alone, so _pack_lookup's
+        # crc+size step — the one that catches a renamed dump — never ran. Retry
+        # here with the hash: it costs once per game and only after the cheap
+        # name lookup has already missed.
         if not artwork_path:
             artwork_path = self._artwork_by_hash(seq_at_start)
 
@@ -4666,12 +4185,9 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def send_index_page(self):
-        """Friendly landing page for humans hitting the server root.
-
-        The display never calls '/'; this exists only so that a manual
-        connectivity test (typing the server URL into a browser) returns
-        something reassuring instead of a 404 that looks like a failure.
-        """
+        """Landing page for humans hitting the server root. The display never
+        calls '/'; this exists so a manual connectivity test returns something
+        reassuring instead of a 404 that looks like a failure."""
         endpoints = [
             ('/status/core', 'Active core'),
             ('/status/game', 'Active game'),
