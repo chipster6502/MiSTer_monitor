@@ -1775,6 +1775,7 @@ def _enrich_rom_result(result, detection_method=None):
 # menu.cpp writes 'selected'; a launcher that bypasses the OSD leaves it minutes
 # behind instead, and then ACTIVEGAME must win.
 _SELECTED_STALENESS_MARGIN_S = 5.0
+_SELECTED_PAIRING_S = 5.0
 
 _MISTER_SYSTEM_DIRS = frozenset({
     'scripts', 'filters', 'filters_audio', 'gamma', 'shadow_masks',
@@ -1890,6 +1891,122 @@ def _zip_internal_is_folder(zip_abs, internal):
     return internal.replace('\\', '/').strip('/').lower() in dirset
 
 
+_MGL_FILE_PATH_RE = re.compile(r'<file\b[^>]*\bpath\s*=\s*"([^"]*)"', re.I)
+_MGL_MAX_BYTES = 8192
+
+
+def _is_launcher_mgl(path):
+    """
+    True for the scratch MGL a launcher generates to load a game (Zaparoo's
+    '/media/fat/.LASTLAUNCH.mgl'). A named MGL stored with the games is the
+    identity the user launched and keeps its own name, so only hidden files
+    and the card root — where launchers drop theirs — qualify.
+    """
+    if not path or not path.lower().endswith('.mgl'):
+        return False
+    return os.path.basename(path).startswith('.') or _is_sd_root_file(path)
+
+
+_CD32_CFG = '/media/fat/config/AmigaCD32.cfg'
+_CD32_PATH_OFFSET = 3100
+_CD32_PATH_LEN = 108
+
+
+def _amiga_cd32_media():
+    """
+    The disc the CD32 core has mounted, or ''. Launchers do not name it in the
+    MGL: they write the path into AmigaCD32.cfg and emit a bare <setname>, so
+    the config is the only witness of what is running.
+    """
+    try:
+        with open(_CD32_CFG, 'rb') as f:
+            f.seek(_CD32_PATH_OFFSET)
+            raw = f.read(_CD32_PATH_LEN)
+    except Exception as e:
+        print(f"⚠️ AmigaCD32.cfg unreadable: {e}")
+        return ''
+
+    rel = raw.split(b'\x00', 1)[0].decode('utf-8', 'replace').strip()
+    if not rel:
+        return ''
+    while rel.startswith('../'):        # stored relative to /media
+        rel = rel[3:]
+    path = os.path.normpath('/media/' + rel.lstrip('/'))
+    if not os.path.exists(path):
+        print(f"⚠️ AmigaCD32 disc not found: {path}")
+        return ''
+    return path
+
+
+def _mgl_target(mgl_path):
+    """
+    The ROM an MGL points at, or '' when it names none (core-only MGL), cannot
+    be read, or resolves to something absent. Launchers write the media path
+    prefixed by a fixed run of parent hops, so stripping them yields it back;
+    AmigaCD32 is the exception and is read from the core's cfg instead.
+    """
+    try:
+        with open(mgl_path, 'r', errors='replace') as f:
+            xml = f.read(_MGL_MAX_BYTES)
+    except Exception as e:
+        print(f"⚠️ MGL unreadable: {mgl_path} ({e})")
+        return ''
+
+    m = _MGL_FILE_PATH_RE.search(xml)
+    if not m:
+        if 'AmigaCD32' in xml:
+            return _amiga_cd32_media()
+        print(f"ℹ️ MGL names no file: {mgl_path}")
+        return ''
+
+    raw = (m.group(1)
+           .replace('&quot;', '"').replace('&apos;', "'")
+           .replace('&lt;', '<').replace('&gt;', '>')
+           .replace('&amp;', '&'))       # &amp; last, or it un-escapes the rest
+
+    cleaned = raw.replace('\\', '/')
+    while cleaned.startswith('../'):
+        cleaned = cleaned[3:]
+    if not cleaned.startswith('/'):
+        cleaned = '/' + cleaned
+    if not cleaned.startswith(('/media/', '/tmp/')):
+        # hand-written MGL: the path is relative to the MGL's own folder
+        cleaned = os.path.join(os.path.dirname(mgl_path), raw)
+    cleaned = os.path.normpath(cleaned)
+
+    if os.path.exists(cleaned):
+        return cleaned
+
+    # Zip-shaped target: exists() cannot see a member, the central directory
+    # settles it — same test the FILESELECT branch applies to browsed zips.
+    zip_rel, zip_internal = _zip_split(cleaned)
+    if zip_rel and zip_internal:
+        zip_abs = (zip_rel if zip_rel.startswith('/')
+                   else os.path.join('/media/fat', zip_rel))
+        if _zip_member_match(zip_abs, zip_internal):
+            return cleaned
+
+    print(f"⚠️ MGL target does not exist: {cleaned}")
+    return ''
+
+
+def _deref_launcher_mgl(path, label='ACTIVEGAME'):
+    """
+    Replaces a launcher's scratch MGL with the ROM inside it. Without this the
+    trackers announce the MGL itself, so the stem ('.LASTLAUNCH') becomes the
+    title and the SD-root guard drops the path. Falls back to the value it was
+    given whenever the MGL names nothing usable.
+    """
+    if not _is_launcher_mgl(path):
+        return path
+    abs_mgl = path if path.startswith('/') else os.path.join('/media/fat', path)
+    target = _mgl_target(abs_mgl)
+    if not target:
+        return path
+    print(f"🔗 {label} is a launcher MGL — dereferenced to: '{target}'")
+    return target
+
+
 def _game_name_from_path(path):
     """
     Extracts the game name from a file path. Only strips the extension when it
@@ -1905,7 +2022,7 @@ def _update_state():
     Called by the watcher thread on every relevant filesystem event.
     """
     corename    = _read_file('/tmp/CORENAME')
-    activegame  = _read_file('/tmp/ACTIVEGAME')
+    activegame  = _deref_launcher_mgl(_read_file('/tmp/ACTIVEGAME'))
     currentpath = _read_file('/tmp/CURRENTPATH')
     # FILESELECT's CONTENT, not just its mtime: Main_MiSTer writes 'active'
     # while the browser is open and 'selected' at the moment of a real launch.
@@ -1988,8 +2105,12 @@ def _update_state():
     activegame_ts = _get_mtime_ns('/tmp/ACTIVEGAME') / 1e9
     fileselect_ts = _get_mtime_ns('/tmp/FILESELECT') / 1e9
     # 'selected' is testimony about the CURRENT launch only while it is not
-    # staler than the freshest tracker write (see _SELECTED_STALENESS_MARGIN_S).
-    fileselect_fresh = (fileselect == 'selected' and
+    # staler than the freshest tracker write (see _SELECTED_STALENESS_MARGIN_S)
+    # AND while CURRENTPATH was rewritten with it: menu.cpp writes both in the
+    # same event, so a lone 'selected' is a core load refreshing the file's
+    # mtime over the content — and the path — of an older launch.
+    fileselect_paired = abs(fileselect_ts - cp_ns / 1e9) <= _SELECTED_PAIRING_S
+    fileselect_fresh = (fileselect == 'selected' and fileselect_paired and
                         fileselect_ts >= activegame_ts
                         - _SELECTED_STALENESS_MARGIN_S)
     startpath_ts  = _get_mtime_ns('/tmp/STARTPATH') / 1e9
@@ -3401,6 +3522,7 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             activegame_timestamp = os.path.getmtime('/tmp/ACTIVEGAME')
         except:
             pass
+        activegame = _deref_launcher_mgl(activegame)
 
         currentpath = ''
         currentpath_timestamp = 0
@@ -3447,10 +3569,12 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 fileselect_selected = (f.read().strip() == 'selected')
             if fileselect_selected:
                 # Same corroboration as _update_state: a leftover 'selected'
-                # must not outrank a fresh ACTIVEGAME from an OSD-less launcher.
+                # must not outrank a fresh ACTIVEGAME from an OSD-less launcher,
+                # and it only names CURRENTPATH when both were written together.
                 fs_ts = os.path.getmtime('/tmp/FILESELECT')
-                fileselect_selected = (fs_ts >= activegame_timestamp
-                                       - _SELECTED_STALENESS_MARGIN_S)
+                fileselect_selected = (
+                    fs_ts >= activegame_timestamp - _SELECTED_STALENESS_MARGIN_S
+                    and abs(fs_ts - currentpath_timestamp) <= _SELECTED_PAIRING_S)
         except Exception:
             fileselect_selected = False
 
