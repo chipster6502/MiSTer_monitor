@@ -31,7 +31,7 @@
 //  the other was not — the display warns instead of failing silently.
 //  Bump on every release, together with SERVER_VERSION in the Python server.
 // =============================================================================
-#define FIRMWARE_VERSION "2.8.0"
+#define FIRMWARE_VERSION "2.9.0"
 
 #include <XPT2046_Touchscreen.h>
 #include <LovyanGFX.hpp>
