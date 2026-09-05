@@ -91,20 +91,24 @@ jobs:
           body: |
             ### New
 
-            - **Setup and launcher merged.** `MiSTer_Monitor_setup` and `start_monitor` are now a single **`MiSTer_Monitor`** entry in the Scripts menu: run it to configure auto-start and restart the server. It no longer needs the executable bit, so a copy made over the network works too. Existing installs keep running untouched and migrate the first time it is run.
-            - **Sharper artwork, and no more size ceiling.** Images are streamed to the SD card and decoded from file instead of being held whole in RAM, which lifts the contiguous-heap limit that made large covers fail, and each one is resampled to the exact destination size rather than the nearest power-of-two scale.
+            - **Artwork packs, installed from Update All.** *Update All 2.10* ships the [MiSTer Artwork Pack](https://github.com/chipster6502/MiSTer_artwork_pack): 39 systems and 23,658 images in your choice of 2D boxes, 3D boxes or box + screenshot, enabled under *Settings → Extra Content → Game Artwork DBs*. The server serves the pack image for the loaded game and the display shows it without a round trip to ScreenScraper, so covered games appear at once and ScreenScraper is left for cores and for the games the pack lacks.
+            - **Shared catalogues.** Game Boy and Game Boy Color fall back to each other's folder and the Super Game Boy core borrows both; Famicom Disk System and Satellaview, which the NES and SNES cores load as their own, resolve to their own pack folders and fall back to the cartridge system's when ScreenScraper filed a title there.
+            - **FDS and Satellaview are their own systems on ScreenScraper too.** A `.fds`/`.qd` image through the NES core is queried as Famicom Disk System and a `.bs` broadcast through the SNES core as Satellaview, each with its own art, instead of as a cartridge whose CRC ScreenScraper does not know.
+            - **MiSTer Monitor is now fully compatible with Zaparoo Frontend.** Games launched from it are identified and get their artwork like an OSD launch.
 
             ### Fixes
 
-            - **Single-ROM zips resolve.** A core that reports the archive with no member after it left the ROM unidentified, which also meant RetroAchievements hashed the whole archive instead of the ROM inside. Reported by @kadafi916 in #18.
-            - **Neo Geo Pocket Color** is its own system rather than sharing Neo Geo's, and the newer NGPC core — which reports `NGPC` instead of `NeoGeoPocket-Color` — reaches it too.
-            - **The running game is identified more carefully.** A ROM resolved into the root of the SD card, a browsed folder reaching identity through `CURRENTPATH`, and zip virtual paths mid-launch are all handled now; arcade sets resolve by `.mra` setname, Neo Geo romsets by the id embedded in the filename, and rom-details candidates are corroborated against the committed game before being trusted.
-            - **`known_cores.json` was malformed** and the weekly core audit could not read it.
+            - **Neo Geo pack folder** is `NEOGEO`, as the Downloader writes it on the card; the mixed-case name resolved nothing.
+            - **Game names with a slash** — the Neo Geo core reports titles such as `Metal Slug 2: Super Vehicle-001/II` from its `romsets.xml` — no longer lose everything before the slash when the pack key is built.
+            - **ScreenScraper's own `ss` region** is tried after the geographic ones and before the unsuffixed generic. A box uploaded with no region set is often the only one a title has, and no regional preference could reach it before.
+            - **A stale `FILESELECT=selected` no longer overrides a fresh launch**: it only names the running game when `CURRENTPATH` was written alongside it.
+            - **Satellaview** is hashed as SNES for RetroAchievements.
 
             ### Notes
 
-            - The display's microSD card must be formatted as **FAT32**. exFAT is not read, and cards over 32 GB usually ship as exFAT.
-            - Update both halves as usual: firmware from the web flasher, server through *Update All* / Downloader. If the version panel turns red afterwards, one of the two did not update.
+            - The packs are optional. Without them nothing changes: artwork keeps coming from ScreenScraper as before. Core images and any game the pack does not cover still come from ScreenScraper, so the account is still needed.
+            - MiSTer Monitor itself is now listed in *Update All 2.10* under *Settings → Tools & Scripts*.
+            - Update both halves as usual: firmware from the web flasher, server through *Update All* / MiSTer Companion / Downloader. If the version panel turns red afterwards, one of the two did not update.
 
       - name: Build flasher site
         run: |
