@@ -30,7 +30,7 @@ console and computer games via the MiSTer Remote web application.*
 
 ## Features
 
-- **Real-time artwork** — game and core images fetched on demand from ScreenScraper as you play, no pre-scraping.
+- **Artwork with no scraping** — game images come from the [MiSTer Artwork Pack](https://github.com/chipster6502/MiSTer_artwork_pack) installed through *Update All* (39 systems, three styles, ready on the MiSTer's SD card), and anything the pack does not cover — core images, games outside it — is fetched on demand from ScreenScraper as you play.
 - **RetroAchievements** — live progress, points and hardcore breakdown, the full trophy list with per-achievement descriptions, and an unlock popup the moment an achievement triggers. View-only on a stock MiSTer; pairs with the [odelot/Main_MiSTer](https://github.com/odelot/Main_MiSTer) RetroAchievements fork to record unlocks.
 - **Game Info panel** — "Now Playing" metadata (year, developer, publisher, genre, players, rating, synopsis), cached on the SD card.
 - **Reliable load detection** — an event-driven server state machine tells real game loads from OSD navigation and delivers them to the display atomically.
@@ -40,12 +40,14 @@ console and computer games via the MiSTer Remote web application.*
 <details>
 <summary><b>More detail</b></summary>
 
+- **Local-first artwork** — the display's own SD card is checked first, then the artwork pack on the MiSTer, then ScreenScraper. The pack lookup tolerates a differently tagged dump, a renamed file (by CRC and size) and a title-only match, and shared catalogues fall back to each other (Game Boy ↔ Game Boy Color, Famicom Disk System → NES, Satellaview → SNES).
 - **Name-based artwork search** for systems whose containers carry no ScreenScraper-indexed hash (e.g. DOS/0MHz packs), used automatically when the CRC route can't resolve.
 - **Clear on-screen status** when artwork is unavailable, distinguishing a core absent from ScreenScraper, a game not in the database, and a game catalogued with no artwork.
 - **Configurable synopsis** — scroll speed and manual/auto mode adjustable in `config.ini`; the synopsis re-fetches automatically when you change the preferred language.
 - **Neo Geo (Darksoft) layouts** — romset ZIPs and unzipped romset folders are recognised as the game itself, bare-romset `.neo` files resolve their title, and RetroAchievements matching works through romset-name hashing.
 - **Neo Geo CD as its own console** — the NeoGeo core serves both, so a disc image is identified by its format: it reports as Neo-Geo CD, uses the matching ScreenScraper platform, and keeps its own artwork cache.
-- **Backwards-compatible cores resolved by the game's system** — an Atari 2600 cartridge in the 7800 core, Apple II disks on the IIgs, or a `.sms` through Genesis get the artwork and achievements of the system they belong to, not the core that runs them.
+- **Backwards-compatible cores resolved by the game's system** — an Atari 2600 cartridge in the 7800 core, Apple II disks on the IIgs, a `.sms` through Genesis, a `.fds` through NES or a `.bs` Satellaview broadcast through SNES get the artwork and achievements of the system they belong to, not the core that runs them.
+- **External launchers** — games started by Zaparoo or any launcher that loads a scratch `.mgl` are identified by the ROM inside it, so they get their artwork like an OSD launch.
 - **Self-auditing core coverage** — official cores are mapped from their own CONF_STR, a weekly audit proposes mappings for new ones, and unrecognised CORENAMEs are recorded at `/status/unknown_cores`.
 - **Automatic Arcade subsystem detection** for correct per-system artwork.
 - **Manual SCAN button** on the image screen for the rare case where the CRC couldn't be detected automatically.
@@ -87,15 +89,21 @@ See `docs/PORTING.md` for porting guidelines.
 
 **Software**
 - [ScreenScraper](https://www.screenscraper.fr) member account (free, instant signup)
-- A standard MiSTer setup
+- A standard MiSTer setup with *Update All*
+- *Optional:* the [MiSTer Artwork Pack](https://github.com/chipster6502/MiSTer_artwork_pack), enabled from *Update All*, so game artwork is already on the MiSTer instead of downloaded per game
 
 ## Installation
 
 Installation has two parts: the **server** on the MiSTer and the **firmware**
 on the display.
 
-- **MiSTer side** — install the server via the **MiSTer Downloader database**
-  (recommended, auto-updating).
+- **MiSTer side** — enable **MiSTer Monitor** in *Update All* (**Settings →
+  Tools & Scripts**, Update All 2.10 or newer) or install it from *MiSTer
+  Companion*'s **Install Center**, run the update, then run `MiSTer_Monitor`
+  once from the Scripts menu. The **Downloader database** drop-in `.ini` is
+  still supported for Downloader-only setups. Optionally enable the
+  **artwork packs** under *Settings → Extra Content → Game Artwork DBs* in
+  the same Update All session.
 - **Display side** — the easiest path is the **web flasher**: open
   [the flasher page](https://chipster6502.github.io/MiSTer_monitor/flasher/)
   in Chrome or Edge on desktop, connect the display via USB, and flash the
@@ -128,7 +136,8 @@ Two components work together:
 - **`mister_status_server.py`** — a Python HTTP server on the MiSTer that
   tracks what core and game are running and exposes them as JSON.
 - **display sketch** — the ESP32 firmware that polls the server, fetches
-  artwork from ScreenScraper, and renders the HUD on the screen.
+  artwork from the pack on the MiSTer or from ScreenScraper, and renders the
+  HUD on the screen.
 
 <details>
 <summary><b>More detail</b></summary>
@@ -139,9 +148,14 @@ Two components work together:
   committed change with a sequence number. The display reads core and game
   together from one atomic `/status/snapshot`, so it never shows a mixed
   state, and the server also supplies a cleaned search name for containers
-  with no ScreenScraper-indexed hash. No external helper scripts are needed.
-- **display sketch** auto-discovers the MiSTer via UDP broadcast, downloads
-  artwork by hash (or by name when the hash can't resolve), and — on the
+  with no ScreenScraper-indexed hash. When an artwork pack is installed it
+  resolves the loaded game against `docs/<System>/Artwork/` on the MiSTer's
+  SD card and serves the image at `/media/artwork`. No external helper
+  scripts are needed.
+- **display sketch** auto-discovers the MiSTer via UDP broadcast, takes the
+  pack image from the server when there is one and otherwise downloads
+  artwork from ScreenScraper by hash (or by name when the hash can't
+  resolve), and — on the
   Tab5 and 2.8" CYD boards — serves screenshots on port 8080 at
   `http://<Display-IP>:8080` (disabled on 3.5"/ST7796 panels, which have no
   SPI readback).
@@ -218,8 +232,8 @@ Two components work together:
 
 - **Idle screensaver mode** — Cycle random covers with Ken Burns effect when MiSTer is at menu.
 - **MiSTer screenshot reception** — Display native MiSTer screenshots as per-game galleries.
-- **External launcher integration** — Show artwork on launches triggered by Zapparoo NFC tags or other web-based launchers.
-- **Zapparoo launcher integration** — Show artwork on launches triggered by Zapparoo Launcher.
+- ~~**External launcher integration** — Show artwork on launches triggered by Zapparoo NFC tags or other web-based launchers.~~ *(shipped in v2.9.0)*
+- ~~**Zapparoo launcher integration** — Show artwork on launches triggered by Zapparoo Launcher.~~ *(shipped in v2.9.0)*
 - **QR codes for expanded information** — On-screen QR linking to MobyGames database.
 
 ### Other

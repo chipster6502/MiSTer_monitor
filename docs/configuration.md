@@ -76,8 +76,11 @@ changes on the MiSTer), or set a static address by editing
 ## Artwork download order
 
 The sketch downloads artwork from ScreenScraper for each core and game it
-encounters. You can control which image types are tried and in what order via
-keys in the `[images]` section of `config.ini`:
+encounters. If an [artwork pack](installation.md#artwork-packs-optional) is
+installed on the MiSTer, the pack image is used first for games and the
+settings below only apply when the pack has none; core images always come
+from ScreenScraper. You can control which image types are tried and in what
+order via keys in the `[images]` section of `config.ini`:
 
 | Key | Used for |
 |---|---|
@@ -106,9 +109,11 @@ download succeeds. Available tokens:
 
 **Region order within each token** — the `region=` key in `[screenscraper]`
 controls which regional variant is tried first. The remaining regions follow
-in fixed order, and the no-region generic variant is tried last. For example,
-with `region=eu` and token `box3d` the sequence is:
-`box-3D(eu)` → `box-3D(wor)` → `box-3D(us)` → `box-3D(jp)` → `box-3D`.
+in fixed order, then ScreenScraper's own `ss` region (what an upload carries
+when the contributor set none, and often the only region a box exists in),
+and the no-region generic variant is tried last. For example, with
+`region=eu` and token `box3d` the sequence is:
+`box-3D(eu)` → `box-3D(wor)` → `box-3D(us)` → `box-3D(jp)` → `box-3D(ss)` → `box-3D`.
 
 Default orders applied out of the box:
 

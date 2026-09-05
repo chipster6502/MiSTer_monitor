@@ -8,8 +8,10 @@ used for artwork retrieval.
 ## Contents
 
 - [MiSTer side](#mister-side)
-  - [Recommended: MiSTer Downloader database](#recommended-mister-downloader-database)
+  - [Recommended: Update All or MiSTer Companion](#recommended-update-all-or-mister-companion)
+  - [Alternative: MiSTer Downloader drop-in database](#alternative-mister-downloader-drop-in-database)
   - [Alternative: manual install](#alternative-manual-install)
+  - [Artwork packs (optional)](#artwork-packs-optional)
 - [Display side](#display-side)
   - [Recommended: Quick install (web flasher)](#recommended-quick-install-web-flasher)
   - [Alternative: Building from source (advanced)](#alternative-building-from-source-advanced)
@@ -19,15 +21,48 @@ used for artwork retrieval.
 
 ## MiSTer side
 
-Two installation methods are available. The **MiSTer Downloader** method
-is recommended: it installs the server and keeps it updated automatically,
-and a one-time setup script takes care of all the system configuration for
-you. A manual install is documented afterwards as a fallback.
+Three installation methods are available. **Update All** or **MiSTer
+Companion** is recommended: MiSTer Monitor is listed in both since Update
+All 2.10, so one toggle installs the server and keeps it updated, and a
+one-time setup script takes care of all the system configuration for you.
+The Downloader drop-in database does the same for setups that run the
+Downloader without either, and a manual install is documented last as a
+fallback.
 
-### Recommended: MiSTer Downloader database
+### Recommended: Update All or MiSTer Companion
 
-This installs the server through the MiSTer Downloader and configures
-everything with a single setup step.
+1. Enable MiSTer Monitor from whichever you use:
+   - **Update All** — run it from the Scripts menu, press **UP** during the
+     countdown to open the settings, go to **Tools & Scripts** and enable
+     **MiSTer Monitor**. Update All will offer to open the *Game Artwork
+     DBs* menu at the same time — see [Artwork packs](#artwork-packs-optional)
+     below; you can also come back for it later. Save.
+   - **[MiSTer Companion](https://github.com/Anime0t4ku/mister-companion)**
+     — open **Install Center**, find **MiSTer Monitor** and install it.
+2. Let Update All (or the Downloader run that Companion triggers) finish.
+   It installs these files:
+   - `/media/fat/Scripts/MiSTer_Monitor.sh`
+   - `/media/fat/Scripts/MiSTer_Monitor_uninstall.sh`
+   - `/media/fat/Scripts/.config/mister_monitor/mister_status_server.py`
+3. Back in the Scripts menu, run **`MiSTer_Monitor`** once.
+   This enables auto-start on boot, ensures `log_file_entry=1` in
+   `MiSTer.ini`, and starts the server. You can run it again at any time; it
+   is safe to repeat, and it restarts the server so a freshly downloaded
+   update takes effect right away.
+
+That's it. Future updates to the server are picked up automatically whenever
+you run *Update All* or update from *MiSTer Companion* — no need to run the
+setup again unless you have deactivated the monitor.
+
+> If you installed MiSTer Monitor before 2.10 with the drop-in `.ini` below,
+> keep using it or switch to the toggle, but not both: delete
+> `downloader_chipster6502_MiSTer_monitor_DB.ini` from `/media/fat/` when you
+> enable the toggle, so the database is not declared twice.
+
+### Alternative: MiSTer Downloader drop-in database
+
+For setups that run the *Downloader* on its own, without Update All. It
+installs the same files and keeps them updated the same way.
 
 1. Download the drop-in `.ini` file:
 
@@ -59,9 +94,10 @@ the program files in place so you can re-enable it later by running
 `MiSTer_Monitor` again — no re-download needed.
 
 To remove MiSTer Monitor **completely**, after running the uninstall script
-also delete the drop-in file
-`downloader_chipster6502_MiSTer_monitor_DB.ini` from the root of your SD
-card (`/media/fat/`), so the Downloader stops tracking and updating it.
+also stop the Downloader from tracking it: disable **MiSTer Monitor** under
+*Tools & Scripts* in the Update All settings or uninstall it from MiSTer
+Companion's Install Center if you enabled it there, or delete the drop-in file `downloader_chipster6502_MiSTer_monitor_DB.ini` from
+the root of your SD card (`/media/fat/`) if you used that route.
 
 > `log_file_entry=1` in `MiSTer.ini` is left untouched by the uninstall
 > script, because other tools may rely on it. Set it back to `0` manually if
@@ -94,6 +130,28 @@ This is required for the Python server to detect which core and game are
 currently loaded.
 
 </details>
+
+### Artwork packs (optional)
+
+The [MiSTer Artwork Pack](https://github.com/chipster6502/MiSTer_artwork_pack)
+puts game artwork for 39 systems — 23,658 images — on the MiSTer's SD card,
+under `docs/<System>/Artwork/`. With a pack installed the server serves the
+image for the loaded game directly and the display shows it without a
+ScreenScraper round trip, so covered games appear at once. Games the pack
+does not cover, and core images, still come from ScreenScraper, so the
+account below is still needed.
+
+1. In the Update All settings, go to **Extra Content → Game Artwork DBs**.
+2. Pick the systems you want, or **Select All**. Each system is one
+   database; the whole set is 2.0–2.4 GB depending on the style.
+3. Choose a style — **2D Boxes**, **3D Boxes** or **Box + Screenshot** —
+   for the selected systems, or per system. Styles are mutually exclusive
+   per system: switching one replaces its images on the next run.
+4. Save and run Update All.
+
+Nothing changes on the display side: the firmware asks the server first and
+falls back to ScreenScraper on its own. To go back to ScreenScraper-only,
+deselect the databases and run Update All again; it removes the images.
 
 ## Display side
 
