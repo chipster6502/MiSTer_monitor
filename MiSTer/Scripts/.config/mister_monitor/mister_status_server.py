@@ -1907,6 +1907,24 @@ def _is_launcher_mgl(path):
     return os.path.basename(path).startswith('.') or _is_sd_root_file(path)
 
 
+def _media_exists(path):
+    """
+    True when a path is on disk OR names a real member inside a zip, which
+    exists() cannot see. Launchers write both forms, so every resolved media
+    path is checked here rather than at each call site.
+    """
+    if not path:
+        return False
+    if os.path.exists(path):
+        return True
+    zip_rel, zip_internal = _zip_split(path)
+    if not zip_rel or not zip_internal:
+        return False
+    zip_abs = (zip_rel if zip_rel.startswith('/')
+               else os.path.join('/media/fat', zip_rel))
+    return bool(_zip_member_match(zip_abs, zip_internal))
+
+
 _CD32_CFG = '/media/fat/config/AmigaCD32.cfg'
 _CD32_PATH_OFFSET = 3100
 _CD32_PATH_LEN = 108
@@ -1932,7 +1950,7 @@ def _amiga_cd32_media():
     while rel.startswith('../'):        # stored relative to /media
         rel = rel[3:]
     path = os.path.normpath('/media/' + rel.lstrip('/'))
-    if not os.path.exists(path):
+    if not _media_exists(path):
         print(f"⚠️ AmigaCD32 disc not found: {path}")
         return ''
     return path
@@ -1974,17 +1992,8 @@ def _mgl_target(mgl_path):
         cleaned = os.path.join(os.path.dirname(mgl_path), raw)
     cleaned = os.path.normpath(cleaned)
 
-    if os.path.exists(cleaned):
+    if _media_exists(cleaned):
         return cleaned
-
-    # Zip-shaped target: exists() cannot see a member, the central directory
-    # settles it — same test the FILESELECT branch applies to browsed zips.
-    zip_rel, zip_internal = _zip_split(cleaned)
-    if zip_rel and zip_internal:
-        zip_abs = (zip_rel if zip_rel.startswith('/')
-                   else os.path.join('/media/fat', zip_rel))
-        if _zip_member_match(zip_abs, zip_internal):
-            return cleaned
 
     print(f"⚠️ MGL target does not exist: {cleaned}")
     return ''
