@@ -39,7 +39,7 @@ from urllib.parse import urlparse
 # /status/version. Bump on every release, together with FIRMWARE_VERSION in
 # the sketches.
 # =============================================================================
-SERVER_VERSION = "2.8.0"
+SERVER_VERSION = "2.9.0"
 
 # RetroAchievements resolver (optional sibling module): if it is missing the
 # server still starts and the route reports the error.
