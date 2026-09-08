@@ -1072,6 +1072,54 @@ def _load_romset_names(directory):
     return frozen
 
 
+_romset_title_cache = {}              # directory -> (mtime_stamp, {id: title})
+
+
+def _neogeo_romset_title(directory, romset):
+    """
+    Display title of a romset id, from the same data files the core reads.
+    The OSD browser shows this title and leaves it in CURRENTPATH; a launcher
+    that skips the browser leaves the id, and the panel should not.
+    """
+    if not directory or not romset or not os.path.isdir(directory):
+        return ''
+    paths = [os.path.join(directory, n) for n in _ROMSET_XML_NAMES]
+    try:
+        stamp = tuple(os.path.getmtime(p) if os.path.isfile(p) else 0
+                      for p in paths)
+    except Exception:
+        return ''
+    if not any(stamp):
+        return ''
+
+    with _romset_cache_lock:
+        cached = _romset_title_cache.get(directory)
+        if cached and cached[0] == stamp:
+            return cached[1].get(romset.strip().lower(), '')
+
+    import xml.etree.ElementTree as ET
+    titles = {}
+    for p in paths:
+        if not os.path.isfile(p):
+            continue
+        try:
+            root = ET.parse(p).getroot()
+        except Exception:
+            continue
+        for rs in root.iter('romset'):
+            title = (rs.get('altname') or '').strip()
+            if not title:
+                continue
+            for alias in (rs.get('name') or '').split(','):
+                alias = alias.strip().lower()
+                if alias:
+                    titles.setdefault(alias, title)
+
+    with _romset_cache_lock:
+        _romset_title_cache[directory] = (stamp, titles)
+    return titles.get(romset.strip().lower(), '')
+
+
 def _neogeo_games_dir(rom_path):
     """
     The directory holding romsets.xml for this ROM. The ROM can be nested while
@@ -2401,6 +2449,8 @@ def _update_state():
             # romsets.xml. Show the title (also what ScreenScraper searches on);
             # the path stays on ACTIVEGAME, which is what exists on disk.
             if (currentpath and currentpath != game_name and
+                    os.path.splitext(currentpath)[1].lower()
+                    not in _KNOWN_ROM_EXTS and
                     _neogeo_romset_label(_resolve_neogeo_probe(activegame),
                                        corename)):
                 print(f"🎯 NeoGeo romset folder: showing title "
@@ -2434,6 +2484,19 @@ def _update_state():
                 game_path = _state['game_path']
             if game_name:
                 print("🛡️ Only system paths on offer — keeping current game")
+
+        # NeoGeo: whichever source won, an id on the panel means no browser
+        # supplied the title. romsets.xml has it.
+        if game_name and game_path:
+            romset = _neogeo_romset_label(_resolve_neogeo_probe(game_path),
+                                          corename)
+            if romset and game_name.strip().lower() == romset:
+                title = _neogeo_romset_title(_neogeo_games_dir(game_path),
+                                             romset)
+                if title:
+                    print(f"🎯 NeoGeo title from romsets.xml: "
+                          f"'{title}' for romset '{romset}'")
+                    game_name = title
 
         print(f"🎮 Non-arcade: core={corename} game={game_name}")
 
