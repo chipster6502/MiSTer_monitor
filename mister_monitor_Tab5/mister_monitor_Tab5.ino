@@ -169,7 +169,8 @@ String CORE_MEDIA_ORDER_STR             = "wheel-steel,wheel-carbon,wheel,photo,
 #define THEME_WHITE     0xFFFF
 
 // Runtime-configurable parameters — formerly #defines, now global variables.
-int  CORE_IMAGE_TIMEOUT           = 30000;
+int  CORE_IMAGE_TIMEOUT           = 30000;  // game image slide dwell (ms)
+int  SYSTEM_IMAGE_TIMEOUT         = 30000;  // system image slide dwell (ms); resolved in setup()
 bool ENABLE_ALPHABETICAL_FOLDERS  = true;
 int  SCREENSCRAPER_TIMEOUT        = 30000;
 int  SCREENSCRAPER_RETRIES        = 2;
@@ -833,6 +834,9 @@ static bool showingGameImage = true;  // true = game image, false = system image
 // rotation always measures "time since the slide on screen was drawn". Any
 // entry into image mode that draws the game image sets showingGameImage
 // back to true, so the dwell in force is always the one for that slide.
+static unsigned long currentSlideTimeout() {
+  return (unsigned long) (showingGameImage ? CORE_IMAGE_TIMEOUT : SYSTEM_IMAGE_TIMEOUT);
+}
 String lastArcadeSystemeId = "";  // Store last arcade subsystem ID
 
 void checkMisterDebugState();
@@ -3096,6 +3100,9 @@ void setup() {
   CORE_MEDIA_ORDER_STR             = appConfig.coreMediaOrder;
 
   CORE_IMAGE_TIMEOUT          = appConfig.coreImageTimeout;
+  SYSTEM_IMAGE_TIMEOUT        = (appConfig.systemImageTimeout > 0)
+                                ? appConfig.systemImageTimeout
+                                : CORE_IMAGE_TIMEOUT;   // 0/unset = same as the game image
   ENABLE_ALPHABETICAL_FOLDERS = appConfig.alphabeticalFolders;
   SCREENSCRAPER_TIMEOUT       = appConfig.ssTimeout;
   SCREENSCRAPER_RETRIES       = appConfig.ssRetries;
@@ -3383,15 +3390,16 @@ void loop() {
     Serial.printf("ROTATION STATUS: game='%s', core='%s', showingGameImage=%s, slide age=%lu ms (target: %lu)\n",
                   currentGame.c_str(), currentCore.c_str(),
                   showingGameImage ? "true" : "false",
-                  millis() - coreImageStartTime, (unsigned long) CORE_IMAGE_TIMEOUT);
+                  millis() - coreImageStartTime, currentSlideTimeout());
     lastRotationLog = millis();
   }
 
   // Rotation logic for games (only when game is active and core is not MENU)
     if (currentGame.length() > 0 && currentCore != "MENU") {
       // The slide clock is coreImageStartTime, restamped by every draw site;
-      // the dwell is core_image_timeout.
-      if (millis() - coreImageStartTime > (unsigned long) CORE_IMAGE_TIMEOUT) {
+      // each half of the cycle has its own dwell (core_image_timeout for the
+      // game image, system_image_timeout for the system image).
+      if (millis() - coreImageStartTime > currentSlideTimeout()) {
         // GAME INFO slide ([gameinfo] info_in_rotation): an interstitial on the
         // game -> core leg, so the cycle reads game -> info -> core. It sits
         // second for a reason: every game change resets the rotation to the
