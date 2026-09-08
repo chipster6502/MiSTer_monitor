@@ -39,7 +39,7 @@ from urllib.parse import urlparse
 # /status/version. Bump on every release, together with FIRMWARE_VERSION in
 # the sketches.
 # =============================================================================
-SERVER_VERSION = "2.9.0"
+SERVER_VERSION = "2.8.0"
 
 # RetroAchievements resolver (optional sibling module): if it is missing the
 # server still starts and the route reports the error.
@@ -2016,6 +2016,22 @@ def _deref_launcher_mgl(path, label='ACTIVEGAME'):
     return target
 
 
+_LAUNCH_MGL = '/media/fat/.LASTLAUNCH.mgl'
+
+
+def _scratch_mgl_game(corename_ts):
+    """
+    The game named by the scratch MGL at the card root, when that MGL was
+    written for the current core load. Console Mode launches through it and
+    announces nothing else, so the MGL is the only witness; the window keeps
+    one left by an earlier launcher out. FAT rounds mtimes to 2 s.
+    """
+    mgl_ts = _get_mtime_ns(_LAUNCH_MGL) / 1e9
+    if not mgl_ts or not (corename_ts - 30 <= mgl_ts <= corename_ts + 5):
+        return ''
+    return _mgl_target(_LAUNCH_MGL)
+
+
 def _game_name_from_path(path):
     """
     Extracts the game name from a file path. Only strips the extension when it
@@ -2401,8 +2417,10 @@ def _update_state():
             game_name = _game_name_from_path(currentpath)
             game_path = cp_composed
         else:
-            game_name = ''
-            game_path = ''
+            game_path = _scratch_mgl_game(corename_ts)
+            game_name = _game_name_from_path(game_path)
+            if game_name:
+                print(f"🔗 Scratch MGL is the only witness: '{game_path}'")
 
         # Every source rejected as a system path leaves game_name empty, but on
         # a genuinely new core that emptiness is the truth, while on an unchanged
