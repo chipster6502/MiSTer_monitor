@@ -829,7 +829,10 @@ bool tryMediaTypeWithRegions(String baseUrl, String savePath, const char* mediaB
 bool tryMediaTypesForToken(String baseUrl, String savePath, String token);
 bool applyMediaOrderAndDownload(String baseUrl, String savePath, String orderStr);
 static bool showingGameImage = true;  // true = game image, false = system image
-static unsigned long lastRotationTime = 0;
+// The slide clock is coreImageStartTime: every draw site restamps it, so the
+// rotation always measures "time since the slide on screen was drawn". Any
+// entry into image mode that draws the game image sets showingGameImage
+// back to true, so the dwell in force is always the one for that slide.
 String lastArcadeSystemeId = "";  // Store last arcade subsystem ID
 
 void checkMisterDebugState();
@@ -2622,6 +2625,7 @@ bool handleFullscreenStripTouch(int physicalX) {
 
     scanInProgress  = false;
     lastButtonPress = millis();
+    showingGameImage   = true;
     showGameImageScreen(currentCore, currentGame);
     showingCoreImage   = true;
     coreImageStartTime = millis();
@@ -2832,6 +2836,7 @@ void handleTouch() {
           btnScan.label   = originalLabel;
           scanInProgress  = false;
           lastButtonPress = millis();
+          showingGameImage   = true;
           showGameImageScreen(currentCore, currentGame);
           showingCoreImage   = true;
           coreImageStartTime = millis();
@@ -3243,21 +3248,14 @@ void loop() {
   }
 
   if (showingCoreImage) {
-  // Check timeout for core image display (30 seconds)
-  if (millis() - coreImageStartTime > CORE_IMAGE_TIMEOUT) {
-    if (currentCore == coreDownloadFailedFor && currentGame.length() == 0) {
-      // No image available for this core AND no game loaded — re-show menu overlay and stay
-      showMenuImageWithCoreOverlay(currentCore);
-      coreImageStartTime = millis();
-      return;
-    }
-    Serial.printf("Image timeout - returning to interface (page %d)\n", currentPage);
-    showingCoreImage = false;
-    backgroundLoaded = false;
-    needsRedraw = true;
-    return;
-  }
-    
+  // There is no timed exit from image mode. The slide clock
+  // (coreImageStartTime) is consumed by the rotation block below, and a
+  // core without a game keeps its image up until the 10 s state check sees
+  // a real change. Leaving and re-entering on a timer used to redraw the
+  // same artwork from scratch (a visible clear + decode every
+  // core_image_timeout), and at short timeouts it also pre-empted the
+  // game/system rotation.
+
   // In image mode: ANY touch exits to interface
   // We don't need to check specific buttons, any touch will do
   auto touch = M5.Touch.getDetail();
@@ -3316,7 +3314,7 @@ void loop() {
       
       // Check if game changed first (higher priority)
       if (oldGame != currentGame && sdCardAvailable) {
-        lastRotationTime = 0; // Reset rotation timer for new game
+        showingGameImage = true; // New game: the cycle restarts on its image
         gameInfoFromRotation = false;  // slide belonged to the previous game
         String coreNameLower = currentCore;
   coreNameLower.toLowerCase();
@@ -3366,6 +3364,7 @@ void loop() {
         // If there's an active game, show game image, otherwise show core image
         if (currentGame.length() > 0) {
           Serial.printf("Core changed with active game, showing game image for new core\n");
+          showingGameImage = true;
           showGameImageScreen(currentCore, currentGame);
         } else {
           Serial.printf("Core changed without game, showing core image\n");
@@ -3381,25 +3380,18 @@ void loop() {
   // Rotation debug logging
   static unsigned long lastRotationLog = 0;
   if (millis() - lastRotationLog > 5000) { // Log every 5 seconds
-    Serial.printf("ROTATION STATUS: game='%s', core='%s', showingGameImage=%s, lastRotationTime=%lu\n", 
-                  currentGame.c_str(), currentCore.c_str(), 
-                  showingGameImage ? "true" : "false", lastRotationTime);
-    if (lastRotationTime > 0) {
-      Serial.printf("   Time since last rotation: %lu ms (target: 30000)\n", millis() - lastRotationTime);
-    }
+    Serial.printf("ROTATION STATUS: game='%s', core='%s', showingGameImage=%s, slide age=%lu ms (target: %lu)\n",
+                  currentGame.c_str(), currentCore.c_str(),
+                  showingGameImage ? "true" : "false",
+                  millis() - coreImageStartTime, (unsigned long) CORE_IMAGE_TIMEOUT);
     lastRotationLog = millis();
   }
-  
+
   // Rotation logic for games (only when game is active and core is not MENU)
     if (currentGame.length() > 0 && currentCore != "MENU") {
-      // Initialize rotation timer on first display
-      if (lastRotationTime == 0) {
-        lastRotationTime = millis();
-        showingGameImage = true;
-      }
-      
-      // Check for 30-second rotation
-      if (millis() - lastRotationTime > 30000) { // 30 seconds
+      // The slide clock is coreImageStartTime, restamped by every draw site;
+      // the dwell is core_image_timeout.
+      if (millis() - coreImageStartTime > (unsigned long) CORE_IMAGE_TIMEOUT) {
         // GAME INFO slide ([gameinfo] info_in_rotation): an interstitial on the
         // game -> core leg, so the cycle reads game -> info -> core. It sits
         // second for a reason: every game change resets the rotation to the
@@ -3423,7 +3415,6 @@ void loop() {
         }
 
         showingGameImage = !showingGameImage;
-        lastRotationTime = millis();
         
         if (showingGameImage) {
           showGameImageScreen(currentCore, currentGame);
@@ -3508,24 +3499,15 @@ void loop() {
     Serial.printf("Time since last button: %lu ms\n", millis() - lastButtonPress);
 
     // Any panel exit funnels through here (synopsis forceExit and the 1-min
-    // fallback both do): release the page-5 residency so a later silent
-    // image-timeout exit lands on the monitor page instead of resurrecting
-    // the panel with expired lifecycle timers. The rotation clock kept
-    // running while the panel was read, so restart it too — otherwise an
-    // overdue timer fires the GAME INFO slide within one iteration of the
-    // image below being drawn (image "blinks", panel comes straight back).
-    // The restamp must happen HERE, before the fresh-data check and the
-    // draw: the machine relies on lastRotationTime maturing BEFORE
-    // coreImageStartTime (the image-timeout check runs earlier in the loop
-    // than the rotation check, so on a tie the timeout would always win and
-    // the rotation would starve on a perpetual game image). The seconds the
-    // HTTP check and the draw take are exactly that safety margin.
+    // fallback both do): release the page-5 residency so a later touch exit
+    // from image mode lands on the monitor page instead of resurrecting the
+    // panel with expired lifecycle timers. The slide clock is restamped at
+    // the end of this block, after the draw, so the image below always gets
+    // a full slot before the rotation can fire again.
     if (currentPage == 5) {
       currentPage      = 0;
       gameInfoSubPage  = 0;
       resetGameInfoSynScroll();   // safe: gameInfoForceExit already consumed above
-      lastRotationTime = millis();   // full 30 s slot for the image below
-      showingGameImage = true;       // counted as the game half of the cycle
     }
     
     // ENHANCED LOGIC: Force fresh data check before screensaver
@@ -3571,6 +3553,7 @@ void loop() {
     
     if (shouldShowGame) {
       Serial.printf("Showing game image: '%s' on '%s'\n", currentGame.c_str(), currentCore.c_str());
+      showingGameImage = true;   // every entry into image mode restarts the cycle on the game image
       showGameImageScreen(currentCore, currentGame);
     } else {
       Serial.printf("Showing core image for: '%s'\n", currentCore.c_str());
@@ -3616,7 +3599,7 @@ void loop() {
     
 // Detect game change with arcade subsystem reset
 if (oldGame != currentGame && sdCardAvailable) {
-  lastRotationTime = 0; // Reset rotation timer for new game
+  showingGameImage = true; // New game: the cycle restarts on its image
   Serial.printf("=== ENHANCED GAME CHANGE DETECTED ===\n");
   Serial.printf("Previous game: '%s' (length: %d)\n", oldGame.c_str(), oldGame.length());
   Serial.printf("Current game: '%s' (length: %d)\n", currentGame.c_str(), currentGame.length());
@@ -3735,11 +3718,10 @@ if (oldGame != currentGame && sdCardAvailable) {
         if (millis() - gameInfoSubPageChange > GAMEINFO_SUBPAGE_TIMEOUT) {
           Serial.println("ROTATION: GAME INFO slide done - back to core image");
           gameInfoFromRotation = false;
-          currentPage          = 0;       // release page-5 residency: a silent
-                                          // image-timeout exit must land on the
-                                          // monitor page, not on this panel
+          currentPage          = 0;       // release page-5 residency: a later
+                                          // touch exit from image mode must
+                                          // land on the monitor page, not here
           showingGameImage     = false;   // the core image is next in the cycle
-          lastRotationTime     = millis();
           showCoreImageScreenWithAutoDownload(currentCore);
           showingCoreImage     = true;
           coreImageStartTime   = millis();
@@ -6647,7 +6629,7 @@ void serviceRAPopup() {
     if (!raPopupDrawn) {
       showAchievementUnlock();
       raPopupDrawn = true;
-      lastRotationTime = millis();   // hold image rotation while popup is up
+      coreImageStartTime = millis(); // hold the slide clock while the popup is up
     }
   } else {
     raPopupUntil = 0;
