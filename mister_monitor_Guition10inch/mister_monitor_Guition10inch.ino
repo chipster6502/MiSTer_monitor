@@ -51,18 +51,27 @@
 // -------------------------------------------------------
 // psramMalloc(): allocator for large buffers.
 //
-// Despite the name, buffers come from internal SRAM
-// (MALLOC_CAP_INTERNAL): the allocation policy the JPEG
-// pipeline was validated with on ESP32-P4. PSRAM is usable
-// on this board (the display framebuffer lives there), so
-// moving these buffers to it is a possible later change,
-// to be measured before adopting.
+// Buffers above the threshold go to PSRAM, which is CPU
+// mapped on this board: whole-screen JPEGs do not fit in
+// the contiguous internal SRAM left once the network stack
+// is up. Smaller buffers stay internal, where access is
+// faster, and PSRAM failures fall back to internal.
 // -------------------------------------------------------
+#define PSRAM_ALLOC_THRESHOLD 16384
+
 inline uint8_t* psramMalloc(size_t size) {
-  uint8_t* ptr = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  uint8_t* ptr = nullptr;
+  if (size >= PSRAM_ALLOC_THRESHOLD) {
+    ptr = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  }
   if (!ptr) {
-    Serial.printf("[MEM] malloc FAILED for %u bytes! Free heap: %u\n",
-                  size, ESP.getFreeHeap());
+    ptr = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  }
+  if (!ptr) {
+    Serial.printf("[MEM] malloc FAILED for %u bytes! Largest free block: "
+                  "internal %u, PSRAM %u\n", size,
+                  heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                  heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
   }
   return ptr;
 }
