@@ -20,5 +20,22 @@ secrets.h
 ss_credentials.h
 MiSTer/Scripts/.config/mister_monitor/ra_credentials.ini
 MiSTer/Scripts/.config/mister_monitor/ra_cache/
-MiSTer/Scripts/.config/mister_monitor/ra_credentials.ini
-MiSTer/Scripts/.config/mister_monitor/ra_cache/
+# Manual backups — these have contained live credentials
+*.bak
+*.orig
+*~
+
+# Build directories with a suffix (build_tab5/, build_guition/…)
+# Note: the `build/` rule above does not match these.
+build_*/
+*.map
+
+# Release archives
+*.zip
+
+# Work parked mid-experiment (the *_PENDIENTE_* convention)
+*_PENDIENTE_*
+
+# Editors
+.vscode/
+.idea/
