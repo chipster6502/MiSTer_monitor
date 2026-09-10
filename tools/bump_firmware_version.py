@@ -18,6 +18,8 @@ TARGETS = [
      b'#define FIRMWARE_VERSION "%s"'),
     ("mister_monitor_Tab5/mister_monitor_Tab5.ino",
      b'#define FIRMWARE_VERSION "%s"'),
+     ("mister_monitor_Guition10inch/mister_monitor_Guition10inch.ino",
+     b'#define FIRMWARE_VERSION "%s"'),
     ("MiSTer/Scripts/.config/mister_monitor/mister_status_server.py",
      b'SERVER_VERSION = "%s"'),
 ]
