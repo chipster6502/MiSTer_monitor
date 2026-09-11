@@ -2659,6 +2659,33 @@ def _start_watcher():
 _session_start   = time.time()
 _requests_count  = 0
 
+# Endpoint list shown to a human. The startup banner and the HTML index page
+# both read from here, so the two cannot drift apart again — they already had:
+# the banner listed the RetroAchievements endpoints, the index page did not.
+#
+# Inclusion criterion, from send_index_page's own docstring: that page exists so
+# a manual connectivity test sees something reassuring. It is a browser landing
+# page, not API documentation — so endpoints that need query parameters or
+# return machine-only counters stay out (/status/snapshot,
+# /status/retroachievements/event, /status/retroachievements/achievements).
+PUBLIC_ENDPOINTS = [
+    ('/status/core',              'Active core'),
+    ('/status/game',              'Active game'),
+    ('/status/rom',               'Loaded ROM'),
+    ('/status/rom/details',       'ROM details (CRC, hash, path)'),
+    ('/status/system',            'CPU, memory, uptime'),
+    ('/status/storage',           'SD / USB storage'),
+    ('/status/network',           'Network status'),
+    ('/status/usb',               'USB devices'),
+    ('/status/session',           'Session statistics'),
+    ('/status/retroachievements', 'RetroAchievements progress for the active game'),
+    ('/status/all',               'All data combined'),
+    ('/status/unknown_cores',     'Cores this MiSTer ran that we cannot name'),
+    ('/status/error_state',       'Current error state (troubleshooting)'),
+    ('/status/version',           'Server version'),
+    ('/media/artwork',            'Artwork for the loaded game, from the installed pack'),
+]
+
 class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
     def __init__(self, *args, **kwargs):
@@ -4402,22 +4429,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         """Landing page for humans hitting the server root. The display never
         calls '/'; this exists so a manual connectivity test returns something
         reassuring instead of a 404 that looks like a failure."""
-        endpoints = [
-            ('/status/core', 'Active core'),
-            ('/status/game', 'Active game'),
-            ('/status/rom', 'Loaded ROM'),
-            ('/status/rom/details', 'ROM details (CRC, hash, path)'),
-            ('/status/system', 'CPU, memory, uptime'),
-            ('/status/storage', 'SD / USB storage'),
-            ('/status/network', 'Network status'),
-            ('/status/usb', 'USB devices'),
-            ('/status/session', 'Session statistics'),
-            ('/status/all', 'All data combined'),
-            ('/status/unknown_cores', 'Cores this MiSTer ran that we cannot name'),
-            ('/media/artwork', 'Artwork for the loaded game, from the installed pack'),
-        ]
         rows = ''.join(
-            f'<li><a href="{p}">{p}</a> — {d}</li>' for p, d in endpoints
+            f'<li><a href="{p}">{p}</a> — {d}</li>' for p, d in PUBLIC_ENDPOINTS
         )
         html = (
             '<!DOCTYPE html><html><head><meta charset="utf-8">'
@@ -4464,21 +4477,15 @@ if __name__ == '__main__':
                 print(f"ℹ️ RA polling not started: {e}")
         server = ThreadingHTTPServer(('', 8081), MiSTerStatusHandler)
         print("MiSTer Monitor Status Server v2 - port 8081")
+        print(f"Version: {SERVER_VERSION}")
         print("Endpoints:")
-        print("  /status/core         - Active core")
-        print("  /status/game         - Active game")
-        print("  /status/rom          - Loaded ROM")
-        print("  /status/rom/details  - ROM details (CRC, hash, path)")
-        print("  /status/system       - CPU, memory, uptime")
-        print("  /status/storage      - SD/USB storage")
-        print("  /status/network      - Network status")
-        print("  /status/usb          - USB devices")
-        print("  /status/session      - Session statistics")
-        print("  /status/all          - All data combined")
-        print("  /status/retroachievements - RA progress for active game")
+        for _p, _d in PUBLIC_ENDPOINTS:
+            print(f"  {_p:<26} - {_d}")
+        # Parameterised endpoints: useful when debugging the server, but not
+        # worth listing on the browser page, where they cannot be clicked.
         print("  /status/retroachievements/event - unlock counter micro-poll")
         print("  /status/retroachievements/achievements - trophy list (?page=N&per=M)")
-        print("  /status/unknown_cores - cores this MiSTer ran that we cannot name")
+        print("  /status/snapshot - atomic identity snapshot (?seq=N)")
         print("")
         server.serve_forever()
     except Exception as e:
