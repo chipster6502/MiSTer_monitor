@@ -46,6 +46,7 @@
 #include <WiFiUdp.h>
 #include "ss_credentials.h"
 #include "WebConfig.h"   // /config editor + /reboot on the device web server
+#include "WebFiles.h"    // /files SD card browser (list, download, upload, delete)
 
 // ===== ANTI-CRASH: Reset diagnostics, memory safety =====
 #include "esp_system.h"       // esp_reset_reason()
@@ -2750,6 +2751,7 @@ void setup() {
   // served standalone: /config, /reboot, and a landing page at "/".
   if (WiFi.status() == WL_CONNECTED) {
     startWebConfigServerStandalone();
+    registerWebFilesRoutes();    // /files SD card browser on the same server
   }
 }
 
