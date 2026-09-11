@@ -36,6 +36,7 @@ console and computer games via the MiSTer Remote web application.*
 - **Reliable load detection** — an event-driven server state machine tells real game loads from OSD navigation and delivers them to the display atomically.
 - **Detection from multiple sources** — recognises games loaded from the OSD, the MiSTer Remote web app, and Super Attract Mode (SAM); auto-discovers the MiSTer on the LAN.
 - **System monitor** — CPU, memory, uptime, storage, network, and USB device panels, with touch navigation.
+- **Web interface** — edit `config.ini` and browse, upload or delete files on the display's SD card from any browser on your network, at `http://<Display-IP>:8080`. Handy for swapping artwork or changing a setting without pulling the card.
 
 <details>
 <summary><b>More detail</b></summary>
@@ -112,7 +113,9 @@ on the display.
   is also supported.
 
 See **[`docs/installation.md`](docs/installation.md)** for the complete step-by-step
-procedure, the web flasher and ScreenScraper account setup.
+procedure, the web flasher and ScreenScraper account setup, or the illustrated
+**[setup guide PDF](docs/MiSTer_Monitor_Setup_Guide.pdf)** if you prefer a
+printable walkthrough.
 
 ## 3D-printable stand
 

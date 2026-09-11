@@ -5,6 +5,7 @@
 - [SD Card content](#sd-card-content)
 - [config.ini](#configini)
 - [MiSTer IP address](#mister-ip-address)
+- [Web interface](#web-interface)
 - [Artwork download order](#artwork-download-order)
 - [RetroAchievements](#retroachievements)
 
@@ -126,6 +127,41 @@ arcade_media_order=fanart,marquee,wheel-carbon,wheel-steel,wheel,box3d,box2d,scr
 
 game_media_order=box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot
 ```
+
+## Web interface
+
+Once the display is on your network it serves a small web interface of its own
+on **port 8080**. This is the display's own IP address, not the MiSTer's — the
+display shows it on the boot screen once it connects, and on the **Network**
+page it is listed as **Monitor IP**, right below the MiSTer's.
+
+| URL | What it does |
+|---|---|
+| `http://<display-ip>:8080/config` | Edits `config.ini` on the microSD card in a plain text editor, comments and all. Saving keeps the previous file as `config.ini.bak` on the same card, and the page offers a **Reboot** button — settings are read once at startup, so a restart is what applies them. |
+| `http://<display-ip>:8080/files` | Browses the microSD card: open folders, download files, upload new ones, create folders, and delete what you no longer need. Deleting a game's artwork makes it be fetched again the next time you load it; uploading your own replaces it. |
+| `http://<display-ip>:8080/` | The screenshot page, on the boards whose panel supports readback (2.8" CYD, Tab5, Guition). On the 3.5" boards this is a landing page instead. |
+
+Artwork uploaded through `/files` must be **baseline** JPEG: progressive JPEGs
+are rejected with a message, because the display's decoder (JPEGDEC) cannot
+read them. Most image editors offer the choice when exporting. Deleting covers
+files and empty folders — empty a folder before removing it.
+
+Two keys in the `[ui]` section control the interface:
+
+```ini
+[ui]
+; Disable the whole web interface. Default: true
+web_config=true
+
+; Optional password. Blank means no password, which is the usual choice on a
+; home network. If set, the browser asks for it, with the username "admin".
+web_password=
+```
+
+The interface is served over plain HTTP on your LAN, like the MiSTer's own
+Samba and FTP shares. Note that the editor shows `config.ini` as it is, so
+anyone who can reach the page can read your WiFi and ScreenScraper passwords —
+set `web_password`, or `web_config=false`, if that matters on your network.
 
 ## RetroAchievements
 
