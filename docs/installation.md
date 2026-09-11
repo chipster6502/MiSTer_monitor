@@ -5,6 +5,10 @@ MiSTer, the **firmware** on your display target (M5Stack Tab5 or any of the
 Cheap Yellow Display variants), and creating the free ScreenScraper account
 used for artwork retrieval.
 
+> Prefer a printable, illustrated walkthrough? The same procedure is in
+> **[MiSTer_Monitor_Setup_Guide.pdf](MiSTer_Monitor_Setup_Guide.pdf)** — six
+> numbered steps from empty box to working display.
+
 ## Contents
 
 - [MiSTer side](#mister-side)
