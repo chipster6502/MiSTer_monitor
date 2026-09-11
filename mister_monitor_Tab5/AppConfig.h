@@ -130,6 +130,10 @@ struct AppConfig {
   int    scrollPauseStartMs = 2000;
   int    scrollPauseEndMs   = 3000;
 
+  // --- Web config editor ------------------------------------------------------
+  bool   webConfig   = true;   // [ui] web_config   - false disables /config + /reboot
+  String webPassword = "";     // [ui] web_password - non-empty enables Basic Auth
+
   // --- Debug -----------------------------------------------------------------
   bool   debugMode      = false;
 };
@@ -218,6 +222,9 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "scroll_pause_start_ms")  { cfg.scrollPauseStartMs = val.toInt(); }
     else if (key == "scroll_pause_end_ms")    { cfg.scrollPauseEndMs = val.toInt(); }
     else if (key == "flip_display")           { cfg.flipDisplay = parseBool(val); }
+    // [ui] web config editor
+    else if (key == "web_config")             { cfg.webConfig = parseBool(val); }
+    else if (key == "web_password")           { cfg.webPassword = val; }
     // [debug]
     else if (key == "debug")                  { cfg.debugMode = parseBool(val); }
     else {

@@ -403,6 +403,8 @@ bool discoverMister(uint8_t attempts = 5, uint16_t replyWaitMs = 600) {
   return false;
 }
 
+#include "WebConfig.h"   // /config editor + /reboot on the device web server
+
 // ========== SCREENSHOT SERVER ==========
 WebServer screenshotServer(8080);
 
@@ -2755,9 +2757,11 @@ void setup() {
   // is write-only over SPI — framebuffer readback (RAMRD) returns 0x0000, so any
   // capture comes out all black. 
   // Re-enable only on a panel that supports readback.
-  // if (WiFi.status() == WL_CONNECTED) {
-  //   setupScreenshotServer();
-  // }
+  // The HTTP server itself works on this panel, so the config editor is
+  // served standalone: /config, /reboot, and a landing page at "/".
+  if (WiFi.status() == WL_CONNECTED) {
+    startWebConfigServerStandalone();
+  }
 }
 
 void loop() {

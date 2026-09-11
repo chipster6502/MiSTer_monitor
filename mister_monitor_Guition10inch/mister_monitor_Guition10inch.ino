@@ -423,6 +423,8 @@ bool discoverMister(uint8_t attempts = 5, uint16_t replyWaitMs = 600) {
   return false;
 }
 
+#include "WebConfig.h"   // /config editor + /reboot on the device web server
+
 // ========== SCREENSHOT SERVER ==========
 WebServer screenshotServer(8080);
 
@@ -3131,6 +3133,7 @@ void setup() {
   }
   // Start screenshot HTTP server (only if WiFi connected)
   if (WiFi.status() == WL_CONNECTED) {
+    registerWebConfigRoutes();   // /config editor + /reboot on the same server
     setupScreenshotServer();
   }
 }
