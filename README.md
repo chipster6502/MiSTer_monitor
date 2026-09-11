@@ -61,6 +61,7 @@ console and computer games via the MiSTer Remote web application.*
 | Target | Display / Touch | Status |
 |---|---|---|
 | [M5Stack Tab5 (ESP32-P4)](https://www.digikey.com/en/products/detail/m5stack-technology-co-ltd/C145/26740595) | 5" 1280×720 IPS · capacitive | Stable — reference implementation |
+| [Guition JC8012P4A1C 10.1" (ESP32-P4)](https://www.aliexpress.com/item/1005008789890066.html) | 10.1" 1280×800 IPS MIPI-DSI · GSL3680 capacitive | Stable |
 | [Cheap Yellow Display 2.8" — ILI9341, usually 1-USB (ESP32-2432S028)](https://a.aliexpress.com/_EJ4r0Hg) | 320×240 ILI9341 · resistive | Stable |
 | [Cheap Yellow Display 2.8" — ST7789, usually 2-USB (ESP32-2432S028)](https://a.aliexpress.com/_EJ4r0Hg) | 320×240 ST7789 · resistive | Stable |
 | [Cheap Yellow Display 3.5" capacitive (ESP32-3248S035)](https://a.aliexpress.com/_EJ4r0Hg) | 480×320 ST7796 · GT911 capacitive | Stable |
@@ -200,7 +201,7 @@ Two components work together:
 ### Hardware support
 
 - ~**Cheap Yellow Display (CYD)** — Port to the widely available ESP32-2432S028R family.~
-- **Guition 10.1" ESP32-P4 display** — Port to the Guition JC8012P4A1 family (ESP32-P4 + C6, 1280×800 MIPI-DSI capacitive touchscreen).
+- ~~**Guition 10.1" ESP32-P4 display** — Port to the Guition JC8012P4A1 family (ESP32-P4 + C6, MIPI-DSI capacitive touchscreen).~~ *(shipped in v2.10.0)*
 - **5" CYD variant** - Port to the ESP32-S3-8048S050C-I family (800x480 touchscreen).
 - **M5Stack Core Basic support** — Port to the original Core Basic (ESP32, 320×240, physical buttons).
 - **M5Stack Core S3 support** — Port to the Core S3 (ESP32-S3, 320×240 touchscreen).

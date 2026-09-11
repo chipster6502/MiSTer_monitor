@@ -66,7 +66,7 @@ JPEG handling, ScreenScraper integration — stays as-is.
 | CYD 3.5" cap. (ESP32-3248S035) | ESP32 | 480x320 ST7796 | GT911 cap. | CYD28R_ILI9341 | Stable |
 | CYD 3.5" res. (ESP32-3248S035) | ESP32 | 480x320 ST7796 | XPT2046 res. | CYD28R_ILI9341 | Stable |
 | 8048S050C-I (5") | ESP32-S3 | 800x480 ST7262 RGB | GT911 cap. | Tab5 | Planned |
-| Guition JC8012P4A1 (10.1") | ESP32-P4 + C6 | 800x1280 IPS MIPI-DSI | GSL3680 cap. | Tab5 | Planned |
+| Guition JC8012P4A1C (10.1") | ESP32-P4 + C6 | 800x1280 IPS MIPI-DSI | GSL3680 cap. | Tab5 | Stable |
 
 ## Build settings
 
@@ -77,6 +77,28 @@ Arduino IDE → Tools:
 - Board: `M5Tab5` (M5Stack board package)
 - Library: `M5Unified`
 - Other: defaults from the M5Tab board definition
+
+### Guition JC8012P4A1C (10.1")
+
+Arduino IDE -> Tools, per the vendor's documented configuration:
+
+- Board: `ESP32P4 Dev Module` (esp32 board package)
+- PSRAM: `Enabled` (required - the framebuffer alone is ~2 MB)
+- Flash Mode: `QIO`
+- Flash Frequency: `80MHz`
+- Flash Size: `16MB (128Mb)`
+- Partition Scheme: `16M Flash (3MB APP/9.9MB FATFS)`
+- USB CDC On Boot: `Disabled` - with it enabled, `Serial` output goes to the
+  native USB port instead of the UART bridge used for flashing, so the COM
+  port you flash from shows only the ROM boot log
+- Libraries: `M5GFX`, `JPEGDEC`
+
+Verified on esp32 core 3.3.11. The vendor screenshot also shows a CPU
+Frequency of 360MHz; that option does not exist in the core and is ignored.
+
+The vendor `esp_lcd` JD9365 driver lives in the sketch's `src/lcd/` folder and
+is used unmodified - Arduino compiles `src/` recursively, so it is picked up
+automatically.
 
 ### CYD (all variants)
 

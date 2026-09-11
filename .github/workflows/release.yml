@@ -35,7 +35,7 @@ jobs:
           SS_DEV_ID:   ${{ secrets.SS_DEV_ID }}
           SS_DEV_PASS: ${{ secrets.SS_DEV_PASS }}
         run: |
-          for d in mister_monitor_Tab5 mister_monitor_CYD28R_ILI9341 mister_monitor_CYD28R_ST7789 mister_monitor_CYD35C mister_monitor_CYD35R; do
+          for d in mister_monitor_Tab5 mister_monitor_Guition10inch mister_monitor_CYD28R_ILI9341 mister_monitor_CYD28R_ST7789 mister_monitor_CYD35C mister_monitor_CYD35R; do
             printf '#pragma once\n#define SS_DEV_ID_EMBEDDED   "%s"\n#define SS_DEV_PASS_EMBEDDED "%s"\n' \
               "$SS_DEV_ID" "$SS_DEV_PASS" > "$d/ss_credentials.h"
           done
@@ -46,6 +46,13 @@ jobs:
             --fqbn "m5stack:esp32:m5stack_tab5" \
             --output-dir build/tab5 \
             mister_monitor_Tab5
+
+      - name: Compile Guition 10.1 inch
+        run: |
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32p4:PSRAM=enabled,FlashMode=qio,FlashFreq=80,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB" \
+            --output-dir build/guition10inch \
+            mister_monitor_Guition10inch
 
       - name: Compile CYD 2.8" ILI9341
         run: |
@@ -79,6 +86,7 @@ jobs:
         run: |
           mkdir -p dist
           cp build/tab5/mister_monitor_Tab5.ino.merged.bin dist/mister_monitor_tab5.bin
+          cp build/guition10inch/mister_monitor_Guition10inch.ino.merged.bin dist/mister_monitor_guition10inch.bin
           cp build/cyd_ili9341/mister_monitor_CYD28R_ILI9341.ino.merged.bin dist/mister_monitor_cyd_ili9341.bin
           cp build/cyd_st7789/mister_monitor_CYD28R_ST7789.ino.merged.bin dist/mister_monitor_cyd_st7789.bin
           cp build/cyd35c/mister_monitor_CYD35C.ino.merged.bin dist/mister_monitor_cyd35c.bin
@@ -119,6 +127,7 @@ jobs:
           printf '{ "name": "MiSTer Monitor (CYD 2.8-inch ILI9341)", "version": "%s", "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "mister_monitor_cyd_ili9341.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-cyd-ili9341.json
           printf '{ "name": "MiSTer Monitor (CYD 2.8-inch ST7789)", "version": "%s", "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "mister_monitor_cyd_st7789.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-cyd-st7789.json
           printf '{ "name": "MiSTer Monitor (Tab5)", "version": "%s", "builds": [ { "chipFamily": "ESP32-P4", "parts": [ { "path": "mister_monitor_tab5.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-tab5.json
+          printf '{ "name": "MiSTer Monitor (Guition 10.1-inch)", "version": "%s", "builds": [ { "chipFamily": "ESP32-P4", "parts": [ { "path": "mister_monitor_guition10inch.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-guition10inch.json
           printf '{ "name": "MiSTer Monitor (CYD 3.5-inch capacitive)", "version": "%s", "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "mister_monitor_cyd35c.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-cyd35c.json
           printf '{ "name": "MiSTer Monitor (CYD 3.5-inch resistive)", "version": "%s", "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "mister_monitor_cyd35r.bin", "offset": 0 } ] } ] }\n' "$VER" > site/flasher/manifest-cyd35r.json
 
