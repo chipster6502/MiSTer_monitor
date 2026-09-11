@@ -404,6 +404,7 @@ bool discoverMister(uint8_t attempts = 5, uint16_t replyWaitMs = 600) {
 }
 
 #include "WebConfig.h"   // /config editor + /reboot on the device web server
+#include "WebFiles.h"    // /files SD card browser (list, download, upload, delete)
 
 // ========== SCREENSHOT SERVER ==========
 WebServer screenshotServer(8080);
@@ -2761,6 +2762,7 @@ void setup() {
   // served standalone: /config, /reboot, and a landing page at "/".
   if (WiFi.status() == WL_CONNECTED) {
     startWebConfigServerStandalone();
+    registerWebFilesRoutes();    // /files SD card browser on the same server
   }
 }
 
