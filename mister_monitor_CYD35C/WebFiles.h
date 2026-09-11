@@ -45,7 +45,11 @@
 
 #pragma once
 #include <Arduino.h>
-#include <SD.h>
+#include <FS.h>   // File, FILE_READ/FILE_WRITE - NOT <SD.h>: the sketch
+                  // already provides the SD object, and its type differs
+                  // per board (fs::SDFS on the SPI boards, an SD_MMC
+                  // alias on the Guition). Including <SD.h> here would
+                  // redeclare SD and break those boards.
 #include <WiFi.h>
 #include <WebServer.h>
 #include "AppConfig.h"
