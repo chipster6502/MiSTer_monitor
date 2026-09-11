@@ -25,9 +25,13 @@
 //     a black hole on screen and generate a support issue. The check walks
 //     the real JPEG marker chain (SOF0/SOF1 = baseline, SOF2 = progressive)
 //     on the written file, so EXIF blocks of any size cannot fool it.
-//   * Listings are streamed in FAT enumeration order, unsorted: collecting
-//     hundreds of artwork filenames to sort them would fragment the heap on
-//     the CYD boards, and handleClient() also runs mid-download (pumpedDelay).
+//   * Listings are sorted: directories first, then files, both alphabetically
+//     and case-insensitively. Sorting needs the whole directory buffered
+//     before the first row can be written, so it is bounded twice - by entry
+//     count and by free heap - because the CYD boards build with PSRAM
+//     disabled and share the internal heap with the network stack. A
+//     directory past either bound falls back to raw FAT order and says so on
+//     the page, which is better than running the board out of memory.
 //   * Path hygiene: every path from the client must be absolute, without
 //     "..", without backslashes, and within a length cap. This is a LAN
 //     device, but path traversal is the one input worth being strict about.
@@ -46,8 +50,32 @@
 #include <WebServer.h>
 #include "AppConfig.h"
 #include "WebConfig.h"   // webConfigAuthOk() + shared [ui] web_config gate
+#include <vector>
+#include <algorithm>
 
 static const size_t WEBFILES_MAX_PATH = 200;
+
+// Sorting bounds. 400 entries at roughly 50 bytes each is about 20 KB, which
+// fits comfortably on a CYD with WiFi up; the heap floor is the real guard,
+// since a directory of long filenames costs more per entry than a short one.
+static const size_t   WEBFILES_SORT_MAX_ENTRIES = 400;
+static const uint32_t WEBFILES_SORT_HEAP_FLOOR  = 40000;   // bytes to leave free
+
+struct WebFilesEntry {
+  String   name;
+  uint32_t size;
+  bool     isDir;
+};
+
+// Directories first, then case-insensitive alphabetical. Matches what every
+// file manager does, and puts the core folders in a findable order.
+static bool webFilesEntryLess(const WebFilesEntry& a, const WebFilesEntry& b) {
+  if (a.isDir != b.isDir) return a.isDir;
+  String la = a.name; la.toLowerCase();
+  String lb = b.name; lb.toLowerCase();
+  if (la != lb) return la < lb;
+  return a.name < b.name;            // stable tie-break for same-name casings
+}
 
 // -----------------------------------------------------------------------------
 // Path and text helpers
@@ -243,24 +271,21 @@ static void handleWebFilesList() {
     screenshotServer.sendContent(forms);
   }
 
-  // Entries, streamed one row at a time in FAT order (see header comment).
-  File e;
-  while ((e = d.openNextFile())) {
-    String nm = e.name();
-    int slash = nm.lastIndexOf('/');            // name() is basename on recent
-    if (slash >= 0) nm = nm.substring(slash + 1); // cores, full path on older
+  // One row of the table. Shared by the sorted and the fallback path so the
+  // two can never render differently.
+  auto emitRow = [&](const String& nm, uint32_t sz, bool isDir) {
     String child = (dir == "/") ? "/" + nm : dir + "/" + nm;
     String row;
     row.reserve(300);
     row += "<tr><td>";
-    if (e.isDirectory()) {
+    if (isDir) {
       row += "<a href=\"/files?dir=" + webFilesUrlEncode(child) + "\">" +
              webFilesHtmlEscape(nm) + "/</a></td><td>&lt;DIR&gt;</td><td></td>";
     } else {
       // Name previews in the tab where the type allows it; the arrow forces a
       // save, so no right-click is needed for images.
       row += "<a href=\"/files/download?path=" + webFilesUrlEncode(child) + "\">" +
-             webFilesHtmlEscape(nm) + "</a></td><td>" + String(e.size()) + "</td>"
+             webFilesHtmlEscape(nm) + "</a></td><td>" + String(sz) + "</td>"
              "<td><a class=\"dl\" title=\"Download\" href=\"/files/download?dl=1&amp;path=" +
              webFilesUrlEncode(child) + "\">&#8681;</a></td>";
     }
@@ -269,8 +294,53 @@ static void handleWebFilesList() {
            "<input type=\"hidden\" name=\"path\" value=\"" +
            webFilesHtmlEscape(child) + "\">"
            "<button class=\"del\" type=\"submit\">x</button></form></td></tr>";
-    e.close();
     screenshotServer.sendContent(row);
+  };
+
+  // openNextFile() returns basenames on recent cores and full paths on older
+  // ones; normalise before anything else looks at the name.
+  auto baseName = [](File& f) {
+    String nm = f.name();
+    int slash = nm.lastIndexOf('/');
+    return slash >= 0 ? nm.substring(slash + 1) : nm;
+  };
+
+  // Pass 1: buffer the directory so it can be sorted. Bail out the moment
+  // either bound is crossed — an unsorted listing is a far better outcome
+  // than an allocation failure with the response already half sent.
+  std::vector<WebFilesEntry> entries;
+  bool tooLarge = false;
+  {
+    File e;
+    while ((e = d.openNextFile())) {
+      if (entries.size() >= WEBFILES_SORT_MAX_ENTRIES ||
+          ESP.getFreeHeap() < WEBFILES_SORT_HEAP_FLOOR) {
+        tooLarge = true;
+        e.close();
+        break;
+      }
+      entries.push_back({baseName(e), (uint32_t)e.size(), e.isDirectory()});
+      e.close();
+    }
+  }
+
+  if (tooLarge) {
+    // Fallback: drop the buffer, rewind, and stream in raw FAT order.
+    entries.clear();
+    entries.shrink_to_fit();
+    screenshotServer.sendContent(
+        F("<tr><td colspan=\"4\" style=\"color:#888\">"
+          "Large directory &mdash; listed in card order, not sorted."
+          "</td></tr>"));
+    d.rewindDirectory();
+    File e;
+    while ((e = d.openNextFile())) {
+      emitRow(baseName(e), (uint32_t)e.size(), e.isDirectory());
+      e.close();
+    }
+  } else {
+    std::sort(entries.begin(), entries.end(), webFilesEntryLess);
+    for (const auto& en : entries) emitRow(en.name, en.size, en.isDir);
   }
   d.close();
 
