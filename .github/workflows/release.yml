@@ -99,23 +99,22 @@ jobs:
           body: |
             ### New
 
-            - **Artwork packs, installed from Update All.** *Update All 2.10* ships the [MiSTer Artwork Pack](https://github.com/chipster6502/MiSTer_artwork_pack): 39 systems and 23,658 images in your choice of 2D boxes, 3D boxes or box + screenshot, enabled under *Settings → Extra Content → Game Artwork DBs*. The server serves the pack image for the loaded game and the display shows it without a round trip to ScreenScraper, so covered games appear at once and ScreenScraper is left for cores and for the games the pack lacks.
-            - **Shared catalogues.** Game Boy and Game Boy Color fall back to each other's folder and the Super Game Boy core borrows both; Famicom Disk System and Satellaview, which the NES and SNES cores load as their own, resolve to their own pack folders and fall back to the cartridge system's when ScreenScraper filed a title there.
-            - **FDS and Satellaview are their own systems on ScreenScraper too.** A `.fds`/`.qd` image through the NES core is queried as Famicom Disk System and a `.bs` broadcast through the SNES core as Satellaview, each with its own art, instead of as a cartridge whose CRC ScreenScraper does not know.
-            - **MiSTer Monitor is now fully compatible with Zaparoo Frontend.** Games launched from it are identified and get their artwork like an OSD launch.
+            - **The Guition JC8012P4A1C 10.1" is supported.** A sixth board joins the list: an ESP32-P4 with a 10.1-inch MIPI-DSI panel and capacitive touch, drawn at 1280x720 in landscape. Prebuilt firmware is in the [web flasher](https://chipster6502.github.io/MiSTer_monitor/flasher/) alongside the others, and its card layout ships in `SD_card_content/Guition/`.
+            - **A web interface on the display itself, on port 8080.** `http://<display-ip>:8080/config` opens `config.ini` in a browser text editor — comments and all — and offers a Reboot button to apply the changes; the previous file is kept on the card as `config.ini.bak`. `http://<display-ip>:8080/files` browses the microSD card: open folders, preview or download a file, upload new ones, create folders, and delete what you no longer need. The most common use is artwork — delete a game's image to have it fetched again, or upload your own instead. Available on all six boards. The display's own address is on the boot screen and on the Network page, listed as *Monitor IP*.
+            - **`system_image_timeout`** gives the system image slide its own dwell time, independent of `core_image_timeout`. Leave it at `0` to keep them the same.
+            - **Games launched with only a core name behind them** are identified by reading the scratch `.mgl` the launcher leaves, so they get their artwork like an OSD launch.
 
             ### Fixes
 
-            - **Neo Geo pack folder** is `NEOGEO`, as the Downloader writes it on the card; the mixed-case name resolved nothing.
-            - **Game names with a slash** — the Neo Geo core reports titles such as `Metal Slug 2: Super Vehicle-001/II` from its `romsets.xml` — no longer lose everything before the slash when the pack key is built.
-            - **ScreenScraper's own `ss` region** is tried after the geographic ones and before the unsuffixed generic. A box uploaded with no region set is often the only one a title has, and no regional preference could reach it before.
-            - **A stale `FILESELECT=selected` no longer overrides a fresh launch**: it only names the running game when `CURRENTPATH` was written alongside it.
-            - **Satellaview** is hashed as SNES for RetroAchievements.
+            - **Artwork no longer redraws when nothing has changed** — `core_image_timeout` was repainting the same image on every cycle.
+            - **Large artwork loads on the Guition**: big JPEG frames were allocated from internal SRAM instead of PSRAM, and failed once the network stack was up.
+            - **Neo Geo titles** resolve through `romsets.xml` when the launcher leaves the romset id instead of a file path.
 
             ### Notes
 
-            - The packs are optional. Without them nothing changes: artwork keeps coming from ScreenScraper as before. Core images and any game the pack does not cover still come from ScreenScraper, so the account is still needed.
-            - MiSTer Monitor itself is now listed in *Update All 2.10* under *Settings → Tools & Scripts*.
+            - The web interface is plain HTTP on your LAN, with no password by default. The editor shows `config.ini` exactly as written, so anyone who can reach the page can read your WiFi and ScreenScraper passwords. Set `web_password` in the `[ui]` section to require one, or `web_config=false` to switch the interface off; both keys are documented in `config.ini` and in [configuration.md](https://github.com/chipster6502/MiSTer_monitor/blob/main/docs/configuration.md).
+            - The first `[wifi]` edit still has to happen on a computer — the display has to be on the network before its web interface can be reached.
+            - An illustrated [setup guide PDF](https://github.com/chipster6502/MiSTer_monitor/blob/main/docs/MiSTer_Monitor_Setup_Guide.pdf) walks through the whole installation in six numbered steps.
             - Update both halves as usual: firmware from the web flasher, server through *Update All* / MiSTer Companion / Downloader. If the version panel turns red afterwards, one of the two did not update.
 
       - name: Build flasher site
