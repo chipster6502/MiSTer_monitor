@@ -10354,8 +10354,6 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
   currentUrl += "&maxwidth=" + String(TARGET_WIDTH);
   currentUrl += "&maxheight=" + String(ARTWORK_MAX_HEIGHT);
   currentUrl += "&outputformat=jpg";
-  // Hash hints identify a ROM; the system endpoint has no use for them.
-  if (baseUrl.indexOf("mediaJeu.php") >= 0) currentUrl += "&crc=&md5=&sha1=";
   
   Serial.printf("Trying: %s\n", mediaName);
   // Live HUD: show WHICH media type is being tried and inch the bar forward.
@@ -10550,7 +10548,14 @@ bool tryMediaTypesForToken(String baseUrl, String savePath, String token) {
     return tryMediaTypeWithRegions(baseUrl, savePath, "marquee", "Marquee", false);
   }
   else if (token == "fanart")        return tryDownloadMediaTypeWorking(baseUrl, savePath, "fanart",        "Fanart");
-  else if (token == "screenshot")    return tryDownloadMediaTypeWorking(baseUrl, savePath, "sstitle",       "Screenshot");
+  else if (token == "screenshot") {
+    // 'ss' is the in-game screenshot and 'sstitle' the title screen: two
+    // separate media, and plenty of games carry one without the other. Ask
+    // for the screenshot first and settle for the title screen.
+    if (tryMediaTypeWithRegions(baseUrl, savePath, "ss", "Screenshot")) return true;
+    return tryMediaTypeWithRegions(baseUrl, savePath, "sstitle", "Title Screen");
+  }
+  else if (token == "titlescreen")   return tryMediaTypeWithRegions(baseUrl, savePath, "sstitle", "Title Screen");
   // System-level media. photo and illustration carry regions there, so they
   // go through the region chain like the wheels; at game level the generic
   // variant closes the chain and still resolves.
