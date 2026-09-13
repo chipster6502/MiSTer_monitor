@@ -59,6 +59,7 @@ struct AppConfig {
   // --- Image behaviour -------------------------------------------------------
   int    coreImageTimeout      = 30000;
   int    systemImageTimeout    = 0;      // 0 = same as coreImageTimeout
+  String imageMode             = "rotate"; // rotate | game | system
   bool   alphabeticalFolders   = true;
   bool   autoDownload          = true;
   int    maxImageSize          = 500000;
@@ -129,6 +130,18 @@ struct AppConfig {
   int    scrollSpeedMs      = 300;
   int    scrollPauseStartMs = 2000;
   int    scrollPauseEndMs   = 3000;
+
+  // --- Kiosk mode ------------------------------------------------------------
+  // true = the fullscreen image footer goes dark after kioskHideDelayMs and a
+  // tap brings it back. Off by default: existing setups keep the footer up.
+  bool   kioskMode        = false;
+  int    kioskHideDelayMs = 5000;
+
+  // --- Sound -------------------------------------------------------------------
+  // Boards with a speaker only. false silences every tone, boot jingle
+  // included. Volume is the driver's 0-255 range.
+  bool   soundEnabled = true;
+  int    soundVolume  = 128;
 
   // --- Web config editor ------------------------------------------------------
   bool   webConfig   = true;   // [ui] web_config   - false disables /config + /reboot
@@ -207,6 +220,7 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "default_image")          { cfg.defaultCoreImage = val; }
     else if (key == "core_image_timeout")     { cfg.coreImageTimeout = val.toInt(); }
     else if (key == "system_image_timeout")   { cfg.systemImageTimeout = val.toInt(); }
+    else if (key == "image_mode")             { cfg.imageMode = val; }
     else if (key == "alphabetical_folders")   { cfg.alphabeticalFolders = parseBool(val); }
     else if (key == "auto_download")          { cfg.autoDownload = parseBool(val); }
     else if (key == "max_image_size")         { cfg.maxImageSize = val.toInt(); }
@@ -222,6 +236,10 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "scroll_pause_start_ms")  { cfg.scrollPauseStartMs = val.toInt(); }
     else if (key == "scroll_pause_end_ms")    { cfg.scrollPauseEndMs = val.toInt(); }
     else if (key == "flip_display")           { cfg.flipDisplay = parseBool(val); }
+    else if (key == "kiosk_mode")             { cfg.kioskMode = parseBool(val); }
+    else if (key == "kiosk_hide_delay_ms")    { cfg.kioskHideDelayMs = val.toInt(); }
+    else if (key == "sound")                  { cfg.soundEnabled = parseBool(val); }
+    else if (key == "sound_volume")           { cfg.soundVolume = val.toInt(); }
     // [ui] web config editor
     else if (key == "web_config")             { cfg.webConfig = parseBool(val); }
     else if (key == "web_password")           { cfg.webPassword = val; }

@@ -190,6 +190,16 @@ int  SCROLL_PAUSE_START_MS        = 2000;
 int  SCROLL_PAUSE_END_MS          = 3000;
 bool FORCE_CORE_REDOWNLOAD        = false;
 bool FORCE_GAME_REDOWNLOAD        = false;
+bool KIOSK_MODE                   = false;  // [ui] kiosk_mode
+int  KIOSK_HIDE_DELAY_MS          = 5000;   // [ui] kiosk_hide_delay_ms
+// Height requested from ScreenScraper. Kiosk mode lays artwork out against
+// the whole panel, so it needs the taller source; resolved in setup().
+int  ARTWORK_MAX_HEIGHT           = IMAGE_AREA_HEIGHT;
+bool SOUND_ENABLED                = true;   // [ui] sound
+int  SOUND_VOLUME                 = 128;    // [ui] sound_volume (0-255)
+// [images] image_mode - what the fullscreen image mode shows for a game.
+enum ImageMode : uint8_t { IMAGE_MODE_ROTATE, IMAGE_MODE_GAME, IMAGE_MODE_SYSTEM };
+ImageMode IMAGE_MODE              = IMAGE_MODE_ROTATE;
 // ===================================
 
 // Data variables
@@ -840,6 +850,20 @@ static bool showingGameImage = true;  // true = game image, false = system image
 static unsigned long currentSlideTimeout() {
   return (unsigned long) (showingGameImage ? CORE_IMAGE_TIMEOUT : SYSTEM_IMAGE_TIMEOUT);
 }
+
+// Draw the game slide for the current game. Honours [images] image_mode:
+// with 'system' the system image stands in, so every path that would open
+// image mode on the game image opens on the system image instead, and the
+// static modes never toggle away from it.
+static void showGameSlide() {
+  if (IMAGE_MODE == IMAGE_MODE_SYSTEM) {
+    showingGameImage = false;
+    showCoreImageScreenWithAutoDownload(currentCore);
+  } else {
+    showingGameImage = true;
+    showGameImageScreen(currentCore, currentGame);
+  }
+}
 String lastArcadeSystemeId = "";  // Store last arcade subsystem ID
 
 void checkMisterDebugState();
@@ -1218,7 +1242,51 @@ void showDownloadProgressColored(int progress, String text, uint16_t barColor) {
 // Visible window (in characters) for the game name in the image footer.
 #define GAME_FOOTER_VISIBLE_CHARS_FULL    58
 
+// Kiosk mode state: whether the image footer is currently painted and when
+// it was last painted. In kiosk mode the artwork owns the whole panel and the
+// footer is an overlay on top of it, shown on demand.
+static bool          g_imageFooterVisible = true;
+static unsigned long g_imageFooterShownAt = 0;
+
+// True while the footer must not be painted. Every painter checks this, so a
+// slide redraw leaves the artwork covering the panel edge to edge.
+static bool imageFooterSuppressed() {
+  return KIOSK_MODE && !g_imageFooterVisible;
+}
+
+static void noteImageFooterShown() {
+  g_imageFooterVisible = true;
+  g_imageFooterShownAt = millis();
+}
+
+// Hide the footer. The band belongs to the artwork, so the only way to get
+// those pixels back is to redraw the slide on screen — the same restore the
+// achievement popup performs.
+static void hideImageFooter() {
+  g_imageFooterVisible = false;
+  if (showingGameImage && currentGame.length() > 0) showGameSlide();
+  else                                              showCoreImageScreenWithAutoDownload(currentCore);
+}
+
+// Show the footer. The painters fill the band opaquely, so this covers the
+// artwork without a redraw and answers a tap immediately.
+static void restoreImageFooter() {
+  g_imageFooterVisible = true;
+  if (currentGame.length() > 0) addGameImageFooter(currentGame);
+  else                          drawCoreImageFooter();
+}
+
+// Repaint the band after a status banner covered it: the footer when it is
+// up, otherwise the artwork the banner was drawn over.
+static void repaintImageFooterBand() {
+  if (imageFooterSuppressed())       hideImageFooter();
+  else if (currentGame.length() > 0) addGameImageFooter(currentGame);
+  else                               drawCoreImageFooter();
+}
+
 void addGameImageFooter(String gameName) {
+  if (imageFooterSuppressed()) return;
+
   // Footer in PHYSICAL coordinates (full screen width, below image area at Y=620)
   
   // Draw separator line at top of footer
@@ -1276,6 +1344,8 @@ void addGameImageFooter(String gameName) {
   // GAME INFO button in the right third of the footer — only when the game
   // can actually produce a panel.
   if (showInfoButton) drawGameInfoIcon();
+
+  noteImageFooterShown();
 }
 
 // Footer for fullscreen core image screens.
@@ -1395,6 +1465,8 @@ void drawGameInfoIcon(bool pressed) {
 }
 
 void drawCoreImageFooter() {
+  if (imageFooterSuppressed()) return;
+
   M5.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
   M5.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
   
@@ -1455,7 +1527,8 @@ void drawCoreImageFooter() {
     M5.Display.setCursor(250, 660);
     M5.Display.print("Touch the screen to show MiSTer monitor");
   }
-  
+
+  noteImageFooterShown();
 }
 
 void drawFooter() {
@@ -2632,8 +2705,7 @@ bool handleFullscreenStripTouch(int physicalX) {
 
     scanInProgress  = false;
     lastButtonPress = millis();
-    showingGameImage   = true;
-    showGameImageScreen(currentCore, currentGame);
+    showGameSlide();
     showingCoreImage   = true;
     coreImageStartTime = millis();
     return true;   // switched to image screen; its exit paths repaint
@@ -2843,8 +2915,7 @@ void handleTouch() {
           btnScan.label   = originalLabel;
           scanInProgress  = false;
           lastButtonPress = millis();
-          showingGameImage   = true;
-          showGameImageScreen(currentCore, currentGame);
+          showGameSlide();
           showingCoreImage   = true;
           coreImageStartTime = millis();
           return;   // switched to image screen; skip the HUD-redraw tail
@@ -2910,6 +2981,33 @@ void applyDisplayFlip(bool flip) {
   const uint8_t r = M5.Display.getRotation();
   M5.Display.setRotation((r & 4) | ((r + 2) & 3));
   M5.Display.fillScreen(TFT_BLACK);   // stale pixels are in the old orientation
+}
+
+// Apply the [ui] sound keys once /config.ini has been read. A disabled
+// speaker is muted at the driver as well as gated in playTone(), so no
+// tone slips through either way.
+void applySoundConfig(bool enabled, int volume) {
+  SOUND_ENABLED = enabled;
+  SOUND_VOLUME  = constrain(volume, 0, 255);
+  M5.Speaker.setVolume(SOUND_ENABLED ? SOUND_VOLUME : 0);
+}
+
+// Single gate for every tone the firmware plays.
+void playTone(uint16_t freqHz, uint32_t durationMs) {
+  if (!SOUND_ENABLED) return;
+  M5.Speaker.tone(freqHz, durationMs);
+}
+
+// Boot jingle. Skipped entirely when sound is off, delays included.
+void playBootJingle() {
+  if (!SOUND_ENABLED) return;
+  playTone(494, 100);  delay(110);   // B
+  playTone(988, 100);  delay(110);   // B (high octave)
+  playTone(740, 100);  delay(110);   // F#
+  playTone(622, 100);  delay(110);   // D#
+  playTone(494, 100);  delay(110);   // B
+  playTone(740, 100);  delay(110);   // F#
+  playTone(622, 150);  delay(200);   // D# (longer)
 }
 
 void setup() {
@@ -2986,28 +3084,9 @@ void setup() {
 
   Serial.println("\n\n=== BOOT START ===");
   
-  Serial.println("=== TESTING SPEAKER ===");
-
+  // Speaker driver only. Volume and the boot jingle wait for config.ini,
+  // which lives on the SD card and is not mounted yet.
   M5.Speaker.begin();
-  M5.Speaker.setVolume(128);
-
-  Serial.println("Playing Pac-Man boot sound...");
-  M5.Speaker.tone(494, 100);  // B
-  delay(110);
-  M5.Speaker.tone(988, 100);  // B (high octave)
-  delay(110);
-  M5.Speaker.tone(740, 100);  // F#
-  delay(110);
-  M5.Speaker.tone(622, 100);  // D#
-  delay(110);
-  M5.Speaker.tone(494, 100);  // B
-  delay(110);
-  M5.Speaker.tone(740, 100);  // F#
-  delay(110);
-  M5.Speaker.tone(622, 150);  // D# (longer)
-  delay(200);
-
-  Serial.println("Speaker test complete");
   
 
   // Initialize speaker for M5Tab (M5Unified)
@@ -3068,6 +3147,11 @@ void setup() {
   // [ui] flip_display - 180 degree panel rotation for upside-down mounts.
   applyDisplayFlip(appConfig.flipDisplay);
 
+  // [ui] sound / sound_volume - applied before the first tone so a silenced
+  // display never beeps, not even at boot.
+  applySoundConfig(appConfig.soundEnabled, appConfig.soundVolume);
+  playBootJingle();
+
   ssid     = appConfig.ssid.c_str();
   password = appConfig.wifiPass.c_str();
   // MiSTer IP from config.ini. UDP discovery overwrites this at boot on
@@ -3119,6 +3203,22 @@ void setup() {
   SCROLL_SPEED_MS             = appConfig.scrollSpeedMs;
   SCROLL_PAUSE_START_MS       = appConfig.scrollPauseStartMs;
   SCROLL_PAUSE_END_MS         = appConfig.scrollPauseEndMs;
+  KIOSK_MODE                  = appConfig.kioskMode;
+  KIOSK_HIDE_DELAY_MS         = constrain(appConfig.kioskHideDelayMs, 500, 600000);
+  ARTWORK_MAX_HEIGHT          = KIOSK_MODE ? TARGET_HEIGHT : IMAGE_AREA_HEIGHT;
+  // Kiosk mode starts with the artwork uncovered; a tap brings the footer up.
+  g_imageFooterVisible        = !KIOSK_MODE;
+  {
+    String mode = appConfig.imageMode;
+    mode.toLowerCase();
+    if      (mode == "game")   IMAGE_MODE = IMAGE_MODE_GAME;
+    else if (mode == "system") IMAGE_MODE = IMAGE_MODE_SYSTEM;
+    else {
+      IMAGE_MODE = IMAGE_MODE_ROTATE;
+      if (mode != "rotate")
+        Serial.printf("[CONFIG] Unknown image_mode '%s' - using rotate\n", mode.c_str());
+    }
+  }
 
   Serial.printf("[CONFIG] MiSTer IP   : %s\n", misterIP);
   Serial.printf("[CONFIG] WiFi SSID   : %s\n", ssid);
@@ -3128,6 +3228,10 @@ void setup() {
   Serial.printf("[CONFIG] Arcade order     : %s\n", ARCADE_MEDIA_ORDER_STR.c_str());
   Serial.printf("[CONFIG] Arcade subsys ord: %s\n", ARCADE_SUBSYSTEM_MEDIA_ORDER_STR.c_str());
   Serial.printf("[CONFIG] Core order       : %s\n", CORE_MEDIA_ORDER_STR.c_str());
+  Serial.printf("[CONFIG] Image mode       : %s\n", appConfig.imageMode.c_str());
+  Serial.printf("[CONFIG] Kiosk mode       : %s (%d ms)\n", KIOSK_MODE ? "on" : "off", KIOSK_HIDE_DELAY_MS);
+  Serial.printf("[CONFIG] Artwork height   : %d px\n", ARTWORK_MAX_HEIGHT);
+  Serial.printf("[CONFIG] Sound            : %s (volume %d)\n", SOUND_ENABLED ? "on" : "off", SOUND_VOLUME);
   // ──────────────────────────────────────────────────────────────────────────
 
   bootFrameLoaded = false;  // Reset boot frame flag
@@ -3149,7 +3253,7 @@ void setup() {
   if (sdCardAvailable) {
     // Prioritize game image over core image
     if (currentGame.length() > 0 && currentCore != "MENU") {
-      showGameImageScreen(currentCore, currentGame);
+      showGameSlide();
     } else {
       showCoreImageScreenWithAutoDownload(currentCore);
     }
@@ -3275,6 +3379,15 @@ void loop() {
     int tx = touch.x;
     int ty = touch.y;
 
+    // Kiosk mode: a tap on a dark footer brings it back and stops there.
+    // Leaving image mode or opening GAME INFO takes a second tap, on a
+    // footer the user can see.
+    if (KIOSK_MODE && !g_imageFooterVisible) {
+      Serial.println("Touch detected - restoring footer (kiosk mode)");
+      restoreImageFooter();
+      return;
+    }
+
     // === GAME INFO button: right third of the image footer (physical) ===
     // Footer band starts at y=620; the right third begins at x=853. Tested
     // with the SAME predicate that decides whether the button is drawn: when
@@ -3356,7 +3469,7 @@ void loop() {
     }
   startCrcRecurrentForGame(currentGame, currentCore);
   
-  showGameImageScreen(currentCore, currentGame);
+  showGameSlide();
 } else {
   Serial.println("Game unloaded, showing core image");
   lastArcadeSystemeId = "";
@@ -3376,8 +3489,7 @@ void loop() {
         // If there's an active game, show game image, otherwise show core image
         if (currentGame.length() > 0) {
           Serial.printf("Core changed with active game, showing game image for new core\n");
-          showingGameImage = true;
-          showGameImageScreen(currentCore, currentGame);
+          showGameSlide();
         } else {
           Serial.printf("Core changed without game, showing core image\n");
           showCoreImageScreenWithAutoDownload(currentCore);
@@ -3399,8 +3511,9 @@ void loop() {
     lastRotationLog = millis();
   }
 
-  // Rotation logic for games (only when game is active and core is not MENU)
-    if (currentGame.length() > 0 && currentCore != "MENU") {
+  // Rotation logic for games (only when game is active and core is not MENU).
+  // Static image modes never toggle: the opening slide is the only slide.
+    if (IMAGE_MODE == IMAGE_MODE_ROTATE && currentGame.length() > 0 && currentCore != "MENU") {
       // The slide clock is coreImageStartTime, restamped by every draw site;
       // each half of the cycle has its own dwell (core_image_timeout for the
       // game image, system_image_timeout for the system image).
@@ -3430,7 +3543,7 @@ void loop() {
         showingGameImage = !showingGameImage;
         
         if (showingGameImage) {
-          showGameImageScreen(currentCore, currentGame);
+          showGameSlide();
         } else {
           showCoreImageScreenWithAutoDownload(currentCore);
         }
@@ -3439,10 +3552,18 @@ void loop() {
     }
 
     if (showingCoreImage) {
+      // Kiosk mode: the footer stays up for a while after every repaint,
+      // then goes dark until the next tap. Timed from the last paint, not
+      // from the slide clock, so slide changes and banners each get a dwell.
+      if (KIOSK_MODE && g_imageFooterVisible &&
+          millis() - g_imageFooterShownAt > (unsigned long) KIOSK_HIDE_DELAY_MS) {
+        hideImageFooter();
+      }
+
       // Animate the GAME: scroll on any fullscreen image screen that has a
       // game name in the footer (game image, core image with GAME line,
-      // menu image with overlay).
-      if (currentGame.length() > 0) {
+      // menu image with overlay). Frozen while the footer is dark.
+      if (currentGame.length() > 0 && g_imageFooterVisible) {
         static unsigned long lastFooterUpdate = 0;
         if (millis() - lastFooterUpdate > 100) {
           if (imageFooterScroll.needsScroll && imageFooterScroll.fullText.length() > 0) {
@@ -3566,8 +3687,7 @@ void loop() {
     
     if (shouldShowGame) {
       Serial.printf("Showing game image: '%s' on '%s'\n", currentGame.c_str(), currentCore.c_str());
-      showingGameImage = true;   // every entry into image mode restarts the cycle on the game image
-      showGameImageScreen(currentCore, currentGame);
+      showGameSlide();   // every entry into image mode restarts the cycle
     } else {
       Serial.printf("Showing core image for: '%s'\n", currentCore.c_str());
       showCoreImageScreenWithAutoDownload(currentCore);
@@ -3658,7 +3778,7 @@ if (oldGame != currentGame && sdCardAvailable) {
     startCrcRecurrentForGame(currentGame, currentCore);
     
     Serial.printf("Calling showGameImageScreen()...\n");
-    showGameImageScreen(currentCore, currentGame);
+    showGameSlide();
     Serial.printf("showGameImageScreen() returned\n");
   } else if (oldGame.length() > 0) {
     Serial.println("Game unloaded, returning to core image");
@@ -4286,13 +4406,13 @@ int jpegDrawCallback(JPEGDRAW *pDraw) {
   int finalX = pDraw->x + g_jpegOffsetX;
   int finalY = pDraw->y + g_jpegOffsetY;
   
-  // Verify data is within screen bounds and doesn't overlap footer
+  // Verify data is within screen bounds and inside the destination box
   if (finalX >= 0 && finalY >= 0 && 
       finalX + pDraw->iWidth <= TARGET_WIDTH && 
-      finalY + pDraw->iHeight <= IMAGE_AREA_HEIGHT) {
+      finalY + pDraw->iHeight <= g_artBoxH) {
     // Use M5.Display directly (not Lcd) for image rendering
     M5.Display.pushImage(finalX, finalY, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels);
-  } else if (finalY + pDraw->iHeight > IMAGE_AREA_HEIGHT &&
+  } else if (finalY + pDraw->iHeight > g_artBoxH &&
              finalX >= 0 && finalX + pDraw->iWidth <= TARGET_WIDTH) {
     // Expected: block clips into the footer band. Silenced — not an error.
     // Taller-than-area images legitimately lose their bottom rows here,
@@ -4415,14 +4535,17 @@ void showMenuImageWithCoreOverlay(String coreName) {
     
     // Footer for the pure MENU state (no game, no core overlay).
     // Single line: just the hint, centered, with comfortable margins.
-    M5.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
-    M5.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
-    
-    M5.Display.setTextWrap(false);
-    M5.Display.setTextColor(THEME_GREEN);
-    M5.Display.setTextSize(3);
-    M5.Display.setCursor(250, 660);
-    M5.Display.print("Touch the screen to show MiSTer monitor");
+    if (!imageFooterSuppressed()) {
+      M5.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
+      M5.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
+
+      M5.Display.setTextWrap(false);
+      M5.Display.setTextColor(THEME_GREEN);
+      M5.Display.setTextSize(3);
+      M5.Display.setCursor(250, 660);
+      M5.Display.print("Touch the screen to show MiSTer monitor");
+      noteImageFooterShown();
+    }
     
     Serial.println("Menu interface displayed without active core overlay");
     return; // IMPORTANT: Exit here to avoid executing core overlay logic
@@ -4503,6 +4626,8 @@ void showMenuImageWithCoreOverlay(String coreName) {
   }
 
   // ========== FOOTER FOR NON-MENU CORES (with optional GAME line) ==========
+  if (imageFooterSuppressed()) return;
+
   // Layout (footer band y=621..720, height 99):
   //   Line 1 (y=628): "ACTIVE CORE: <core>"  size 2 label + size 3 value
   //   Line 2 (y=668): "GAME: <name>"          size 2 label + size 3 value (only if game)
@@ -4574,6 +4699,7 @@ void showMenuImageWithCoreOverlay(String coreName) {
     M5.Display.print("Touch to show monitor");
 
   if (showInfoButton) drawGameInfoIcon();
+  noteImageFooterShown();
 }
 
 void showCoreNotFoundScreen(String coreName) {
@@ -4641,8 +4767,11 @@ void showCoreNotFoundScreen(String coreName) {
   M5.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
   M5.Display.setTextColor(THEME_GREEN);
   M5.Display.setTextSize(3);
-  M5.Display.setCursor(350, 660);
-  M5.Display.print("Press any button for interface");
+  if (!imageFooterSuppressed()) {
+    M5.Display.setCursor(350, 660);
+    M5.Display.print("Press any button for interface");
+    noteImageFooterShown();
+  }
   }
 
 /**
@@ -4835,17 +4964,17 @@ void drawMisterLogoRightPanel() {
 
 // PREV button sound - lower pitch (800 Hz)
 void playPrevButtonSound() {
-  M5.Speaker.tone(800, 80);
+  playTone(800, 80);
   Serial.println("PREV sound");
 }
 
 void playScanButtonSound() {
-  M5.Speaker.tone(1200, 80);
+  playTone(1200, 80);
   Serial.println("SCAN sound");
 }
 
 void playNextButtonSound() {
-  M5.Speaker.tone(1600, 80);
+  playTone(1600, 80);
   Serial.println("NEXT sound");
 }
 
@@ -5385,9 +5514,8 @@ void showReconnectBanner() {
 
   delay(1200);                                    // hold long enough to read
 
-  // Restore the normal footer over the banner (we're over a full-screen image).
-  if (currentGame.length() > 0) addGameImageFooter(currentGame);
-  else                          drawCoreImageFooter();
+  // Restore the band over the banner (we're over a full-screen image).
+  repaintImageFooterBand();
 }
 
 void showRAReadyBanner() {
@@ -5416,8 +5544,7 @@ void showRAReadyBanner() {
   // drawFooter(), so force a full background reload — the caller's
   // needsRedraw repaints the page over it on the next loop.
   if (showingCoreImage) {
-    if (currentGame.length() > 0) addGameImageFooter(currentGame);
-    else                          drawCoreImageFooter();
+    repaintImageFooterBand();
   } else {
     backgroundLoaded = false;
   }
@@ -5447,8 +5574,7 @@ void showVersionMismatchBanner() {
   delay(4000);                               // longer than RA: it is actionable
 
   if (showingCoreImage) {
-    if (currentGame.length() > 0) addGameImageFooter(currentGame);
-    else                          drawCoreImageFooter();
+    repaintImageFooterBand();
   } else {
     backgroundLoaded = false;
   }
@@ -6649,7 +6775,7 @@ void serviceRAPopup() {
     raPopupDrawn = false;
     if (showingCoreImage) {
       if (showingGameImage && currentGame.length() > 0) {
-        showGameImageScreen(currentCore, currentGame);
+        showGameSlide();
       } else {
         showCoreImageScreenWithAutoDownload(currentCore);
       }
@@ -9562,7 +9688,7 @@ bool downloadImageFromScreenScraper(String imageUrl, String savePath) {
   
   // ScreenScraper can resize automatically
   resizedUrl += "maxwidth=" + String(TARGET_WIDTH);
-  resizedUrl += "&maxheight=" + String(IMAGE_AREA_HEIGHT);  // Use 645 instead of 720
+  resizedUrl += "&maxheight=" + String(ARTWORK_MAX_HEIGHT);
   resizedUrl += "&outputformat=jpg";
   
   Serial.printf("Downloading resized image: %s\n", redactScreenScraperUrl(resizedUrl).c_str());
@@ -9791,8 +9917,8 @@ bool displayCoreImageCentered(String imagePath) {
     // area and centred there.
     const int srcW = imgW, srcH = imgH;
     g_artBoxW = TARGET_WIDTH;
-    g_artBoxH = (srcW == TARGET_WIDTH && srcH == TARGET_HEIGHT)
-              ? TARGET_HEIGHT        // panel asset: drawn 1:1, bleeds by design
+    g_artBoxH = (KIOSK_MODE || (srcW == TARGET_WIDTH && srcH == TARGET_HEIGHT))
+              ? TARGET_HEIGHT        // kiosk mode and panel assets use the full panel
               : IMAGE_AREA_HEIGHT;   // everything else stays above the footer
     
     // Ideal destination: preserve aspect, fit the box, never upscale.
@@ -10194,7 +10320,7 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
   
   String currentUrl = baseUrl + "&media=" + String(mediaType);
   currentUrl += "&maxwidth=" + String(TARGET_WIDTH);
-  currentUrl += "&maxheight=" + String(IMAGE_AREA_HEIGHT);  // Use 645 instead of 720
+  currentUrl += "&maxheight=" + String(ARTWORK_MAX_HEIGHT);
   currentUrl += "&outputformat=jpg&crc=&md5=&sha1=";
   
   Serial.printf("Trying: %s\n", mediaName);
@@ -10735,7 +10861,7 @@ bool downloadCoreImageStreamingSafe(String baseUrl, String savePath) {
     // Build complete URL with media type and resize parameters
     String currentUrl = baseUrl + "&media=" + mediaTypes[i];
     currentUrl += "&maxwidth=" + String(TARGET_WIDTH);
-    currentUrl += "&maxheight=" + String(IMAGE_AREA_HEIGHT);  // Use 645 instead of 720
+    currentUrl += "&maxheight=" + String(ARTWORK_MAX_HEIGHT);
     currentUrl += "&outputformat=jpg";
     
     Serial.printf("   URL: %s\n", redactScreenScraperUrl(currentUrl).c_str());
@@ -10896,7 +11022,7 @@ String buildCorrectMediaJeuUrl(String gameId, String systemId, String mediaType,
   mediaUrl += "&jeuid=" + gameId;
   mediaUrl += "&media=" + mediaType;
   mediaUrl += "&maxwidth=" + String(TARGET_WIDTH);
-  mediaUrl += "&maxheight=" + String(IMAGE_AREA_HEIGHT);  // Use 645 instead of 720
+  mediaUrl += "&maxheight=" + String(ARTWORK_MAX_HEIGHT);
   mediaUrl += "&outputformat=jpg";
   
   // ========== DETAILED DEBUG ==========
