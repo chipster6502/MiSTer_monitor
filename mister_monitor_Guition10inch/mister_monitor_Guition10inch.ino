@@ -425,6 +425,7 @@ bool discoverMister(uint8_t attempts = 5, uint16_t replyWaitMs = 600) {
 
 #include "WebConfig.h"   // /config editor + /reboot on the device web server
 #include "WebFiles.h"    // /files SD card browser (list, download, upload, delete)
+#include "CoprocessorUpdate.h"  // keeps the C6 radio firmware in step with the host
 
 // ========== SCREENSHOT SERVER ==========
 WebServer screenshotServer(8080);
@@ -636,6 +637,8 @@ void drawCyberpunkFrame();
 void drawProgressSquares(int completedCount);
 void showBootSequence();
 void drawWiFiProgressCircles(int currentAttempt, bool connected, int maxAttempts);
+void drawC6UpdateProgress(int pct);
+void drawC6UpdateMessage(const String &msg);
 void connectWithAnimation();
 void testMiSTerConnectivity(bool discovered);
 void showReconnectBanner();
@@ -2907,6 +2910,52 @@ void applyDisplayFlip(bool flip) {
   Board.Display.fillScreen(TFT_BLACK);   // stale pixels are in the old orientation
 }
 
+// ---------------------------------------------------------------------------
+// Panel revision peek
+//
+// Guition ships this board with two LCD panels behind the same JD9365
+// controller, and they need different init tables and timings. They answer
+// with the same panel ID, so the revision cannot be probed -- it comes from
+// [ui] panel_rev in config.ini.
+//
+// The catch is timing: Board.begin() brings the panel up at the very top of
+// setup(), long before the card is mounted and loadConfig() runs. So this
+// reads the one key it needs on its own -- mount, read, unmount -- and leaves
+// the regular boot sequence completely untouched. Serial is not up yet either,
+// which is why the result is logged later rather than here.
+//
+// Any failure (no card, no file, no key) falls through to revision 1, which is
+// what this board did before the setting existed.
+// ---------------------------------------------------------------------------
+static bool peekPanelRevisionIsV2() {
+  if (!SD_MMC.begin("/sdcard", false)) return false;
+
+  bool isV2 = false;
+  File f = SD_MMC.open("/config.ini", FILE_READ);
+  if (f) {
+    while (f.available()) {
+      String line = f.readStringUntil('\n');
+      line.trim();
+      if (line.length() == 0 || line[0] == ';' || line[0] == '#') continue;
+      int eq = line.indexOf('=');
+      if (eq < 0) continue;
+      String key = line.substring(0, eq);
+      key.trim();
+      key.toLowerCase();
+      if (key != "panel_rev") continue;
+      String val = line.substring(eq + 1);
+      val.trim();
+      val.toLowerCase();
+      isV2 = (val == "v2" || val == "2");
+      break;
+    }
+    f.close();
+  }
+
+  SD_MMC.end();     // the normal boot path mounts the card again in a moment
+  return isV2;
+}
+
 void setup() {
   // =====================================================================
   // ANTI-CRASH BLOCK — must run BEFORE Board.begin() and Serial
@@ -2928,6 +2977,10 @@ void setup() {
   cfg.output_power = true;
   cfg.internal_imu = false;
   cfg.external_imu = false;
+
+  // Must happen before Board.begin(): the panel is initialised in there, and
+  // the revision decides its init table and timings.
+  jd9365UseV2Panel() = peekPanelRevisionIsV2();
 
   Board.begin(cfg);
 
@@ -2988,6 +3041,10 @@ void setup() {
   Serial.printf("[DISPLAY] Resolution: %dx%d (expected 1280x720 canvas)\n",
                 Board.Display.width(), Board.Display.height());
   Serial.printf("[TOUCH] %s\n", Board.touchReady() ? "ready" : "NOT AVAILABLE");
+  Serial.printf("[DISPLAY] Panel revision: %s\n",
+                jd9365UseV2Panel() ? "v2 (batch 2624 and later)"
+                                   : "v1 (default; set panel_rev=v2 if the "
+                                     "screen shows horizontal banding)");
 
   Serial.println("=== MiSTer Monitor with Core and Games Images Starting ===");
   Serial.printf("Display: %dx%d\n", Board.Display.width(), Board.Display.height());
@@ -5038,6 +5095,44 @@ void showBootSequence() {
  * @param connected - true when connection successful
  * @param maxAttempts - Maximum attempts to show (default 30)
  */
+// ---------------------------------------------------------------------------
+// Coprocessor update feedback
+//
+// Kept here rather than in CoprocessorUpdate.h so that file stays free of any
+// display dependency. Both are deliberately plain: they run before the normal
+// UI exists, and on a board that also has the newer panel revision configured
+// wrongly the screen may be unreadable anyway -- which is why everything they
+// show also goes to the serial console.
+// ---------------------------------------------------------------------------
+void drawC6UpdateProgress(int pct) {
+  static bool framed = false;
+  const int barW = 600, barH = 28;
+  const int x = (TARGET_WIDTH - barW) / 2;
+  const int y = TARGET_HEIGHT / 2;
+
+  if (!framed) {
+    Board.Display.fillScreen(TFT_BLACK);
+    Board.Display.setTextColor(THEME_CYAN);
+    Board.Display.setTextSize(3);
+    Board.Display.setCursor(x, y - 60);
+    Board.Display.print("Updating WiFi coprocessor");
+    Board.Display.setTextSize(2);
+    Board.Display.setCursor(x, y - 24);
+    Board.Display.print("Do not power off");
+    Board.Display.drawRect(x, y, barW, barH, THEME_CYAN);
+    framed = true;
+  }
+  int fill = (barW - 4) * pct / 100;
+  Board.Display.fillRect(x + 2, y + 2, fill, barH - 4, THEME_CYAN);
+}
+
+void drawC6UpdateMessage(const String &msg) {
+  Board.Display.setTextColor(THEME_YELLOW);
+  Board.Display.setTextSize(2);
+  Board.Display.setCursor(60, TARGET_HEIGHT / 2 + 70);
+  Board.Display.print(msg);
+}
+
 void drawWiFiProgressCircles(int currentAttempt, bool connected, int maxAttempts = 30) {
   int startX = 670;      // Start position X (right panel)
   int startY = 320;      // Start position Y (same as progress squares)
@@ -5135,6 +5230,21 @@ void connectWithAnimation() {
   // itself, which this board needs.
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
+
+  // Station mode is what brings the SDIO link up, so this is the first point
+  // where the coprocessor can be asked its version -- and it has to happen
+  // before begin(), because an out-of-date C6 will never associate no matter
+  // how long we wait for it. Boards that are already current fall straight
+  // through; see CoprocessorUpdate.h for why there is no prompt.
+  {
+    C6UpdateStatus c6 = c6UpdateIfNeeded(SD, drawC6UpdateProgress);
+    if (c6.message.length() > 0) drawC6UpdateMessage(c6.message);
+    if (c6.ok) {
+      delay(1500);          // let the message be read before it disappears
+      ESP.restart();        // the new radio firmware needs a clean start
+    }
+  }
+
   WiFi.setAutoReconnect(true);
   WiFi.begin(ssid, password);
   
