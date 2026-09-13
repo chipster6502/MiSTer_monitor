@@ -116,11 +116,12 @@ struct AppConfig {
 
   // Arcade subsystems (hardware platform level, e.g. CPS1, Neo Geo, Konami):
   // wheel art only — subsystem images are logos, not game-specific artwork
-  String arcadeSubsystemMediaOrder = "wheel-steel,wheel-carbon,wheel";
+  String arcadeSubsystemMediaOrder = "wheel-steel,wheel-carbon,wheel,screenmarquee";
 
-  // Non-arcade system cores: steel wheel first for a clean HUD look,
-  // then photo/illustration, then box art as last resort
-  String coreMediaOrder   = "wheel-steel,wheel-carbon,wheel,photo,illustration,box3d,box2d,marquee,fanart,screenshot";
+  // Non-arcade system cores: steel wheel first for a clean HUD look, then the
+  // screen marquee, which fills the frame. Only system-level tokens belong
+  // here -- box and game artwork do not exist at this level.
+  String coreMediaOrder   = "wheel-steel,wheel-carbon,wheel,screenmarquee,illustration,photo";
 
   // --- UI / scroll -----------------------------------------------------------
   // true = rotate the panel 180 degrees, for cases or mounts that hold the

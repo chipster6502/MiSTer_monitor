@@ -127,8 +127,8 @@ static inline String ssRomnomFor(const RomDetails& d) {
 // Defaults match AppConfig struct defaults (overridden by config.ini).
 String GAME_MEDIA_ORDER_STR              = "box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot";
 String ARCADE_MEDIA_ORDER_STR           = "fanart,marquee,wheel-carbon,wheel-steel,wheel,box3d,box2d,screenshot";
-String ARCADE_SUBSYSTEM_MEDIA_ORDER_STR = "wheel-steel,wheel-carbon,wheel";
-String CORE_MEDIA_ORDER_STR             = "wheel-steel,wheel-carbon,wheel,photo,illustration,box3d,box2d,marquee,fanart,screenshot";
+String ARCADE_SUBSYSTEM_MEDIA_ORDER_STR = "wheel-steel,wheel-carbon,wheel,screenmarquee";
+String CORE_MEDIA_ORDER_STR             = "wheel-steel,wheel-carbon,wheel,screenmarquee,illustration,photo";
 
 // Macros preserve all existing call sites without any further changes.
 #define SCREENSCRAPER_DEV_USER   (_ss_dev_user_str.c_str())
@@ -731,7 +731,6 @@ void ssNotifyOnce(const String& key, const char* message, const String& detail);
 void ssNotifyUnsupportedCore(const String& coreName);
 void showCoreImageScreenWithAutoDownload(String coreName);
 void showCoreDownloadingScreen(String coreName);
-bool downloadCoreImageStreamingSafe(String baseUrl, String savePath);
 String extractMediaUrl(String response, String mediaKey);
 void showMenuImageWithCoreOverlay(String coreName);
 void forceMemoryCleanup();
@@ -2251,9 +2250,11 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
   }
   
   String systemId = getScreenScraperSystemId(coreName);
+  bool usingArcadeSubsystem = false;   // selects which config.ini order applies
   
   // Arcade subsystem management
   if (systemId == "75" && lastArcadeSystemeId.length() > 0) {
+    usingArcadeSubsystem = true;
     String oldSystemId = systemId;
     systemId = lastArcadeSystemeId;
     Serial.printf("Using arcade subsystem ID %s instead of generic Arcade ID %s\n", 
@@ -2332,8 +2333,12 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
     }
   }
   
-  // USE SECURE STREAMING FUNCTION for cores
-  success = downloadCoreImageStreamingSafe(baseUrl, savePath);
+  // Same dispatcher the game paths use, so [images] core_media_order and
+  // arcade_subsystem_media_order finally decide what is tried and the
+  // preferred region applies to system artwork too.
+  String& coreOrder = usingArcadeSubsystem ? ARCADE_SUBSYSTEM_MEDIA_ORDER_STR
+                                           : CORE_MEDIA_ORDER_STR;
+  success = applyMediaOrderAndDownload(baseUrl, savePath, coreOrder);
   
   if (success) {
     Serial.printf("CORE IMAGE DOWNLOAD SUCCESS!\n");
@@ -10321,7 +10326,9 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
   String currentUrl = baseUrl + "&media=" + String(mediaType);
   currentUrl += "&maxwidth=" + String(TARGET_WIDTH);
   currentUrl += "&maxheight=" + String(ARTWORK_MAX_HEIGHT);
-  currentUrl += "&outputformat=jpg&crc=&md5=&sha1=";
+  currentUrl += "&outputformat=jpg";
+  // Hash hints identify a ROM; the system endpoint has no use for them.
+  if (baseUrl.indexOf("mediaJeu.php") >= 0) currentUrl += "&crc=&md5=&sha1=";
   
   Serial.printf("Trying: %s\n", mediaName);
   // Live HUD: show WHICH media type is being tried and inch the bar forward.
@@ -10491,8 +10498,8 @@ bool tryMediaTypeWithRegions(String baseUrl, String savePath,
 // Expands a config.ini token to actual ScreenScraper &media= strings.
 // Regional variants are tried in user-preferred order via tryMediaTypeWithRegions.
 //
-// Tokens without regional variants (fanart, screenshot, photo, illustration)
-// map directly to a single API string.
+// Tokens without regional variants (fanart, screenshot) map directly to a
+// single API string.
 //
 // marquee is special: the generic "marquee" key is the most common variant
 // in ScreenScraper, so it is tried first before the regional ones.
@@ -10517,8 +10524,13 @@ bool tryMediaTypesForToken(String baseUrl, String savePath, String token) {
   }
   else if (token == "fanart")        return tryDownloadMediaTypeWorking(baseUrl, savePath, "fanart",        "Fanart");
   else if (token == "screenshot")    return tryDownloadMediaTypeWorking(baseUrl, savePath, "sstitle",       "Screenshot");
-  else if (token == "photo")         return tryDownloadMediaTypeWorking(baseUrl, savePath, "photo",         "Photo");
-  else if (token == "illustration")  return tryDownloadMediaTypeWorking(baseUrl, savePath, "illustration",  "Illustration");
+  // System-level media. photo and illustration carry regions there, so they
+  // go through the region chain like the wheels; at game level the generic
+  // variant closes the chain and still resolves.
+  else if (token == "photo")         return tryMediaTypeWithRegions(baseUrl, savePath, "photo",         "Photo");
+  else if (token == "illustration")  return tryMediaTypeWithRegions(baseUrl, savePath, "illustration",  "Illustration");
+  else if (token == "screenmarquee") return tryMediaTypeWithRegions(baseUrl, savePath, "screenmarquee", "Screen Marquee");
+  else if (token == "background")    return tryMediaTypeWithRegions(baseUrl, savePath, "background",    "Background");
   else Serial.printf("[MEDIA] Unknown token: '%s' -- skipping\n", token.c_str());
 
   return false;
@@ -10801,187 +10813,6 @@ void forceMemoryCleanup() {
   if (ESP.getFreeHeap() < 50000) {
     Serial.println("CRITICAL: Memory critically low - consider restart");
   }
-}
-
-bool downloadCoreImageStreamingSafe(String baseUrl, String savePath) {
-  Serial.printf("=== STREAMING-SAFE CORE DOWNLOAD ===\n");
-  Serial.printf("Target: %s\n", savePath.c_str());
-  
-  // List of media types to test for cores (systems)
-  // wheel-steel is tried first as it gives the best visual result for system images
-  String mediaTypes[] = {
-    "wheel-steel(wor)",
-    "wheel-steel(us)",
-    "wheel-steel(eu)",
-    "wheel-steel(jp)",
-    "wheel-steel",
-    "wheel-carbon(wor)",
-    "wheel-carbon(us)",
-    "wheel-carbon(eu)",
-    "wheel-carbon(jp)",
-    "wheel(wor)",
-    "wheel(us)",
-    "wheel(eu)",
-    "wheel(jp)",
-    "illustration(wor)",
-    "illustration(us)",
-    "illustration(eu)",
-    "illustration(jp)",
-    "photo(wor)",
-    "background(wor)",
-    "screenmarquee(wor)",
-  };
-  String mediaNames[] = {
-    "Steel Wheel World",
-    "Steel Wheel USA",
-    "Steel Wheel Europe",
-    "Steel Wheel Japan",
-    "Steel Wheel",
-    "Carbon Wheel World",
-    "Carbon Wheel USA",
-    "Carbon Wheel Europe",
-    "Carbon Wheel Japan",
-    "Wheel World",
-    "Wheel USA",
-    "Wheel Europe",
-    "Wheel Japan",
-    "Illustration World",
-    "Illustration USA",
-    "Illustration Europe",
-    "Illustration Japan",
-    "Photo",
-    "Background",
-    "Screen Marquee",
-  };
-  int mediaCount = 20;
-  
-  for (int i = 0; i < mediaCount; i++) {
-    Serial.printf("Trying media type %d: %s\n", i + 1, mediaNames[i].c_str());
-    
-    // Build complete URL with media type and resize parameters
-    String currentUrl = baseUrl + "&media=" + mediaTypes[i];
-    currentUrl += "&maxwidth=" + String(TARGET_WIDTH);
-    currentUrl += "&maxheight=" + String(ARTWORK_MAX_HEIGHT);
-    currentUrl += "&outputformat=jpg";
-    
-    Serial.printf("   URL: %s\n", redactScreenScraperUrl(currentUrl).c_str());
-    
-    HTTPClient http;
-    http.begin(currentUrl);
-    http.setTimeout(25000);
-    http.addHeader("User-Agent", "M5Stack-MiSTer-Monitor");
-    http.addHeader("Accept", "image/jpeg,image/png,image/*");
-    
-    int httpCode = http.GET();
-    g_lastSSHttpCode = httpCode;
-    
-    Serial.printf("HTTP Response: %d\n", httpCode);
-    
-    if (httpCode == 200) {
-      String contentType = http.header("Content-Type");
-      int contentLength = http.getSize();
-      
-      Serial.printf("Content-Type: '%s'\n", contentType.c_str());
-      Serial.printf("Content-Length: %d\n", contentLength);
-      
-      // Read the COMPLETE response first (SAFE STREAMING)
-      String completeResponse = http.getString();
-      Serial.printf("Response size: %d bytes\n", completeResponse.length());
-      
-      if (completeResponse.length() > 0) {
-        // Show first bytes as hex for debugging
-        Serial.printf("First 10 bytes (hex): ");
-        for (int j = 0; j < min(10, (int)completeResponse.length()); j++) {
-          Serial.printf("%02X ", (uint8_t)completeResponse.charAt(j));
-        }
-        Serial.println();
-        
-        // Check for JPEG signature in the complete response
-        if (completeResponse.length() >= 3) {
-          uint8_t byte1 = (uint8_t)completeResponse.charAt(0);
-          uint8_t byte2 = (uint8_t)completeResponse.charAt(1);
-          uint8_t byte3 = (uint8_t)completeResponse.charAt(2);
-          
-          bool isJPEG = (byte1 == 0xFF && byte2 == 0xD8 && byte3 == 0xFF);
-          
-          if (isJPEG) {
-            Serial.printf("JPEG signature detected! Size: %d bytes\n", completeResponse.length());
-            
-            // Validate reasonable image size for core images
-            if (completeResponse.length() > 1000 && completeResponse.length() < 300000) {
-              // Create directory if needed
-              String dir = savePath.substring(0, savePath.lastIndexOf('/'));
-              if (!SD.exists(dir)) {
-                Serial.printf("Creating directory: %s\n", dir.c_str());
-                SD.mkdir(dir);
-              }
-              
-              // Save the image file
-              File file = SD.open(savePath, FILE_WRITE);
-              if (file) {
-                // Write complete response as binary data
-                file.write((uint8_t*)completeResponse.c_str(), completeResponse.length());
-                file.close();
-                
-                // Verify the saved file
-                if (SD.exists(savePath)) {
-                  File verifyFile = SD.open(savePath);
-                  if (verifyFile) {
-                    size_t savedSize = verifyFile.size();
-                    verifyFile.close();
-                    
-                    if (savedSize == completeResponse.length()) {
-                      Serial.printf("SUCCESS: Downloaded %s (%d bytes)\n", mediaNames[i].c_str(), savedSize);
-                      Serial.printf("Saved to: %s\n", savePath.c_str());
-                      http.end();
-                      return true;
-                    } else {
-                      Serial.printf("File size mismatch: %d vs %d\n", savedSize, completeResponse.length());
-                    }
-                  }
-                }
-              } else {
-                Serial.printf("Cannot create file: %s\n", savePath.c_str());
-              }
-            } else {
-              Serial.printf("Invalid image size: %d bytes\n", completeResponse.length());
-            }
-          } else {
-            Serial.printf("Not a JPEG image (bytes: %02X %02X %02X)\n", byte1, byte2, byte3);
-            
-            // Check if it's a ScreenScraper text response
-            if (completeResponse.indexOf("NOMEDIA") != -1) {
-            g_mediaSawNoMedia = true;
-              Serial.printf("No %s media available in database\n", mediaNames[i].c_str());
-            } else if (completeResponse.indexOf("erreur") != -1) {
-              Serial.printf("ScreenScraper error: %s\n", completeResponse.substring(0, 100).c_str());
-            } else if (completeResponse.length() < 100) {
-              Serial.printf("ScreenScraper response: %s\n", completeResponse.c_str());
-            } else {
-              Serial.printf("Unknown response (first 100 chars): %s\n", completeResponse.substring(0, 100).c_str());
-            }
-          }
-        } else {
-          Serial.printf("Response too short: %d bytes\n", completeResponse.length());
-        }
-      } else {
-        Serial.println("Empty response");
-      }
-    } else {
-      Serial.printf("HTTP %d for %s\n", httpCode, mediaNames[i].c_str());
-      
-      String errorResponse = http.getString();
-      if (errorResponse.length() > 0 && errorResponse.length() < 500) {
-        Serial.printf("   Error: %s\n", errorResponse.c_str());
-      }
-    }
-    
-    http.end();
-    pumpedDelay(1000); // Delay between attempts
-  }
-  
-  Serial.println("All media types failed - no suitable core image found");
-  return false;
 }
 
 String buildCorrectMediaJeuUrl(String gameId, String systemId, String mediaType, String specificSystemeId) {
