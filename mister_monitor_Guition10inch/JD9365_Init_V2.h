@@ -19,9 +19,14 @@
 //  The sequence below is taken from ESPHome's JC8012P4A1-V2 model
 //  (esphome/components/mipi_dsi/models/guition.py, GPL-3.0), contributed by
 //  rayz90 in esphome/esphome#17457, who extracted it from Guition's own
-//  reference driver for this panel. The two per-command delays are ours: the
-//  ESPHome list carries none because their component applies its own after
-//  sleep-out, whereas this driver takes the delay from the table.
+//  reference driver for this panel. Their list is register writes only and
+//  stops short of waking the panel, so the four DCS commands that end the
+//  revision 1 table are appended here -- see the note above them.
+//
+//  Note that 0x11 and 0x29 also appear mid-list with data bytes, inside the
+//  0xE0 register pages. Those are ordinary register writes that happen to
+//  share a number with sleep-out and display-on, and must not be treated as
+//  DCS commands or given delays.
 //
 //  Timings differ from revision 1 as well, and are applied in Panel_JD9365.hpp:
 //      DPI clock          60 MHz -> 70 MHz
@@ -127,7 +132,7 @@ static const jd9365_lcd_init_cmd_t jd9365_init_cmds_v2[] = {
     {0x0E, (uint8_t[]){0x47}, 1, 0},
     {0x0F, (uint8_t[]){0x45}, 1, 0},
     {0x10, (uint8_t[]){0x45}, 1, 0},
-    {0x11, (uint8_t[]){0x4B}, 1, 120},
+    {0x11, (uint8_t[]){0x4B}, 1, 0},
     {0x12, (uint8_t[]){0x4B}, 1, 0},
     {0x13, (uint8_t[]){0x49}, 1, 0},
     {0x14, (uint8_t[]){0x49}, 1, 0},
@@ -151,7 +156,7 @@ static const jd9365_lcd_init_cmd_t jd9365_init_cmds_v2[] = {
     {0x26, (uint8_t[]){0x44}, 1, 0},
     {0x27, (uint8_t[]){0x4A}, 1, 0},
     {0x28, (uint8_t[]){0x4A}, 1, 0},
-    {0x29, (uint8_t[]){0x48}, 1, 20},
+    {0x29, (uint8_t[]){0x48}, 1, 0},
     {0x2A, (uint8_t[]){0x48}, 1, 0},
     {0x2B, (uint8_t[]){0x5F}, 1, 0},
     {0x2C, (uint8_t[]){0x01}, 1, 0},
@@ -234,6 +239,18 @@ static const jd9365_lcd_init_cmd_t jd9365_init_cmds_v2[] = {
     {0xE0, (uint8_t[]){0x00}, 1, 0},
     {0xE6, (uint8_t[]){0x02}, 1, 0},
     {0xE7, (uint8_t[]){0x0C}, 1, 0},
+
+    // Wake-up sequence. ESPHome's list stops at the register writes above,
+    // because their component issues sleep-out and display-on itself; this
+    // driver does not -- it runs the table and hands over to the DPI panel.
+    // Without these the panel is configured but asleep, which shows as a black
+    // screen with the backlight on. Mirrors the ending of the revision 1 table
+    // in src/lcd/esp_lcd_jd9365.c, including its repeated sleep-out, since that
+    // is the sequence proven to work with this driver.
+    {0x11, (uint8_t[]){0x00}, 1, 0},     // sleep out
+    {0x29, (uint8_t[]){0x00}, 1, 5},     // display on
+    {0x11, (uint8_t[]){0x00}, 1, 120},
+    {0x35, (uint8_t[]){0x00}, 1, 0},     // tearing effect on
 };
 
 static const size_t jd9365_init_cmds_v2_size =
