@@ -112,6 +112,9 @@ static inline String ssRomnomFor(const RomDetails& d) {
 String GAME_MEDIA_ORDER_STR              = "box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot";
 String ARCADE_MEDIA_ORDER_STR           = "fanart,marquee,wheel-carbon,wheel-steel,wheel,box3d,box2d,screenshot";
 String ARCADE_SUBSYSTEM_MEDIA_ORDER_STR = "wheel-steel,wheel-carbon,wheel,screenmarquee";
+bool KIOSK_MODE                         = false;  // [ui] kiosk_mode
+int  KIOSK_HIDE_DELAY_MS                = 5000;   // [ui] kiosk_hide_delay_ms
+
 // [images] image_mode - what the fullscreen image mode shows for a game.
 enum ImageMode : uint8_t { IMAGE_MODE_ROTATE, IMAGE_MODE_GAME, IMAGE_MODE_SYSTEM };
 ImageMode IMAGE_MODE                    = IMAGE_MODE_ROTATE;
@@ -138,6 +141,10 @@ String CORE_MEDIA_ORDER_STR             = "wheel-steel,wheel-carbon,wheel,screen
 #define TARGET_WIDTH      320    // physical panel width
 #define TARGET_HEIGHT     240    // physical panel height
 #define IMAGE_AREA_HEIGHT 200    // image area above the 40px footer band (Y=200..239)
+// Height requested from ScreenScraper. Kiosk mode lays artwork out against
+// the whole panel, so it asks for panel height instead of image-area height.
+int  ARTWORK_MAX_HEIGHT = IMAGE_AREA_HEIGHT;
+
 #define ORIGINAL_WIDTH    320    // source design width (logical)
 #define ORIGINAL_HEIGHT   240    // source design height (logical)
 #define DISPLAY_WIDTH     320
@@ -1119,7 +1126,48 @@ void showDownloadProgressColored(int progress, String text, uint16_t barColor) {
 // Visible window (in characters) for the game name in the image footer.
 #define GAME_FOOTER_VISIBLE_CHARS_FULL    58
 
+// Kiosk mode state: whether the image footer is currently painted and when
+// it was last painted. Outside kiosk mode the footer is always up and these
+// are inert.
+static bool          g_imageFooterVisible = true;
+static unsigned long g_imageFooterShownAt = 0;
+
+static bool imageFooterSuppressed() {
+  return KIOSK_MODE && !g_imageFooterVisible;
+}
+
+static void noteImageFooterShown() {
+  g_imageFooterVisible = true;
+  g_imageFooterShownAt = millis();
+}
+
+// Hide the footer. The band belongs to the artwork, so the only way to get
+// those pixels back is to redraw the slide on screen - the same restore the
+// achievement popup performs.
+static void hideImageFooter() {
+  g_imageFooterVisible = false;
+  if (showingGameImage && currentGame.length() > 0) showGameSlide();
+  else                                              showCoreImageScreenWithAutoDownload(currentCore);
+}
+
+// Show the footer. The painters fill the band opaquely, so this covers the
+// artwork without a redraw and answers a tap immediately.
+static void restoreImageFooter() {
+  g_imageFooterVisible = true;
+  if (currentGame.length() > 0) addGameImageFooter(currentGame);
+  else                          drawCoreImageFooter();
+}
+
+// Repaint the band after a status banner covered it: the footer when it is
+// up, otherwise the artwork the banner was drawn over.
+static void repaintImageFooterBand() {
+  if (imageFooterSuppressed())       hideImageFooter();
+  else if (currentGame.length() > 0) addGameImageFooter(currentGame);
+  else                               drawCoreImageFooter();
+}
+
 void addGameImageFooter(String gameName) {
+  if (imageFooterSuppressed()) return;
   Lcd.fillRect(0, 200, 320, 40, THEME_BLACK);
   Lcd.drawFastHLine(0, 200, 320, THEME_CYAN);
 
@@ -1159,6 +1207,8 @@ void addGameImageFooter(String gameName) {
   // GAME INFO button in the right third of the footer — only when the game
   // can actually produce a panel.
   if (showInfoButton) drawGameInfoIcon();
+
+  noteImageFooterShown();
 }
 
 // -----------------------------------------------------------------------------
@@ -1271,6 +1321,7 @@ void drawGameInfoIcon(bool pressed) {
 }
 
 void drawCoreImageFooter() {
+  if (imageFooterSuppressed()) return;
   // Footer band: same layout as addGameImageFooter so both screens look
   // consistent on CYD. Differs only in content (no game = single hint line).
   Lcd.fillRect(0, 200, 320, 40, THEME_BLACK);
@@ -1320,6 +1371,8 @@ void drawCoreImageFooter() {
     Lcd.setCursor(40, 217);
     Lcd.print("Touch screen for MiSTer monitor");
   }
+
+  noteImageFooterShown();
 }
 
 void drawFooter() {
@@ -2750,6 +2803,13 @@ void setup() {
   ARCADE_MEDIA_ORDER_STR           = appConfig.arcadeMediaOrder;
   ARCADE_SUBSYSTEM_MEDIA_ORDER_STR = appConfig.arcadeSubsystemMediaOrder;
   CORE_MEDIA_ORDER_STR             = appConfig.coreMediaOrder;
+  KIOSK_MODE                       = appConfig.kioskMode;
+  KIOSK_HIDE_DELAY_MS              = constrain(appConfig.kioskHideDelayMs, 500, 600000);
+  ARTWORK_MAX_HEIGHT               = KIOSK_MODE ? TARGET_HEIGHT : IMAGE_AREA_HEIGHT;
+  // Kiosk mode starts with the artwork uncovered; a tap brings the footer up.
+  g_imageFooterVisible             = !KIOSK_MODE;
+  Serial.printf("[CONFIG] Kiosk mode       : %s (%d ms)\n", KIOSK_MODE ? "on" : "off", KIOSK_HIDE_DELAY_MS);
+  Serial.printf("[CONFIG] Artwork height   : %d px\n", ARTWORK_MAX_HEIGHT);
   {
     String mode = appConfig.imageMode;
     mode.toLowerCase();
@@ -2920,6 +2980,14 @@ void loop() {
   }
 
   if (showingCoreImage) {
+    // Kiosk mode: the footer stays up for a while after every repaint, then
+    // goes dark until the next tap. Timed from the last paint, not from the
+    // slide clock, so slide changes and banners each get a dwell.
+    if (KIOSK_MODE && g_imageFooterVisible &&
+        millis() - g_imageFooterShownAt > (unsigned long) KIOSK_HIDE_DELAY_MS) {
+      hideImageFooter();
+    }
+
   // There is no timed exit from image mode. The slide clock
   // (coreImageStartTime) is consumed by the rotation block below, and a
   // core without a game keeps its image up until the 10 s state check sees
@@ -2934,6 +3002,15 @@ void loop() {
   if (touch.wasPressed()) {
     int tx = touch.x;
     int ty = touch.y;
+
+    // Kiosk mode: a tap on a dark footer brings it back and stops there.
+    // Leaving image mode or opening GAME INFO takes a second tap, on a
+    // footer the user can see.
+    if (KIOSK_MODE && !g_imageFooterVisible) {
+      Serial.println("Touch detected - restoring footer (kiosk mode)");
+      restoreImageFooter();
+      return;
+    }
 
     // === GAME INFO button: right third of the footer band ===
     // Matches btnNext's x range (213..320) in the HUD, and the footer band
@@ -3103,8 +3180,10 @@ void loop() {
     if (showingCoreImage) {
       // Animate the GAME: scroll on any fullscreen image screen that has a
       // game name in the footer (game image, core image with GAME line,
-      // menu image with overlay).
-      if (currentGame.length() > 0) {
+      // menu image with overlay). Frozen while the footer is dark: the band
+      // belongs to the artwork then, and repainting the title into it leaves
+      // the name floating on its own.
+      if (currentGame.length() > 0 && g_imageFooterVisible) {
         static unsigned long lastFooterUpdate = 0;
         if (millis() - lastFooterUpdate > 100) {
           if (imageFooterScroll.needsScroll && imageFooterScroll.fullText.length() > 0) {
@@ -3933,10 +4012,10 @@ int jpegDrawCallback(JPEGDRAW *pDraw) {
   // Verify data is within screen bounds and doesn't overlap footer
   if (finalX >= 0 && finalY >= 0 && 
       finalX + pDraw->iWidth <= TARGET_WIDTH && 
-      finalY + pDraw->iHeight <= IMAGE_AREA_HEIGHT) {
+      finalY + pDraw->iHeight <= g_artBoxH) {
     // Use Board.Display directly (not Lcd) for image rendering
     Lcd.pushImage(finalX, finalY, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels);
-  } else if (finalY + pDraw->iHeight > IMAGE_AREA_HEIGHT &&
+  } else if (finalY + pDraw->iHeight > g_artBoxH &&
              finalX >= 0 && finalX + pDraw->iWidth <= TARGET_WIDTH) {
     // Expected: block clips into the footer band. Silenced — not an error.
   } else {
@@ -4209,8 +4288,11 @@ void showCoreNotFoundScreen(String coreName) {
   Lcd.drawFastHLine(0, 620, 1280, THEME_GREEN);
   Lcd.setTextColor(THEME_GREEN);
   Lcd.setTextSize(3);
-  Lcd.setCursor(350, 660);
-  Lcd.print("Press any button for interface");
+  if (!imageFooterSuppressed()) {
+    Lcd.setCursor(350, 660);
+    Lcd.print("Press any button for interface");
+    noteImageFooterShown();
+  }
   }
 
 /**
@@ -4814,8 +4896,7 @@ void showReconnectBanner() {
   delay(2400);                               // hold long enough to read
 
   // Restore the image footer over the banner.
-  if (currentGame.length() > 0) addGameImageFooter(currentGame);
-  else                          drawCoreImageFooter();
+  repaintImageFooterBand();
 }
 
 void showRAReadyBanner() {
@@ -4848,8 +4929,7 @@ void showRAReadyBanner() {
   // needsRedraw repaints the real footer (PRV/SCAN/NXT) instead, so only the
   // image path is restored here.
   if (showingCoreImage) {
-    if (currentGame.length() > 0) addGameImageFooter(currentGame);
-    else                          drawCoreImageFooter();
+    repaintImageFooterBand();
   }
 }
 
@@ -4877,8 +4957,7 @@ void showVersionMismatchBanner() {
   delay(4000);                               // longer than RA: it is actionable
 
   if (showingCoreImage) {
-    if (currentGame.length() > 0) addGameImageFooter(currentGame);
-    else                          drawCoreImageFooter();
+    repaintImageFooterBand();
   }
 }
 
@@ -8691,7 +8770,7 @@ bool downloadImageFromScreenScraper(String imageUrl, String savePath) {
   
   // ScreenScraper can resize automatically
   resizedUrl += "maxwidth=" + String(TARGET_WIDTH);
-  resizedUrl += "&maxheight=" + String(IMAGE_AREA_HEIGHT);  // Use 645 instead of 720
+  resizedUrl += "&maxheight=" + String(ARTWORK_MAX_HEIGHT);  // Use 645 instead of 720
   resizedUrl += "&outputformat=jpg";
   
   Serial.printf("Downloading resized image: %s\n", redactScreenScraperUrl(resizedUrl).c_str());
@@ -8938,8 +9017,8 @@ bool displayCoreImageCentered(String imagePath) {
     // covers against the footer.
     const int srcW = imgW, srcH = imgH;
     g_artBoxW = TARGET_WIDTH;
-    g_artBoxH = (srcW == TARGET_WIDTH && srcH == TARGET_HEIGHT)
-              ? TARGET_HEIGHT        // menu.jpg only: drawn 1:1, bleeds by design
+    g_artBoxH = (KIOSK_MODE || (srcW == TARGET_WIDTH && srcH == TARGET_HEIGHT))
+              ? TARGET_HEIGHT        // kiosk mode and panel assets use the full panel
               : IMAGE_AREA_HEIGHT;   // everything else stays above the footer
 
     // Ideal destination: preserve aspect, fit the box, never upscale.
@@ -9340,7 +9419,7 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
   
   String currentUrl = baseUrl + "&media=" + String(mediaType);
   currentUrl += "&maxwidth=" + String(TARGET_WIDTH);
-  currentUrl += "&maxheight=" + String(IMAGE_AREA_HEIGHT);  // Use 645 instead of 720
+  currentUrl += "&maxheight=" + String(ARTWORK_MAX_HEIGHT);  // Use 645 instead of 720
   currentUrl += "&outputformat=jpg";
   
   Serial.printf("Trying: %s\n", mediaName);
@@ -9871,7 +9950,7 @@ String buildCorrectMediaJeuUrl(String gameId, String systemId, String mediaType,
   mediaUrl += "&jeuid=" + gameId;
   mediaUrl += "&media=" + mediaType;
   mediaUrl += "&maxwidth=" + String(TARGET_WIDTH);
-  mediaUrl += "&maxheight=" + String(IMAGE_AREA_HEIGHT);  // Use 645 instead of 720
+  mediaUrl += "&maxheight=" + String(ARTWORK_MAX_HEIGHT);  // Use 645 instead of 720
   mediaUrl += "&outputformat=jpg";
   
   // ========== DETAILED DEBUG ==========
