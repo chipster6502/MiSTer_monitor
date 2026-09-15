@@ -9308,7 +9308,7 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
   String currentUrl = baseUrl + "&media=" + String(mediaType);
   currentUrl += "&maxwidth=" + String(TARGET_WIDTH);
   currentUrl += "&maxheight=" + String(IMAGE_AREA_HEIGHT);  // Use 645 instead of 720
-  currentUrl += "&outputformat=jpg&crc=&md5=&sha1=";
+  currentUrl += "&outputformat=jpg";
   
   Serial.printf("Trying: %s\n", mediaName);
 
@@ -9479,8 +9479,8 @@ bool tryMediaTypeWithRegions(String baseUrl, String savePath,
 // Expands a config.ini token to actual ScreenScraper &media= strings.
 // Regional variants are tried in user-preferred order via tryMediaTypeWithRegions.
 //
-// Tokens without regional variants (fanart, screenshot, photo, illustration)
-// map directly to a single API string.
+// Tokens without regional variants (fanart, photo, illustration) map
+// directly to a single API string.
 //
 // marquee is special: the generic "marquee" key is the most common variant
 // in ScreenScraper, so it is tried first before the regional ones.
@@ -9504,7 +9504,14 @@ bool tryMediaTypesForToken(String baseUrl, String savePath, String token) {
     return tryMediaTypeWithRegions(baseUrl, savePath, "marquee", "Marquee", false);
   }
   else if (token == "fanart")        return tryDownloadMediaTypeWorking(baseUrl, savePath, "fanart",        "Fanart");
-  else if (token == "screenshot")    return tryDownloadMediaTypeWorking(baseUrl, savePath, "sstitle",       "Screenshot");
+  else if (token == "screenshot") {
+    // 'ss' is the in-game screenshot and 'sstitle' the title screen: two
+    // separate media, and plenty of games carry one without the other. Ask
+    // for the screenshot first and settle for the title screen.
+    if (tryMediaTypeWithRegions(baseUrl, savePath, "ss", "Screenshot")) return true;
+    return tryMediaTypeWithRegions(baseUrl, savePath, "sstitle", "Title Screen");
+  }
+  else if (token == "titlescreen")   return tryMediaTypeWithRegions(baseUrl, savePath, "sstitle", "Title Screen");
   else if (token == "photo")         return tryDownloadMediaTypeWorking(baseUrl, savePath, "photo",         "Photo");
   else if (token == "illustration")  return tryDownloadMediaTypeWorking(baseUrl, savePath, "illustration",  "Illustration");
   else Serial.printf("[MEDIA] Unknown token: '%s' -- skipping\n", token.c_str());
