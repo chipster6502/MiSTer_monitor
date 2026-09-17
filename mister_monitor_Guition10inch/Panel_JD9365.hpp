@@ -41,6 +41,20 @@
 #include <lgfx/v1/panel/Panel_FrameBufferBase.hpp>
 
 #include "src/lcd/esp_lcd_jd9365.h"
+#include "JD9365_Init_V2.h"
+
+// ---- panel revision ---------------------------------------------------------
+// Guition ships this board with two different LCD panels behind the same JD9365
+// controller. Units from batch 2624 onward (the figure in parentheses after the
+// SKU on the back sticker) carry the newer one, which needs a different init
+// table and slightly different timings. Driving the wrong one leaves every init
+// call reporting success while the picture comes out as horizontal banding.
+//
+// Both revisions answer with the same panel ID, so this cannot be probed: the
+// sketch sets it from config.ini before Board.begin() runs. A function-local
+// static keeps the flag single-instance across translation units without
+// relying on C++17 inline variables.
+inline bool& jd9365UseV2Panel() { static bool v = false; return v; }
 
 // ---- board wiring -----------------------------------------------------------
 #ifndef JD9365_PIN_LCD_RST
@@ -177,8 +191,23 @@ private:
         JD9365_800_1280_PANEL_60HZ_DPI_CONFIG(LCD_COLOR_PIXEL_FORMAT_RGB565);
 
     jd9365_vendor_config_t vendor_cfg = {};
-    vendor_cfg.init_cmds      = nullptr;   // built-in init table
+    vendor_cfg.init_cmds      = nullptr;   // built-in init table (revision 1)
     vendor_cfg.init_cmds_size = 0;
+
+    // Revision 2 panel: same controller, different glass. The vendor driver
+    // takes an external init table through init_cmds, so it stays untouched;
+    // only the DPI clock and the vertical back porch differ from revision 1.
+    // Horizontal timings and the 1500 Mbps lane rate are the same for both.
+    if (jd9365UseV2Panel()) {
+      dpi_cfg.dpi_clock_freq_mhz             = 70;
+      dpi_cfg.video_timing.vsync_back_porch  = 10;
+      vendor_cfg.init_cmds      = jd9365_init_cmds_v2;
+      vendor_cfg.init_cmds_size = jd9365_init_cmds_v2_size;
+    }
+    JD9365_LOG("panel revision %s (dpi %d MHz, vbp %d)",
+               jd9365UseV2Panel() ? "v2" : "v1",
+               (int)dpi_cfg.dpi_clock_freq_mhz,
+               (int)dpi_cfg.video_timing.vsync_back_porch);
     vendor_cfg.mipi_config.dsi_bus    = _bus;
     vendor_cfg.mipi_config.dpi_config = &dpi_cfg;
     vendor_cfg.mipi_config.lane_num   = 2;
