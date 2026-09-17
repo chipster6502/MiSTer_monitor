@@ -120,6 +120,10 @@ struct AppConfig {
   // Non-arcade system cores. Only tokens that exist at system level: game
   // artwork (box art, marquee, fanart, screenshot) is not published per
   // system, so listing it here only bought failed requests.
+  // Let artwork smaller than its box grow to fill it, up to a ceiling.
+  bool   imageUpscale     = false;
+  float  imageUpscaleMax  = 2.5f;  // clamped 1.0..2.875 at load
+
   // Artwork owns the whole panel and the footer is raised by a tap.
   bool   kioskMode        = false;
   int    kioskHideDelayMs = 5000;  // how long the footer stays up, 500..600000
@@ -229,6 +233,8 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "arcade_subsystem_media_order")  { cfg.arcadeSubsystemMediaOrder = val; }
     else if (key == "core_media_order")              { cfg.coreMediaOrder = val; }
     else if (key == "image_mode")                    { cfg.imageMode = val; }
+    else if (key == "image_upscale")                 { cfg.imageUpscale = parseBool(val); }
+    else if (key == "image_upscale_max")             { cfg.imageUpscaleMax = val.toFloat(); }
     else if (key == "kiosk_mode")                    { cfg.kioskMode = parseBool(val); }
     else if (key == "kiosk_hide_delay_ms")           { cfg.kioskHideDelayMs = val.toInt(); }
     // [ui]

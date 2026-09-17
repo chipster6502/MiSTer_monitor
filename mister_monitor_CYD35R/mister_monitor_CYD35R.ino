@@ -112,6 +112,9 @@ static inline String ssRomnomFor(const RomDetails& d) {
 String GAME_MEDIA_ORDER_STR              = "box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot";
 String ARCADE_MEDIA_ORDER_STR           = "fanart,marquee,wheel-carbon,wheel-steel,wheel,box3d,box2d,screenshot";
 String ARCADE_SUBSYSTEM_MEDIA_ORDER_STR = "wheel-steel,wheel-carbon,wheel,screenmarquee";
+bool    IMAGE_UPSCALE                   = false;    // [images] image_upscale
+int32_t IMAGE_UPSCALE_MAX_Q16           = 2 << 16;  // [images] image_upscale_max, 16.16
+
 bool KIOSK_MODE                         = false;  // [ui] kiosk_mode
 int  KIOSK_HIDE_DELAY_MS                = 5000;   // [ui] kiosk_hide_delay_ms
 
@@ -563,10 +566,11 @@ static uint32_t g_fineXStep  = 1u << 16;
 static uint32_t g_fineYStep  = 1u << 16;
 static int      g_fineDstW   = 0;
 static int      g_fineDstH   = 0;
-// A block is at most one MCU, so its destination rectangle never exceeds
-// 16x16 whatever the scale. 512 bytes buys one display transaction per block
-// instead of one per row.
-#define FINE_BLOCK_MAX 16
+// A block is at most one MCU (16x16). Shrinking keeps its destination inside
+// that, but growing multiplies it, so the buffer is sized for the largest
+// upscale the config is allowed to ask for: 16 * 2.875 + 2 fits in 48.
+// One display transaction per block instead of one per row.
+#define FINE_BLOCK_MAX 48
 static uint16_t g_fineBlock[FINE_BLOCK_MAX * FINE_BLOCK_MAX];
 static uint16_t g_fineCol[FINE_BLOCK_MAX];
 // Kept for the oversized-block fallback only.
@@ -2334,12 +2338,15 @@ void showCoreImageScreenWithAutoDownload(String coreName) {
     
     // Use the original display logic from the existing function
     if (displayCoreImage(imagePath)) {
-      Serial.println("Image displayed correctly, adding footer");
+      Serial.println(imageFooterSuppressed()
+                     ? "Image displayed correctly, footer suppressed (kiosk)"
+                     : "Image displayed correctly, adding footer");
       
       // Footer in PHYSICAL coordinates (full screen width, below image area)
       drawCoreImageFooter();
       
-      Serial.println("Footer added successfully");
+      Serial.println(imageFooterSuppressed() ? "Footer skipped (kiosk)"
+                                             : "Footer added successfully");
       return;
     } else {
       Serial.println("Error displaying image, fallback to menu image");
@@ -2759,11 +2766,24 @@ void setup() {
   ARCADE_MEDIA_ORDER_STR           = appConfig.arcadeMediaOrder;
   ARCADE_SUBSYSTEM_MEDIA_ORDER_STR = appConfig.arcadeSubsystemMediaOrder;
   CORE_MEDIA_ORDER_STR             = appConfig.coreMediaOrder;
+  IMAGE_UPSCALE                    = appConfig.imageUpscale;
+  {
+    // Ceiling clamped to what one MCU can grow to inside FINE_BLOCK_MAX.
+    float maxScale = appConfig.imageUpscaleMax;
+    if (maxScale < 1.0f)   maxScale = 1.0f;
+    if (maxScale > 2.875f) maxScale = 2.875f;
+    IMAGE_UPSCALE_MAX_Q16 = (int32_t)(maxScale * 65536.0f);
+  }
   KIOSK_MODE                       = appConfig.kioskMode;
   KIOSK_HIDE_DELAY_MS              = constrain(appConfig.kioskHideDelayMs, 500, 600000);
   ARTWORK_MAX_HEIGHT               = KIOSK_MODE ? TARGET_HEIGHT : IMAGE_AREA_HEIGHT;
   // Kiosk mode starts with the artwork uncovered; a tap brings the footer up.
   g_imageFooterVisible             = !KIOSK_MODE;
+  Serial.printf("[CONFIG] Image mode       : %s\n",
+                IMAGE_MODE == IMAGE_MODE_GAME   ? "game"   :
+                IMAGE_MODE == IMAGE_MODE_SYSTEM ? "system" : "rotate");
+  Serial.printf("[CONFIG] Image upscale    : %s (max x%.2f)\n",
+                IMAGE_UPSCALE ? "on" : "off", IMAGE_UPSCALE_MAX_Q16 / 65536.0f);
   Serial.printf("[CONFIG] Kiosk mode       : %s (%d ms)\n", KIOSK_MODE ? "on" : "off", KIOSK_HIDE_DELAY_MS);
   Serial.printf("[CONFIG] Artwork height   : %d px\n", ARTWORK_MAX_HEIGHT);
   {
@@ -4024,12 +4044,15 @@ void showCoreImageScreen(String coreName) {
     
     // Show core image
     if (displayCoreImage(imagePath)) {
-      Serial.println("Image displayed correctly, adding footer");
+      Serial.println(imageFooterSuppressed()
+                     ? "Image displayed correctly, footer suppressed (kiosk)"
+                     : "Image displayed correctly, adding footer");
       
       // Only add footer with instructions (no header or top overlay)
       drawCoreImageFooter();
       
-      Serial.println("Footer added successfully");
+      Serial.println(imageFooterSuppressed() ? "Footer skipped (kiosk)"
+                                             : "Footer added successfully");
       return;
     } else {
       Serial.println("Error displaying image, fallback to menu image");
@@ -8586,7 +8609,7 @@ bool displayCoreImageCentered(String imagePath) {
               ? TARGET_HEIGHT        // kiosk mode and panel assets use the full panel
               : IMAGE_AREA_HEIGHT;   // everything else stays above the footer
     
-    // Ideal destination: preserve aspect, fit the box, never upscale.
+    // Ideal destination: preserve aspect and fit the box.
     int dstW = srcW, dstH = srcH;
     if (srcW > g_artBoxW || srcH > g_artBoxH) {
       if ((int64_t)srcW * g_artBoxH > (int64_t)srcH * g_artBoxW) {
@@ -8595,6 +8618,20 @@ bool displayCoreImageCentered(String imagePath) {
       } else {
         dstH = g_artBoxH;
         dstW = (int)(((int64_t)srcW * g_artBoxH + srcH / 2) / srcH);
+      }
+    } else if (IMAGE_UPSCALE) {
+      // Smaller than the box: grow it, capped. The cap is the whole point --
+      // it lets art that is only slightly short reach the edges while keeping
+      // genuinely tiny sources from being blown up into mush.
+      int64_t byW = ((int64_t)g_artBoxW << 16) / (srcW > 0 ? srcW : 1);
+      int64_t byH = ((int64_t)g_artBoxH << 16) / (srcH > 0 ? srcH : 1);
+      int64_t s   = (byW < byH) ? byW : byH;
+      if (s > IMAGE_UPSCALE_MAX_Q16) s = IMAGE_UPSCALE_MAX_Q16;
+      if (s > (1 << 16)) {
+        dstW = (int)(((int64_t)srcW * s) >> 16);
+        dstH = (int)(((int64_t)srcH * s) >> 16);
+        if (dstW > g_artBoxW) dstW = g_artBoxW;
+        if (dstH > g_artBoxH) dstH = g_artBoxH;
       }
     }
     if (dstW < 1) dstW = 1;
