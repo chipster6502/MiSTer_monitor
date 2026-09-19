@@ -3591,6 +3591,11 @@ static void standbyLeave(int reason) {
 #define STANDBY_LOGO_MAX_H     200
 #define STANDBY_DOT_R          8
 #define STANDBY_DOT_MARGIN     40      // dot centre to the right and bottom edges
+#define STANDBY_LABEL_GAP      14      // dot edge to the end of its label
+#define STANDBY_LABEL_BAND_W   360     // cleared before the label is written
+#define STANDBY_LABEL_BAND_H   34
+#define STANDBY_LABEL_ONLINE   0x0471  // dim cyan, the dot's own colour muted
+#define STANDBY_LABEL_OFFLINE  0x9B20  // dim orange, likewise
 
 // The logo is decoded once into RAM when standby starts and released when it
 // ends. Breathing then rescales those pixels; the card is not read again.
@@ -3744,8 +3749,24 @@ static void drawStandbyLogo(int level, int yTop) {
 static void drawStandbyLinkDot() {
   int link = connected ? 1 : 0;
   if (link == standbyDrawnLink) return;
-  Board.Display.fillCircle(TARGET_WIDTH - STANDBY_DOT_MARGIN, TARGET_HEIGHT - STANDBY_DOT_MARGIN,
-                        STANDBY_DOT_R, standbyDimColor(connected ? THEME_CYAN : THEME_ORANGE));
+  int cx = TARGET_WIDTH  - STANDBY_DOT_MARGIN;
+  int cy = TARGET_HEIGHT - STANDBY_DOT_MARGIN;
+  Board.Display.fillCircle(cx, cy, STANDBY_DOT_R,
+                        standbyDimColor(connected ? THEME_CYAN : THEME_ORANGE));
+
+  // Label, right-aligned so it ends just before the dot: the two states are
+  // different lengths, and this keeps the dot where the eye expects it.
+  const char* label = connected ? "MiSTer ONLINE" : "MiSTer OFFLINE";
+  int right = cx - STANDBY_DOT_R - STANDBY_LABEL_GAP;
+  Board.Display.fillRect(right - STANDBY_LABEL_BAND_W, cy - STANDBY_LABEL_BAND_H / 2,
+                      STANDBY_LABEL_BAND_W, STANDBY_LABEL_BAND_H, THEME_BLACK);
+  Board.Display.setFont(&fonts::Orbitron_Light_24);
+  Board.Display.setTextSize(1);
+  Board.Display.setTextColor(standbyDimColor(connected ? STANDBY_LABEL_ONLINE
+                                                    : STANDBY_LABEL_OFFLINE), THEME_BLACK);
+  Board.Display.setCursor(right - (int)Board.Display.textWidth(label), cy - 12);
+  Board.Display.print(label);
+  Board.Display.setFont(&fonts::Font0);
   standbyDrawnLink = link;
 }
 

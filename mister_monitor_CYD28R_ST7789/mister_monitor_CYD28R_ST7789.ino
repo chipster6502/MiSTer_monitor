@@ -3203,6 +3203,9 @@ static void standbyLeave(int reason) {
 #define STANDBY_LOGO_MAX_BYTES   60000
 #define STANDBY_DOT_R            4
 #define STANDBY_DOT_MARGIN       12      // dot centre to the right and bottom edges
+#define STANDBY_LABEL_GAP        7       // dot edge to the end of its label
+#define STANDBY_LABEL_ONLINE     0x0471  // dim cyan, the dot's own colour muted
+#define STANDBY_LABEL_OFFLINE    0x9B20  // dim orange, likewise
 
 #define STANDBY_CLOCK_LOGO_Y     -1       // negative: no logo on the clock screen
 #define STANDBY_DIGIT_Y          30
@@ -3389,8 +3392,25 @@ static void drawStandbyLogoText(int yTop) {
 static void drawStandbyLinkDot() {
   int link = connected ? 1 : 0;
   if (link == standbyDrawnLink) return;
-  display.fillCircle(TARGET_WIDTH - STANDBY_DOT_MARGIN, TARGET_HEIGHT - STANDBY_DOT_MARGIN,
-                     STANDBY_DOT_R, standbyDimColor(connected ? THEME_CYAN : THEME_ORANGE));
+  int cx = TARGET_WIDTH  - STANDBY_DOT_MARGIN;
+  int cy = TARGET_HEIGHT - STANDBY_DOT_MARGIN;
+  display.fillCircle(cx, cy, STANDBY_DOT_R,
+                     standbyDimColor(connected ? THEME_CYAN : THEME_ORANGE));
+
+  // Label, right-aligned so it ends just before the dot: the two states are
+  // different lengths, and this keeps the dot where the eye expects it. The
+  // longer state sets the width of the band that is cleared first.
+  const char* label = connected ? "MiSTer ONLINE" : "MiSTer OFFLINE";
+  const int charW   = 6 * STANDBY_TEXT_SIZE;
+  int right = cx - STANDBY_DOT_R - STANDBY_LABEL_GAP;
+  int band  = 14 * charW;
+  display.fillRect(right - band, cy - 4 * STANDBY_TEXT_SIZE, band, 8 * STANDBY_TEXT_SIZE,
+                   THEME_BLACK);
+  display.setTextSize(STANDBY_TEXT_SIZE);
+  display.setTextColor(standbyDimColor(connected ? STANDBY_LABEL_ONLINE
+                                                 : STANDBY_LABEL_OFFLINE), THEME_BLACK);
+  display.setCursor(right - (int)strlen(label) * charW, cy - 4 * STANDBY_TEXT_SIZE);
+  display.print(label);
   standbyDrawnLink = link;
 }
 
