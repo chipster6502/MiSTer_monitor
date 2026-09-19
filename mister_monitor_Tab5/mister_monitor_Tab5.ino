@@ -3576,8 +3576,9 @@ static void standbyLeave(int reason) {
 }
 
 // ========== STANDBY: DRAWING ==========
-#define STANDBY_LOGO_PATH      "/cores/logo_standby.jpg"   // colour logo on black
-#define STANDBY_LOGO_FALLBACK  "/cores/logo_mister.jpg"    // cards without it
+#define STANDBY_LOGO_RAW_PATH  "/cores/logo_standby.565"   // colour logo on black, raw pixels
+#define STANDBY_LOGO_PATH      "/cores/logo_standby.jpg"   // the same as a JPEG
+#define STANDBY_LOGO_FALLBACK  "/cores/logo_mister.jpg"    // cards with neither
 #define STANDBY_LOGO_MAX_W     400
 #define STANDBY_LOGO_MAX_H     200
 #define STANDBY_DOT_R          8
@@ -3640,8 +3641,40 @@ static bool standbyLoadLogoFile(const char* path) {
   return ok;
 }
 
+// Raw logo: a 4-byte header (width, height, little-endian) followed by
+// RGB565 pixels, high byte first, row by row, which is the layout the buffer
+// holds, so the file is read straight into it. The JPEG decoder rounds its
+// arithmetic for speed, and on a 16-bit panel that leaves lighter and darker
+// blotches in flat colours; raw pixels reach the screen exactly as drawn.
+static bool standbyLoadLogoRaw(const char* path) {
+  if (!sdCardAvailable || !SD.exists(path)) return false;
+  File f = SD.open(path);
+  if (!f) return false;
+  uint8_t head[4];
+  bool ok = (f.read(head, 4) == 4);
+  int w = head[0] | (head[1] << 8);
+  int h = head[2] | (head[3] << 8);
+  ok = ok && w > 0 && w <= STANDBY_LOGO_MAX_W && h > 0 && h <= STANDBY_LOGO_MAX_H &&
+       f.size() == (size_t)(4 + w * h * 2);
+  if (ok) {
+    size_t bytes = (size_t)w * h * 2;
+    standbyLogoPixels = (uint16_t*)psramMalloc(bytes);
+    ok = standbyLogoPixels && (size_t)f.read((uint8_t*)standbyLogoPixels, bytes) == bytes;
+  }
+  f.close();
+  if (ok) {
+    standbyLogoW = w;
+    standbyLogoH = h;
+  } else if (standbyLogoPixels) {
+    free(standbyLogoPixels);
+    standbyLogoPixels = nullptr;
+  }
+  return ok;
+}
+
 static void standbyLoadLogo() {
   if (standbyLogoPixels) return;
+  if (standbyLoadLogoRaw(STANDBY_LOGO_RAW_PATH)) return;
   if (standbyLoadLogoFile(STANDBY_LOGO_PATH)) return;
   if (standbyLoadLogoFile(STANDBY_LOGO_FALLBACK)) return;
   Serial.println("[STANDBY] No logo on the card - using text");
