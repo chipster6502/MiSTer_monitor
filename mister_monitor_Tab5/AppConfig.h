@@ -144,11 +144,19 @@ struct AppConfig {
   // Dimmed idle screen. Starts once the MiSTer has been unreachable for
   // standbyOfflineMin minutes and/or after standbyIdleMin minutes without a
   // core or game change or a touch (0 = never). A touch always ends it.
-  String standbyScreen      = "minimal";
+  String standbyScreen      = "clock";
   bool   standbyWhenOffline = true;
   int    standbyOfflineMin  = 3;
   int    standbyIdleMin     = 0;
   int    standbyBrightness  = 10;
+  int    standbyDim         = 100;
+
+  // --- Clock -------------------------------------------------------------------
+  // timezone is a friendly name or a POSIX TZ string. Empty = no time sync and
+  // no clock anywhere, standby falls back to its minimal screen.
+  String timezone  = "";
+  String ntpServer = "pool.ntp.org";
+  bool   clock24h  = true;
 
   // --- Sound -------------------------------------------------------------------
   // Boards with a speaker only. false silences every tone, boot jingle
@@ -258,6 +266,10 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "standby_offline_min")    { cfg.standbyOfflineMin = val.toInt(); }
     else if (key == "standby_idle_min")       { cfg.standbyIdleMin = val.toInt(); }
     else if (key == "standby_brightness")     { cfg.standbyBrightness = val.toInt(); }
+    else if (key == "standby_dim")            { cfg.standbyDim = val.toInt(); }
+    else if (key == "timezone")               { cfg.timezone = val; }
+    else if (key == "ntp_server")             { cfg.ntpServer = val; }
+    else if (key == "clock_24h")              { cfg.clock24h = parseBool(val); }
     else if (key == "sound")                  { cfg.soundEnabled = parseBool(val); }
     else if (key == "sound_volume")           { cfg.soundVolume = val.toInt(); }
     // [ui] web config editor
