@@ -115,11 +115,26 @@ struct AppConfig {
 
   // Arcade subsystems (hardware platform level, e.g. CPS1, Neo Geo, Konami):
   // wheel art only — subsystem images are logos, not game-specific artwork
-  String arcadeSubsystemMediaOrder = "wheel-steel,wheel-carbon,wheel";
+  String arcadeSubsystemMediaOrder = "wheel-steel,wheel-carbon,wheel,screenmarquee";
 
-  // Non-arcade system cores: steel wheel first for a clean HUD look,
-  // then photo/illustration, then box art as last resort
-  String coreMediaOrder   = "wheel-steel,wheel-carbon,wheel,photo,illustration,box3d,box2d,marquee,fanart,screenshot";
+  // Non-arcade system cores. Only tokens that exist at system level: game
+  // artwork (box art, marquee, fanart, screenshot) is not published per
+  // system, so listing it here only bought failed requests.
+  // Let artwork smaller than its box grow to fill it, up to a ceiling.
+  bool   imageUpscale     = false;
+  float  imageUpscaleMax  = 2.5f;  // clamped 1.0..2.875 at load
+
+  // Artwork owns the whole panel and the footer is raised by a tap.
+  bool   kioskMode        = false;
+  int    kioskHideDelayMs = 5000;  // how long the footer stays up, 500..600000
+
+  // What the fullscreen image mode shows for a game:
+  //   rotate  game artwork and system artwork in turn (default)
+  //   game    game artwork only
+  //   system  system artwork only
+  String imageMode        = "rotate";
+
+  String coreMediaOrder   = "wheel-steel,wheel-carbon,wheel,screenmarquee,illustration,photo";
 
   // --- UI / scroll -----------------------------------------------------------
   // true = rotate the panel 180 degrees, for cases or mounts that hold the
@@ -222,6 +237,11 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "arcade_media_order")            { cfg.arcadeMediaOrder = val; }
     else if (key == "arcade_subsystem_media_order")  { cfg.arcadeSubsystemMediaOrder = val; }
     else if (key == "core_media_order")              { cfg.coreMediaOrder = val; }
+    else if (key == "image_mode")                    { cfg.imageMode = val; }
+    else if (key == "image_upscale")                 { cfg.imageUpscale = parseBool(val); }
+    else if (key == "image_upscale_max")             { cfg.imageUpscaleMax = val.toFloat(); }
+    else if (key == "kiosk_mode")                    { cfg.kioskMode = parseBool(val); }
+    else if (key == "kiosk_hide_delay_ms")           { cfg.kioskHideDelayMs = val.toInt(); }
     // [ui]
     else if (key == "scroll_speed_ms")        { cfg.scrollSpeedMs = val.toInt(); }
     else if (key == "scroll_pause_start_ms")  { cfg.scrollPauseStartMs = val.toInt(); }

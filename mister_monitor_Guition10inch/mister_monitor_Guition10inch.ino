@@ -124,8 +124,18 @@ static inline String ssRomnomFor(const RomDetails& d) {
 // Defaults match AppConfig struct defaults (overridden by config.ini).
 String GAME_MEDIA_ORDER_STR              = "box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot";
 String ARCADE_MEDIA_ORDER_STR           = "fanart,marquee,wheel-carbon,wheel-steel,wheel,box3d,box2d,screenshot";
-String ARCADE_SUBSYSTEM_MEDIA_ORDER_STR = "wheel-steel,wheel-carbon,wheel";
-String CORE_MEDIA_ORDER_STR             = "wheel-steel,wheel-carbon,wheel,photo,illustration,box3d,box2d,marquee,fanart,screenshot";
+String ARCADE_SUBSYSTEM_MEDIA_ORDER_STR = "wheel-steel,wheel-carbon,wheel,screenmarquee";
+bool    IMAGE_UPSCALE                   = false;    // [images] image_upscale
+int32_t IMAGE_UPSCALE_MAX_Q16           = 2 << 16;  // [images] image_upscale_max, 16.16
+
+bool KIOSK_MODE                         = false;  // [ui] kiosk_mode
+int  KIOSK_HIDE_DELAY_MS                = 5000;   // [ui] kiosk_hide_delay_ms
+
+// [images] image_mode - what the fullscreen image mode shows for a game.
+enum ImageMode : uint8_t { IMAGE_MODE_ROTATE, IMAGE_MODE_GAME, IMAGE_MODE_SYSTEM };
+ImageMode IMAGE_MODE                    = IMAGE_MODE_ROTATE;
+
+String CORE_MEDIA_ORDER_STR             = "wheel-steel,wheel-carbon,wheel,screenmarquee,illustration,photo";
 
 // Macros preserve all existing call sites without any further changes.
 #define SCREENSCRAPER_DEV_USER   (_ss_dev_user_str.c_str())
@@ -147,6 +157,10 @@ String CORE_MEDIA_ORDER_STR             = "wheel-steel,wheel-carbon,wheel,photo,
 #define TARGET_WIDTH      1280
 #define TARGET_HEIGHT     720
 #define IMAGE_AREA_HEIGHT 620
+// Height requested from ScreenScraper. Kiosk mode lays artwork out against
+// the whole panel, so it asks for panel height instead of image-area height.
+int  ARTWORK_MAX_HEIGHT = IMAGE_AREA_HEIGHT;
+
 #define ORIGINAL_WIDTH    320
 #define ORIGINAL_HEIGHT   240
 #define UI_WIDTH          1280
@@ -590,10 +604,11 @@ static uint32_t g_fineXStep  = 1u << 16;
 static uint32_t g_fineYStep  = 1u << 16;
 static int      g_fineDstW   = 0;
 static int      g_fineDstH   = 0;
-// A block is at most one MCU, so its destination rectangle never exceeds
-// 16x16 whatever the scale. 512 bytes buys one display transaction per block
-// instead of one per row.
-#define FINE_BLOCK_MAX 16
+// A block is at most one MCU (16x16). Shrinking keeps its destination inside
+// that, but growing multiplies it, so the buffer is sized for the largest
+// upscale the config is allowed to ask for: 16 * 2.875 + 2 fits in 48.
+// One display transaction per block instead of one per row.
+#define FINE_BLOCK_MAX 48
 static uint16_t g_fineBlock[FINE_BLOCK_MAX * FINE_BLOCK_MAX];
 static uint16_t g_fineCol[FINE_BLOCK_MAX];
 // Kept for the oversized-block fallback only.
@@ -721,7 +736,6 @@ void ssNotifyOnce(const String& key, const char* message, const String& detail);
 void ssNotifyUnsupportedCore(const String& coreName);
 void showCoreImageScreenWithAutoDownload(String coreName);
 void showCoreDownloadingScreen(String coreName);
-bool downloadCoreImageStreamingSafe(String baseUrl, String savePath);
 String extractMediaUrl(String response, String mediaKey);
 void showMenuImageWithCoreOverlay(String coreName);
 void forceMemoryCleanup();
@@ -841,6 +855,20 @@ static unsigned long currentSlideTimeout() {
   return (unsigned long) (showingGameImage ? CORE_IMAGE_TIMEOUT : SYSTEM_IMAGE_TIMEOUT);
 }
 String lastArcadeSystemeId = "";  // Store last arcade subsystem ID
+
+// Draw the game slide for the current game. Honours [images] image_mode:
+// with 'system' the system image stands in, so every path that would open
+// image mode on the game image opens on the system image instead, and the
+// static modes never toggle away from it.
+static void showGameSlide() {
+  if (IMAGE_MODE == IMAGE_MODE_SYSTEM) {
+    showingGameImage = false;
+    showCoreImageScreenWithAutoDownload(currentCore);
+  } else {
+    showingGameImage = true;
+    showGameImageScreen(currentCore, currentGame);
+  }
+}
 
 void checkMisterDebugState();
 void checkServerErrorState();
@@ -1218,7 +1246,48 @@ void showDownloadProgressColored(int progress, String text, uint16_t barColor) {
 // Visible window (in characters) for the game name in the image footer.
 #define GAME_FOOTER_VISIBLE_CHARS_FULL    58
 
+// Kiosk mode state: whether the image footer is currently painted and when
+// it was last painted. Outside kiosk mode the footer is always up and these
+// are inert.
+static bool          g_imageFooterVisible = true;
+static unsigned long g_imageFooterShownAt = 0;
+
+static bool imageFooterSuppressed() {
+  return KIOSK_MODE && !g_imageFooterVisible;
+}
+
+static void noteImageFooterShown() {
+  g_imageFooterVisible = true;
+  g_imageFooterShownAt = millis();
+}
+
+// Hide the footer. The band belongs to the artwork, so the only way to get
+// those pixels back is to redraw the slide on screen - the same restore the
+// achievement popup performs.
+static void hideImageFooter() {
+  g_imageFooterVisible = false;
+  if (showingGameImage && currentGame.length() > 0) showGameSlide();
+  else                                              showCoreImageScreenWithAutoDownload(currentCore);
+}
+
+// Show the footer. The painters fill the band opaquely, so this covers the
+// artwork without a redraw and answers a tap immediately.
+static void restoreImageFooter() {
+  g_imageFooterVisible = true;
+  if (currentGame.length() > 0) addGameImageFooter(currentGame);
+  else                          drawCoreImageFooter();
+}
+
+// Repaint the band after a status banner covered it: the footer when it is
+// up, otherwise the artwork the banner was drawn over.
+static void repaintImageFooterBand() {
+  if (imageFooterSuppressed())       hideImageFooter();
+  else if (currentGame.length() > 0) addGameImageFooter(currentGame);
+  else                               drawCoreImageFooter();
+}
+
 void addGameImageFooter(String gameName) {
+  if (imageFooterSuppressed()) return;
   // Footer in PHYSICAL coordinates (full screen width, below image area at Y=620)
   
   // Draw separator line at top of footer
@@ -1276,6 +1345,8 @@ void addGameImageFooter(String gameName) {
   // GAME INFO button in the right third of the footer — only when the game
   // can actually produce a panel.
   if (showInfoButton) drawGameInfoIcon();
+
+  noteImageFooterShown();
 }
 
 // Footer for fullscreen core image screens.
@@ -1395,6 +1466,7 @@ void drawGameInfoIcon(bool pressed) {
 }
 
 void drawCoreImageFooter() {
+  if (imageFooterSuppressed()) return;
   Board.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
   Board.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
   
@@ -1456,6 +1528,8 @@ void drawCoreImageFooter() {
     Board.Display.print("Touch the screen to show MiSTer monitor");
   }
   
+
+  noteImageFooterShown();
 }
 
 void drawFooter() {
@@ -2179,8 +2253,11 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
   
   String systemId = getScreenScraperSystemId(coreName);
   
+  bool usingArcadeSubsystem = false;   // selects which config.ini order applies
+
   // Arcade subsystem management
   if (systemId == "75" && lastArcadeSystemeId.length() > 0) {
+    usingArcadeSubsystem = true;
     String oldSystemId = systemId;
     systemId = lastArcadeSystemeId;
     Serial.printf("Using arcade subsystem ID %s instead of generic Arcade ID %s\n", 
@@ -2259,8 +2336,12 @@ bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
     }
   }
   
-  // USE SECURE STREAMING FUNCTION for cores
-  success = downloadCoreImageStreamingSafe(baseUrl, savePath);
+  // Same dispatcher the game paths use, so [images] core_media_order and
+  // arcade_subsystem_media_order finally decide what is tried and the
+  // preferred region applies to system artwork too.
+  String& coreOrder = usingArcadeSubsystem ? ARCADE_SUBSYSTEM_MEDIA_ORDER_STR
+                                           : CORE_MEDIA_ORDER_STR;
+  success = applyMediaOrderAndDownload(baseUrl, savePath, coreOrder);
   
   if (success) {
     Serial.printf("CORE IMAGE DOWNLOAD SUCCESS!\n");
@@ -2555,12 +2636,15 @@ void showCoreImageScreenWithAutoDownload(String coreName) {
     
     // Use the original display logic from the existing function
     if (displayCoreImage(imagePath)) {
-      Serial.println("Image displayed correctly, adding footer");
+      Serial.println(imageFooterSuppressed()
+                     ? "Image displayed correctly, footer suppressed (kiosk)"
+                     : "Image displayed correctly, adding footer");
       
       // Footer in PHYSICAL coordinates (full screen width, below image area)
       drawCoreImageFooter();
       
-      Serial.println("Footer added successfully");
+      Serial.println(imageFooterSuppressed() ? "Footer skipped (kiosk)"
+                                             : "Footer added successfully");
       return;
     } else {
       Serial.println("Error displaying image, fallback to menu image");
@@ -2632,8 +2716,7 @@ bool handleFullscreenStripTouch(int physicalX) {
 
     scanInProgress  = false;
     lastButtonPress = millis();
-    showingGameImage   = true;
-    showGameImageScreen(currentCore, currentGame);
+    showGameSlide();
     showingCoreImage   = true;
     coreImageStartTime = millis();
     return true;   // switched to image screen; its exit paths repaint
@@ -2841,8 +2924,7 @@ void handleTouch() {
           btnScan.label   = originalLabel;
           scanInProgress  = false;
           lastButtonPress = millis();
-          showingGameImage   = true;
-          showGameImageScreen(currentCore, currentGame);
+          showGameSlide();
           showingCoreImage   = true;
           coreImageStartTime = millis();
           return;   // switched to image screen; skip the HUD-redraw tail
@@ -3118,6 +3200,37 @@ void setup() {
   ARCADE_MEDIA_ORDER_STR           = appConfig.arcadeMediaOrder;
   ARCADE_SUBSYSTEM_MEDIA_ORDER_STR = appConfig.arcadeSubsystemMediaOrder;
   CORE_MEDIA_ORDER_STR             = appConfig.coreMediaOrder;
+  IMAGE_UPSCALE                    = appConfig.imageUpscale;
+  {
+    // Ceiling clamped to what one MCU can grow to inside FINE_BLOCK_MAX.
+    float maxScale = appConfig.imageUpscaleMax;
+    if (maxScale < 1.0f)   maxScale = 1.0f;
+    if (maxScale > 2.875f) maxScale = 2.875f;
+    IMAGE_UPSCALE_MAX_Q16 = (int32_t)(maxScale * 65536.0f);
+  }
+  KIOSK_MODE                       = appConfig.kioskMode;
+  KIOSK_HIDE_DELAY_MS              = constrain(appConfig.kioskHideDelayMs, 500, 600000);
+  ARTWORK_MAX_HEIGHT               = KIOSK_MODE ? TARGET_HEIGHT : IMAGE_AREA_HEIGHT;
+  // Kiosk mode starts with the artwork uncovered; a tap brings the footer up.
+  g_imageFooterVisible             = !KIOSK_MODE;
+  Serial.printf("[CONFIG] Image mode       : %s\n",
+                IMAGE_MODE == IMAGE_MODE_GAME   ? "game"   :
+                IMAGE_MODE == IMAGE_MODE_SYSTEM ? "system" : "rotate");
+  Serial.printf("[CONFIG] Image upscale    : %s (max x%.2f)\n",
+                IMAGE_UPSCALE ? "on" : "off", IMAGE_UPSCALE_MAX_Q16 / 65536.0f);
+  Serial.printf("[CONFIG] Kiosk mode       : %s (%d ms)\n", KIOSK_MODE ? "on" : "off", KIOSK_HIDE_DELAY_MS);
+  Serial.printf("[CONFIG] Artwork height   : %d px\n", ARTWORK_MAX_HEIGHT);
+  {
+    String mode = appConfig.imageMode;
+    mode.toLowerCase();
+    if      (mode == "game")   IMAGE_MODE = IMAGE_MODE_GAME;
+    else if (mode == "system") IMAGE_MODE = IMAGE_MODE_SYSTEM;
+    else {
+      IMAGE_MODE = IMAGE_MODE_ROTATE;
+      if (mode != "rotate")
+        Serial.printf("[CONFIG] Unknown image_mode '%s' - using rotate\n", mode.c_str());
+    }
+  }
 
   CORE_IMAGE_TIMEOUT          = appConfig.coreImageTimeout;
   SYSTEM_IMAGE_TIMEOUT        = (appConfig.systemImageTimeout > 0)
@@ -3166,7 +3279,7 @@ void setup() {
   if (sdCardAvailable) {
     // Prioritize game image over core image
     if (currentGame.length() > 0 && currentCore != "MENU") {
-      showGameImageScreen(currentCore, currentGame);
+      showGameSlide();
     } else {
       showCoreImageScreenWithAutoDownload(currentCore);
     }
@@ -3277,6 +3390,14 @@ void loop() {
   }
 
   if (showingCoreImage) {
+    // Kiosk mode: the footer stays up for a while after every repaint, then
+    // goes dark until the next tap. Timed from the last paint, not from the
+    // slide clock, so slide changes and banners each get a dwell.
+    if (KIOSK_MODE && g_imageFooterVisible &&
+        millis() - g_imageFooterShownAt > (unsigned long) KIOSK_HIDE_DELAY_MS) {
+      hideImageFooter();
+    }
+
   // There is no timed exit from image mode. The slide clock
   // (coreImageStartTime) is consumed by the rotation block below, and a
   // core without a game keeps its image up until the 10 s state check sees
@@ -3291,6 +3412,15 @@ void loop() {
   if (touch.wasPressed()) {
     int tx = touch.x;
     int ty = touch.y;
+
+    // Kiosk mode: a tap on a dark footer brings it back and stops there.
+    // Leaving image mode or opening GAME INFO takes a second tap, on a
+    // footer the user can see.
+    if (KIOSK_MODE && !g_imageFooterVisible) {
+      Serial.println("Touch detected - restoring footer (kiosk mode)");
+      restoreImageFooter();
+      return;
+    }
 
     // === GAME INFO button: right third of the image footer (physical) ===
     // Footer band starts at y=620; the right third begins at x=853. Tested
@@ -3373,7 +3503,7 @@ void loop() {
     }
   startCrcRecurrentForGame(currentGame, currentCore);
   
-  showGameImageScreen(currentCore, currentGame);
+  showGameSlide();
 } else {
   Serial.println("Game unloaded, showing core image");
   lastArcadeSystemeId = "";
@@ -3393,8 +3523,7 @@ void loop() {
         // If there's an active game, show game image, otherwise show core image
         if (currentGame.length() > 0) {
           Serial.printf("Core changed with active game, showing game image for new core\n");
-          showingGameImage = true;
-          showGameImageScreen(currentCore, currentGame);
+          showGameSlide();
         } else {
           Serial.printf("Core changed without game, showing core image\n");
           showCoreImageScreenWithAutoDownload(currentCore);
@@ -3416,8 +3545,9 @@ void loop() {
     lastRotationLog = millis();
   }
 
-  // Rotation logic for games (only when game is active and core is not MENU)
-    if (currentGame.length() > 0 && currentCore != "MENU") {
+  // Rotation logic for games (only when game is active and core is not MENU).
+  // Static image modes never toggle: the opening slide is the only slide.
+    if (IMAGE_MODE == IMAGE_MODE_ROTATE && currentGame.length() > 0 && currentCore != "MENU") {
       // The slide clock is coreImageStartTime, restamped by every draw site;
       // each half of the cycle has its own dwell (core_image_timeout for the
       // game image, system_image_timeout for the system image).
@@ -3447,7 +3577,7 @@ void loop() {
         showingGameImage = !showingGameImage;
         
         if (showingGameImage) {
-          showGameImageScreen(currentCore, currentGame);
+          showGameSlide();
         } else {
           showCoreImageScreenWithAutoDownload(currentCore);
         }
@@ -3458,8 +3588,10 @@ void loop() {
     if (showingCoreImage) {
       // Animate the GAME: scroll on any fullscreen image screen that has a
       // game name in the footer (game image, core image with GAME line,
-      // menu image with overlay).
-      if (currentGame.length() > 0) {
+      // menu image with overlay). Frozen while the footer is dark: the band
+      // belongs to the artwork then, and repainting the title into it leaves
+      // the name floating on its own.
+      if (currentGame.length() > 0 && g_imageFooterVisible) {
         static unsigned long lastFooterUpdate = 0;
         if (millis() - lastFooterUpdate > 100) {
           if (imageFooterScroll.needsScroll && imageFooterScroll.fullText.length() > 0) {
@@ -3583,8 +3715,7 @@ void loop() {
     
     if (shouldShowGame) {
       Serial.printf("Showing game image: '%s' on '%s'\n", currentGame.c_str(), currentCore.c_str());
-      showingGameImage = true;   // every entry into image mode restarts the cycle on the game image
-      showGameImageScreen(currentCore, currentGame);
+      showGameSlide();   // every entry into image mode restarts the cycle on the game image
     } else {
       Serial.printf("Showing core image for: '%s'\n", currentCore.c_str());
       showCoreImageScreenWithAutoDownload(currentCore);
@@ -3675,7 +3806,7 @@ if (oldGame != currentGame && sdCardAvailable) {
     startCrcRecurrentForGame(currentGame, currentCore);
     
     Serial.printf("Calling showGameImageScreen()...\n");
-    showGameImageScreen(currentCore, currentGame);
+    showGameSlide();
     Serial.printf("showGameImageScreen() returned\n");
   } else if (oldGame.length() > 0) {
     Serial.println("Game unloaded, returning to core image");
@@ -4306,10 +4437,10 @@ int jpegDrawCallback(JPEGDRAW *pDraw) {
   // Verify data is within screen bounds and doesn't overlap footer
   if (finalX >= 0 && finalY >= 0 && 
       finalX + pDraw->iWidth <= TARGET_WIDTH && 
-      finalY + pDraw->iHeight <= IMAGE_AREA_HEIGHT) {
+      finalY + pDraw->iHeight <= g_artBoxH) {
     // Use Board.Display directly (not Lcd) for image rendering
     Board.Display.pushImage(finalX, finalY, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels);
-  } else if (finalY + pDraw->iHeight > IMAGE_AREA_HEIGHT &&
+  } else if (finalY + pDraw->iHeight > g_artBoxH &&
              finalX >= 0 && finalX + pDraw->iWidth <= TARGET_WIDTH) {
     // Expected: block clips into the footer band. Silenced — not an error.
     // Taller-than-area images legitimately lose their bottom rows here,
@@ -4361,12 +4492,15 @@ void showCoreImageScreen(String coreName) {
     
     // Show core image
     if (displayCoreImage(imagePath)) {
-      Serial.println("Image displayed correctly, adding footer");
+      Serial.println(imageFooterSuppressed()
+                     ? "Image displayed correctly, footer suppressed (kiosk)"
+                     : "Image displayed correctly, adding footer");
       
       // Only add footer with instructions (no header or top overlay)
       drawCoreImageFooter();
       
-      Serial.println("Footer added successfully");
+      Serial.println(imageFooterSuppressed() ? "Footer skipped (kiosk)"
+                                             : "Footer added successfully");
       return;
     } else {
       Serial.println("Error displaying image, fallback to menu image");
@@ -4430,16 +4564,21 @@ void showMenuImageWithCoreOverlay(String coreName) {
       Lcd.print("Menu Mode");
     }
     
-    // Footer for the pure MENU state (no game, no core overlay).
-    // Single line: just the hint, centered, with comfortable margins.
-    Board.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
-    Board.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
-    
-    Board.Display.setTextWrap(false);
-    Board.Display.setTextColor(THEME_GREEN);
-    Board.Display.setTextSize(3);
-    Board.Display.setCursor(250, 660);
-    Board.Display.print("Touch the screen to show MiSTer monitor");
+    // Footer for the pure MENU state (no game, no core overlay). Painted
+    // inline rather than through drawCoreImageFooter(), so it needs the
+    // kiosk guard of its own.
+    if (!imageFooterSuppressed()) {
+      Board.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
+      Board.Display.fillRect(0, 621, 1280, 99, THEME_BLACK);
+
+      Board.Display.setTextWrap(false);
+      Board.Display.setTextColor(THEME_GREEN);
+      Board.Display.setTextSize(3);
+      Board.Display.setCursor(250, 660);
+      Board.Display.print("Touch the screen to show MiSTer monitor");
+
+      noteImageFooterShown();
+    }
     
     Serial.println("Menu interface displayed without active core overlay");
     return; // IMPORTANT: Exit here to avoid executing core overlay logic
@@ -4658,8 +4797,11 @@ void showCoreNotFoundScreen(String coreName) {
   Board.Display.drawFastHLine(0, 620, 1280, THEME_GREEN);
   Board.Display.setTextColor(THEME_GREEN);
   Board.Display.setTextSize(3);
-  Board.Display.setCursor(350, 660);
-  Board.Display.print("Press any button for interface");
+  if (!imageFooterSuppressed()) {
+    Board.Display.setCursor(350, 660);
+    Board.Display.print("Press any button for interface");
+    noteImageFooterShown();
+  }
   }
 
 /**
@@ -5465,8 +5607,7 @@ void showReconnectBanner() {
   delay(1200);                                    // hold long enough to read
 
   // Restore the normal footer over the banner (we're over a full-screen image).
-  if (currentGame.length() > 0) addGameImageFooter(currentGame);
-  else                          drawCoreImageFooter();
+  repaintImageFooterBand();
 }
 
 void showRAReadyBanner() {
@@ -5495,8 +5636,7 @@ void showRAReadyBanner() {
   // drawFooter(), so force a full background reload — the caller's
   // needsRedraw repaints the page over it on the next loop.
   if (showingCoreImage) {
-    if (currentGame.length() > 0) addGameImageFooter(currentGame);
-    else                          drawCoreImageFooter();
+    repaintImageFooterBand();
   } else {
     backgroundLoaded = false;
   }
@@ -5526,8 +5666,7 @@ void showVersionMismatchBanner() {
   delay(4000);                               // longer than RA: it is actionable
 
   if (showingCoreImage) {
-    if (currentGame.length() > 0) addGameImageFooter(currentGame);
-    else                          drawCoreImageFooter();
+    repaintImageFooterBand();
   } else {
     backgroundLoaded = false;
   }
@@ -6728,7 +6867,7 @@ void serviceRAPopup() {
     raPopupDrawn = false;
     if (showingCoreImage) {
       if (showingGameImage && currentGame.length() > 0) {
-        showGameImageScreen(currentCore, currentGame);
+        showGameSlide();
       } else {
         showCoreImageScreenWithAutoDownload(currentCore);
       }
@@ -9641,7 +9780,7 @@ bool downloadImageFromScreenScraper(String imageUrl, String savePath) {
   
   // ScreenScraper can resize automatically
   resizedUrl += "maxwidth=" + String(TARGET_WIDTH);
-  resizedUrl += "&maxheight=" + String(IMAGE_AREA_HEIGHT);  // Use 645 instead of 720
+  resizedUrl += "&maxheight=" + String(ARTWORK_MAX_HEIGHT);  // Use 645 instead of 720
   resizedUrl += "&outputformat=jpg";
   
   Serial.printf("Downloading resized image: %s\n", redactScreenScraperUrl(resizedUrl).c_str());
@@ -9870,11 +10009,11 @@ bool displayCoreImageCentered(String imagePath) {
     // area and centred there.
     const int srcW = imgW, srcH = imgH;
     g_artBoxW = TARGET_WIDTH;
-    g_artBoxH = (srcW == TARGET_WIDTH && srcH == TARGET_HEIGHT)
-              ? TARGET_HEIGHT        // panel asset: drawn 1:1, bleeds by design
+    g_artBoxH = (KIOSK_MODE || (srcW == TARGET_WIDTH && srcH == TARGET_HEIGHT))
+              ? TARGET_HEIGHT        // kiosk mode and panel assets use the full panel
               : IMAGE_AREA_HEIGHT;   // everything else stays above the footer
     
-    // Ideal destination: preserve aspect, fit the box, never upscale.
+    // Ideal destination: preserve aspect and fit the box.
     int dstW = srcW, dstH = srcH;
     if (srcW > g_artBoxW || srcH > g_artBoxH) {
       if ((int64_t)srcW * g_artBoxH > (int64_t)srcH * g_artBoxW) {
@@ -9883,6 +10022,20 @@ bool displayCoreImageCentered(String imagePath) {
       } else {
         dstH = g_artBoxH;
         dstW = (int)(((int64_t)srcW * g_artBoxH + srcH / 2) / srcH);
+      }
+    } else if (IMAGE_UPSCALE) {
+      // Smaller than the box: grow it, capped. The cap is the whole point --
+      // it lets art that is only slightly short reach the edges while keeping
+      // genuinely tiny sources from being blown up into mush.
+      int64_t byW = ((int64_t)g_artBoxW << 16) / (srcW > 0 ? srcW : 1);
+      int64_t byH = ((int64_t)g_artBoxH << 16) / (srcH > 0 ? srcH : 1);
+      int64_t s   = (byW < byH) ? byW : byH;
+      if (s > IMAGE_UPSCALE_MAX_Q16) s = IMAGE_UPSCALE_MAX_Q16;
+      if (s > (1 << 16)) {
+        dstW = (int)(((int64_t)srcW * s) >> 16);
+        dstH = (int)(((int64_t)srcH * s) >> 16);
+        if (dstW > g_artBoxW) dstW = g_artBoxW;
+        if (dstH > g_artBoxH) dstH = g_artBoxH;
       }
     }
     if (dstW < 1) dstW = 1;
@@ -10273,8 +10426,8 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
   
   String currentUrl = baseUrl + "&media=" + String(mediaType);
   currentUrl += "&maxwidth=" + String(TARGET_WIDTH);
-  currentUrl += "&maxheight=" + String(IMAGE_AREA_HEIGHT);  // Use 645 instead of 720
-  currentUrl += "&outputformat=jpg&crc=&md5=&sha1=";
+  currentUrl += "&maxheight=" + String(ARTWORK_MAX_HEIGHT);  // Use 645 instead of 720
+  currentUrl += "&outputformat=jpg";
   
   Serial.printf("Trying: %s\n", mediaName);
   // Live HUD: show WHICH media type is being tried and inch the bar forward.
@@ -10444,8 +10597,8 @@ bool tryMediaTypeWithRegions(String baseUrl, String savePath,
 // Expands a config.ini token to actual ScreenScraper &media= strings.
 // Regional variants are tried in user-preferred order via tryMediaTypeWithRegions.
 //
-// Tokens without regional variants (fanart, screenshot, photo, illustration)
-// map directly to a single API string.
+// Tokens without regional variants (fanart) map directly to a single API
+// string.
 //
 // marquee is special: the generic "marquee" key is the most common variant
 // in ScreenScraper, so it is tried first before the regional ones.
@@ -10469,9 +10622,21 @@ bool tryMediaTypesForToken(String baseUrl, String savePath, String token) {
     return tryMediaTypeWithRegions(baseUrl, savePath, "marquee", "Marquee", false);
   }
   else if (token == "fanart")        return tryDownloadMediaTypeWorking(baseUrl, savePath, "fanart",        "Fanart");
-  else if (token == "screenshot")    return tryDownloadMediaTypeWorking(baseUrl, savePath, "sstitle",       "Screenshot");
-  else if (token == "photo")         return tryDownloadMediaTypeWorking(baseUrl, savePath, "photo",         "Photo");
-  else if (token == "illustration")  return tryDownloadMediaTypeWorking(baseUrl, savePath, "illustration",  "Illustration");
+  else if (token == "screenshot") {
+    // 'ss' is the in-game screenshot and 'sstitle' the title screen: two
+    // separate media, and plenty of games carry one without the other. Ask
+    // for the screenshot first and settle for the title screen.
+    if (tryMediaTypeWithRegions(baseUrl, savePath, "ss", "Screenshot")) return true;
+    return tryMediaTypeWithRegions(baseUrl, savePath, "sstitle", "Title Screen");
+  }
+  else if (token == "titlescreen")   return tryMediaTypeWithRegions(baseUrl, savePath, "sstitle", "Title Screen");
+  // System-level media. photo and illustration carry regions there, so they
+  // go through the region chain like the wheels; at game level the generic
+  // variant closes the chain and still resolves.
+  else if (token == "photo")         return tryMediaTypeWithRegions(baseUrl, savePath, "photo",         "Photo");
+  else if (token == "illustration")  return tryMediaTypeWithRegions(baseUrl, savePath, "illustration",  "Illustration");
+  else if (token == "screenmarquee") return tryMediaTypeWithRegions(baseUrl, savePath, "screenmarquee", "Screen Marquee");
+  else if (token == "background")    return tryMediaTypeWithRegions(baseUrl, savePath, "background",    "Background");
   else Serial.printf("[MEDIA] Unknown token: '%s' -- skipping\n", token.c_str());
 
   return false;
@@ -10756,187 +10921,6 @@ void forceMemoryCleanup() {
   }
 }
 
-bool downloadCoreImageStreamingSafe(String baseUrl, String savePath) {
-  Serial.printf("=== STREAMING-SAFE CORE DOWNLOAD ===\n");
-  Serial.printf("Target: %s\n", savePath.c_str());
-  
-  // List of media types to test for cores (systems)
-  // wheel-steel is tried first as it gives the best visual result for system images
-  String mediaTypes[] = {
-    "wheel-steel(wor)",
-    "wheel-steel(us)",
-    "wheel-steel(eu)",
-    "wheel-steel(jp)",
-    "wheel-steel",
-    "wheel-carbon(wor)",
-    "wheel-carbon(us)",
-    "wheel-carbon(eu)",
-    "wheel-carbon(jp)",
-    "wheel(wor)",
-    "wheel(us)",
-    "wheel(eu)",
-    "wheel(jp)",
-    "illustration(wor)",
-    "illustration(us)",
-    "illustration(eu)",
-    "illustration(jp)",
-    "photo(wor)",
-    "background(wor)",
-    "screenmarquee(wor)",
-  };
-  String mediaNames[] = {
-    "Steel Wheel World",
-    "Steel Wheel USA",
-    "Steel Wheel Europe",
-    "Steel Wheel Japan",
-    "Steel Wheel",
-    "Carbon Wheel World",
-    "Carbon Wheel USA",
-    "Carbon Wheel Europe",
-    "Carbon Wheel Japan",
-    "Wheel World",
-    "Wheel USA",
-    "Wheel Europe",
-    "Wheel Japan",
-    "Illustration World",
-    "Illustration USA",
-    "Illustration Europe",
-    "Illustration Japan",
-    "Photo",
-    "Background",
-    "Screen Marquee",
-  };
-  int mediaCount = 20;
-  
-  for (int i = 0; i < mediaCount; i++) {
-    Serial.printf("Trying media type %d: %s\n", i + 1, mediaNames[i].c_str());
-    
-    // Build complete URL with media type and resize parameters
-    String currentUrl = baseUrl + "&media=" + mediaTypes[i];
-    currentUrl += "&maxwidth=" + String(TARGET_WIDTH);
-    currentUrl += "&maxheight=" + String(IMAGE_AREA_HEIGHT);  // Use 645 instead of 720
-    currentUrl += "&outputformat=jpg";
-    
-    Serial.printf("   URL: %s\n", redactScreenScraperUrl(currentUrl).c_str());
-    
-    HTTPClient http;
-    http.begin(currentUrl);
-    http.setTimeout(25000);
-    http.addHeader("User-Agent", "MiSTer-Monitor");
-    http.addHeader("Accept", "image/jpeg,image/png,image/*");
-    
-    int httpCode = http.GET();
-    g_lastSSHttpCode = httpCode;
-    
-    Serial.printf("HTTP Response: %d\n", httpCode);
-    
-    if (httpCode == 200) {
-      String contentType = http.header("Content-Type");
-      int contentLength = http.getSize();
-      
-      Serial.printf("Content-Type: '%s'\n", contentType.c_str());
-      Serial.printf("Content-Length: %d\n", contentLength);
-      
-      // Read the COMPLETE response first (SAFE STREAMING)
-      String completeResponse = http.getString();
-      Serial.printf("Response size: %d bytes\n", completeResponse.length());
-      
-      if (completeResponse.length() > 0) {
-        // Show first bytes as hex for debugging
-        Serial.printf("First 10 bytes (hex): ");
-        for (int j = 0; j < min(10, (int)completeResponse.length()); j++) {
-          Serial.printf("%02X ", (uint8_t)completeResponse.charAt(j));
-        }
-        Serial.println();
-        
-        // Check for JPEG signature in the complete response
-        if (completeResponse.length() >= 3) {
-          uint8_t byte1 = (uint8_t)completeResponse.charAt(0);
-          uint8_t byte2 = (uint8_t)completeResponse.charAt(1);
-          uint8_t byte3 = (uint8_t)completeResponse.charAt(2);
-          
-          bool isJPEG = (byte1 == 0xFF && byte2 == 0xD8 && byte3 == 0xFF);
-          
-          if (isJPEG) {
-            Serial.printf("JPEG signature detected! Size: %d bytes\n", completeResponse.length());
-            
-            // Validate reasonable image size for core images
-            if (completeResponse.length() > 1000 && completeResponse.length() < 300000) {
-              // Create directory if needed
-              String dir = savePath.substring(0, savePath.lastIndexOf('/'));
-              if (!SD.exists(dir)) {
-                Serial.printf("Creating directory: %s\n", dir.c_str());
-                SD.mkdir(dir);
-              }
-              
-              // Save the image file
-              File file = SD.open(savePath, FILE_WRITE);
-              if (file) {
-                // Write complete response as binary data
-                file.write((uint8_t*)completeResponse.c_str(), completeResponse.length());
-                file.close();
-                
-                // Verify the saved file
-                if (SD.exists(savePath)) {
-                  File verifyFile = SD.open(savePath);
-                  if (verifyFile) {
-                    size_t savedSize = verifyFile.size();
-                    verifyFile.close();
-                    
-                    if (savedSize == completeResponse.length()) {
-                      Serial.printf("SUCCESS: Downloaded %s (%d bytes)\n", mediaNames[i].c_str(), savedSize);
-                      Serial.printf("Saved to: %s\n", savePath.c_str());
-                      http.end();
-                      return true;
-                    } else {
-                      Serial.printf("File size mismatch: %d vs %d\n", savedSize, completeResponse.length());
-                    }
-                  }
-                }
-              } else {
-                Serial.printf("Cannot create file: %s\n", savePath.c_str());
-              }
-            } else {
-              Serial.printf("Invalid image size: %d bytes\n", completeResponse.length());
-            }
-          } else {
-            Serial.printf("Not a JPEG image (bytes: %02X %02X %02X)\n", byte1, byte2, byte3);
-            
-            // Check if it's a ScreenScraper text response
-            if (completeResponse.indexOf("NOMEDIA") != -1) {
-            g_mediaSawNoMedia = true;
-              Serial.printf("No %s media available in database\n", mediaNames[i].c_str());
-            } else if (completeResponse.indexOf("erreur") != -1) {
-              Serial.printf("ScreenScraper error: %s\n", completeResponse.substring(0, 100).c_str());
-            } else if (completeResponse.length() < 100) {
-              Serial.printf("ScreenScraper response: %s\n", completeResponse.c_str());
-            } else {
-              Serial.printf("Unknown response (first 100 chars): %s\n", completeResponse.substring(0, 100).c_str());
-            }
-          }
-        } else {
-          Serial.printf("Response too short: %d bytes\n", completeResponse.length());
-        }
-      } else {
-        Serial.println("Empty response");
-      }
-    } else {
-      Serial.printf("HTTP %d for %s\n", httpCode, mediaNames[i].c_str());
-      
-      String errorResponse = http.getString();
-      if (errorResponse.length() > 0 && errorResponse.length() < 500) {
-        Serial.printf("   Error: %s\n", errorResponse.c_str());
-      }
-    }
-    
-    http.end();
-    pumpedDelay(1000); // Delay between attempts
-  }
-  
-  Serial.println("All media types failed - no suitable core image found");
-  return false;
-}
-
 String buildCorrectMediaJeuUrl(String gameId, String systemId, String mediaType, String specificSystemeId) {
   // ========== INITIAL DEBUG ==========
   Serial.printf("=== buildCorrectMediaJeuUrl DEBUG ===\n");
@@ -10975,7 +10959,7 @@ String buildCorrectMediaJeuUrl(String gameId, String systemId, String mediaType,
   mediaUrl += "&jeuid=" + gameId;
   mediaUrl += "&media=" + mediaType;
   mediaUrl += "&maxwidth=" + String(TARGET_WIDTH);
-  mediaUrl += "&maxheight=" + String(IMAGE_AREA_HEIGHT);  // Use 645 instead of 720
+  mediaUrl += "&maxheight=" + String(ARTWORK_MAX_HEIGHT);  // Use 645 instead of 720
   mediaUrl += "&outputformat=jpg";
   
   // ========== DETAILED DEBUG ==========
