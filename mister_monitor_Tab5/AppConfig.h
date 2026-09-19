@@ -140,6 +140,16 @@ struct AppConfig {
   bool   kioskMode        = false;
   int    kioskHideDelayMs = 5000;
 
+  // --- Standby -----------------------------------------------------------------
+  // Dimmed idle screen. Starts once the MiSTer has been unreachable for
+  // standbyOfflineMin minutes and/or after standbyIdleMin minutes without a
+  // core or game change or a touch (0 = never). A touch always ends it.
+  String standbyScreen      = "minimal";
+  bool   standbyWhenOffline = true;
+  int    standbyOfflineMin  = 3;
+  int    standbyIdleMin     = 0;
+  int    standbyBrightness  = 10;
+
   // --- Sound -------------------------------------------------------------------
   // Boards with a speaker only. false silences every tone, boot jingle
   // included. Volume is the driver's 0-255 range.
@@ -243,6 +253,11 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "flip_display")           { cfg.flipDisplay = parseBool(val); }
     else if (key == "kiosk_mode")             { cfg.kioskMode = parseBool(val); }
     else if (key == "kiosk_hide_delay_ms")    { cfg.kioskHideDelayMs = val.toInt(); }
+    else if (key == "standby_screen")         { cfg.standbyScreen = val; }
+    else if (key == "standby_when_offline")   { cfg.standbyWhenOffline = parseBool(val); }
+    else if (key == "standby_offline_min")    { cfg.standbyOfflineMin = val.toInt(); }
+    else if (key == "standby_idle_min")       { cfg.standbyIdleMin = val.toInt(); }
+    else if (key == "standby_brightness")     { cfg.standbyBrightness = val.toInt(); }
     else if (key == "sound")                  { cfg.soundEnabled = parseBool(val); }
     else if (key == "sound_volume")           { cfg.soundVolume = val.toInt(); }
     // [ui] web config editor

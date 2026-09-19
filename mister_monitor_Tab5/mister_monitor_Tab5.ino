@@ -197,6 +197,12 @@ int  KIOSK_HIDE_DELAY_MS          = 5000;   // [ui] kiosk_hide_delay_ms
 int  ARTWORK_MAX_HEIGHT           = IMAGE_AREA_HEIGHT;
 bool SOUND_ENABLED                = true;   // [ui] sound
 int  SOUND_VOLUME                 = 128;    // [ui] sound_volume (0-255)
+// [ui] standby - dimmed idle screen shown while the MiSTer is off or idle.
+#define DISPLAY_BRIGHTNESS_NORMAL   128     // backlight level outside standby
+bool STANDBY_WHEN_OFFLINE         = true;   // [ui] standby_when_offline
+int  STANDBY_OFFLINE_MIN          = 3;      // [ui] standby_offline_min
+int  STANDBY_IDLE_MIN             = 0;      // [ui] standby_idle_min (0 = never)
+int  STANDBY_BRIGHTNESS           = 10;     // [ui] standby_brightness (0-255)
 // [images] image_mode - what the fullscreen image mode shows for a game.
 enum ImageMode : uint8_t { IMAGE_MODE_ROTATE, IMAGE_MODE_GAME, IMAGE_MODE_SYSTEM };
 ImageMode IMAGE_MODE              = IMAGE_MODE_ROTATE;
@@ -3112,7 +3118,7 @@ void setup() {
   Serial.println("Speaker initialized");
   
   M5.Display.setRotation(1);
-  M5.Display.setBrightness(128);
+  M5.Display.setBrightness(DISPLAY_BRIGHTNESS_NORMAL);
   M5.Display.setColorDepth(16);
 
   Serial.println("=== MiSTer Monitor with Core and Games Images on M5Tab Starting ===");
@@ -3224,6 +3230,16 @@ void setup() {
   ARTWORK_MAX_HEIGHT          = KIOSK_MODE ? TARGET_HEIGHT : IMAGE_AREA_HEIGHT;
   // Kiosk mode starts with the artwork uncovered; a tap brings the footer up.
   g_imageFooterVisible        = !KIOSK_MODE;
+  STANDBY_WHEN_OFFLINE        = appConfig.standbyWhenOffline;
+  STANDBY_OFFLINE_MIN         = constrain(appConfig.standbyOfflineMin, 1, 1440);
+  STANDBY_IDLE_MIN            = constrain(appConfig.standbyIdleMin, 0, 1440);
+  STANDBY_BRIGHTNESS          = constrain(appConfig.standbyBrightness, 0, 255);
+  {
+    String screen = appConfig.standbyScreen;
+    screen.toLowerCase();
+    if (screen != "minimal")
+      Serial.printf("[CONFIG] Unknown standby_screen '%s' - using minimal\n", screen.c_str());
+  }
   {
     String mode = appConfig.imageMode;
     mode.toLowerCase();
@@ -3250,6 +3266,9 @@ void setup() {
   Serial.printf("[CONFIG] Kiosk mode       : %s (%d ms)\n", KIOSK_MODE ? "on" : "off", KIOSK_HIDE_DELAY_MS);
   Serial.printf("[CONFIG] Artwork height   : %d px\n", ARTWORK_MAX_HEIGHT);
   Serial.printf("[CONFIG] Sound            : %s (volume %d)\n", SOUND_ENABLED ? "on" : "off", SOUND_VOLUME);
+  Serial.printf("[CONFIG] Standby          : offline %s (%d min), idle %d min, brightness %d\n",
+                STANDBY_WHEN_OFFLINE ? "on" : "off", STANDBY_OFFLINE_MIN,
+                STANDBY_IDLE_MIN, STANDBY_BRIGHTNESS);
   // ──────────────────────────────────────────────────────────────────────────
 
   bootFrameLoaded = false;  // Reset boot frame flag
@@ -3302,6 +3321,346 @@ void setup() {
   }
 }
 
+// ========== STANDBY: STATE LOGIC ==========
+// Nothing in this block draws. It decides when the standby screen starts and
+// ends; everything that touches the panel lives in the drawing block below.
+
+#define STANDBY_WAKE_NONE        0
+#define STANDBY_WAKE_TOUCH       1
+#define STANDBY_WAKE_LINK        2       // the MiSTer answered again
+#define STANDBY_WAKE_ACTIVITY    3       // core, game or achievement change
+
+#define STANDBY_POLL_ONLINE_MS   10000UL // state check while the link is up
+#define STANDBY_POLL_OFFLINE_MS  60000UL // single-request probe while it is down
+#define STANDBY_BREATH_MS        6000UL  // one full breath of the logo
+
+static bool          standbyActive        = false;
+static bool          standbyFromImage     = false;  // image mode was up on entry
+static unsigned long standbyLastActivity  = 0;      // core/game change, touch or wake
+static bool          standbyOffline       = false;  // link currently down
+static unsigned long standbyOfflineSince  = 0;      // valid while standbyOffline
+static unsigned long standbyLastPoll      = 0;
+static bool          standbyPrevConnected = false;
+static String        standbySeenCore      = "";
+static String        standbySeenGame      = "";
+
+// Wall-clock time, or false while the clock has never been set. Reads the
+// clock directly so it never blocks waiting for a time sync.
+static bool standbyLocalTime(struct tm* out) {
+  time_t now = time(nullptr);
+  if (now < 1609459200) return false;
+  localtime_r(&now, out);
+  return true;
+}
+
+// Brightness of the breathing logo, 48-255. Never reaches zero, so the screen
+// always shows something. Quantised so the logo is repainted a fixed number
+// of times per breath rather than on every pass.
+static int standbyBreathLevel(unsigned long now) {
+  float phase = (float)(now % STANDBY_BREATH_MS) / (float)STANDBY_BREATH_MS;
+  float wave  = 0.5f - 0.5f * cosf(phase * 6.2831853f);
+  int level   = 48 + (int)(wave * 207.0f);
+  return level & ~0x03;
+}
+
+// Called on every pass while awake. Watches the state variables themselves
+// instead of hooking the poll sites, so every path that updates them is
+// covered, whichever screen is up.
+static void standbyObserve(bool touched) {
+  unsigned long now = millis();
+  bool stateChanged = connected && (currentCore != standbySeenCore ||
+                                    currentGame != standbySeenGame);
+  if (touched || stateChanged || raPopupUntil != 0) {
+    standbyLastActivity = now;
+  }
+  standbySeenCore = currentCore;
+  standbySeenGame = currentGame;
+
+  if (connected) {
+    standbyOffline = false;
+  } else if (!standbyOffline) {
+    standbyOffline      = true;
+    standbyOfflineSince = now;
+  }
+}
+
+// The offline trigger also waits out the last touch, so the screen does not
+// go dark under someone browsing the monitor pages with the MiSTer off.
+static bool standbyShouldEnter() {
+  unsigned long now = millis();
+  if (STANDBY_WHEN_OFFLINE && standbyOffline) {
+    unsigned long need = (unsigned long)STANDBY_OFFLINE_MIN * 60000UL;
+    if (now - standbyOfflineSince >= need && now - standbyLastActivity >= need) {
+      Serial.printf("[STANDBY] Enter: MiSTer offline for %d min\n", STANDBY_OFFLINE_MIN);
+      return true;
+    }
+  }
+  if (STANDBY_IDLE_MIN > 0 &&
+      now - standbyLastActivity >= (unsigned long)STANDBY_IDLE_MIN * 60000UL) {
+    Serial.printf("[STANDBY] Enter: no activity for %d min\n", STANDBY_IDLE_MIN);
+    return true;
+  }
+  return false;
+}
+
+static void standbyEnter() {
+  standbyActive        = true;
+  standbyFromImage     = showingCoreImage;
+  standbyPrevConnected = connected;
+  standbySeenCore      = currentCore;
+  standbySeenGame      = currentGame;
+  standbyLastPoll      = millis();
+}
+
+// Standby runs its own state check: the regular ones sit further down the
+// loop, past the early return. With the link down it is one request a minute,
+// because every request against a powered-off host blocks until it times out
+// and touch is not read meanwhile. Re-discovery keeps running on top of this.
+static void standbyPoll() {
+  unsigned long interval = connected ? STANDBY_POLL_ONLINE_MS : STANDBY_POLL_OFFLINE_MS;
+  if (millis() - standbyLastPoll < interval) return;
+  if (connected) {
+    if (!getStateSnapshot()) {
+      getCurrentCore();
+      getCurrentGame();
+    }
+  } else {
+    getCurrentCore();
+  }
+  standbyLastPoll = millis();
+}
+
+static int standbyWakeReason(bool touched) {
+  if (touched) return STANDBY_WAKE_TOUCH;
+  bool linkRestored    = connected && !standbyPrevConnected;
+  standbyPrevConnected = connected;
+  if (linkRestored) return STANDBY_WAKE_LINK;
+  // Core and game fall back to cached values while the link is down, so a
+  // difference only counts as activity when it comes from a live answer.
+  if (connected && (currentCore != standbySeenCore || currentGame != standbySeenGame ||
+                    raPopupUntil != 0)) {
+    return STANDBY_WAKE_ACTIVITY;
+  }
+  return STANDBY_WAKE_NONE;
+}
+
+// Leaving restamps every idle timer, so nothing that was counting down
+// before standby fires on the first pass after it, and a touch wake with the
+// MiSTer still off earns a full offline period before the screen dims again.
+static void standbyLeave(int reason) {
+  Serial.printf("[STANDBY] Leave: %s\n",
+                reason == STANDBY_WAKE_TOUCH ? "touch" :
+                reason == STANDBY_WAKE_LINK  ? "MiSTer is back" : "activity");
+  if (reason == STANDBY_WAKE_LINK && !getStateSnapshot()) {
+    getCurrentCore();
+    getCurrentGame();
+  }
+  unsigned long now = millis();
+  standbyActive        = false;
+  standbyLastActivity  = now;
+  standbyOfflineSince  = now;
+  standbySeenCore      = currentCore;
+  standbySeenGame      = currentGame;
+  lastButtonPress      = now;
+  coreImageStartTime   = now;
+  lastCoreCheck        = now;
+  g_imageFooterShownAt = now;
+  // Link up: refresh the monitor pages at once. Link down: hold the full
+  // refresh back, it would block the first minute after the wake.
+  lastUpdate           = connected ? 0 : now;
+}
+
+// ========== STANDBY: DRAWING ==========
+#define STANDBY_LOGO_PATH      "/cores/logo_standby.jpg"   // colour logo on black
+#define STANDBY_LOGO_FALLBACK  "/cores/logo_mister.jpg"    // cards without it
+#define STANDBY_LOGO_MAX_W     400
+#define STANDBY_LOGO_MAX_H     200
+#define STANDBY_TIME_GAP       30      // logo bottom edge to the time line
+#define STANDBY_DOT_R          8
+#define STANDBY_DOT_MARGIN     40      // dot centre to the right and bottom edges
+
+// The logo is decoded once into RAM when standby starts and released when it
+// ends. Breathing then rescales those pixels; the card is not read again.
+static uint16_t* standbyLogoPixels  = nullptr;   // byte-swapped RGB565, as decoded
+static int       standbyLogoW       = 0;
+static int       standbyLogoH       = 0;
+static int       standbyDrawnLevel  = -1;
+static int       standbyDrawnMinute = -1;
+static int       standbyDrawnLink   = -1;        // -1 = dot not painted yet
+
+static int standbyLogoCapture(JPEGDRAW *pDraw) {
+  for (int row = 0; row < pDraw->iHeight; row++) {
+    int y = pDraw->y + row;
+    if (y >= standbyLogoH) break;
+    int w = pDraw->iWidth;
+    if (pDraw->x + w > standbyLogoW) w = standbyLogoW - pDraw->x;
+    if (w <= 0) break;
+    memcpy(&standbyLogoPixels[y * standbyLogoW + pDraw->x],
+           &pDraw->pPixels[row * pDraw->iWidth], (size_t)w * 2);
+  }
+  return 1;
+}
+
+static bool standbyLoadLogoFile(const char* path) {
+  if (!sdCardAvailable || !SD.exists(path)) return false;
+  File f = SD.open(path);
+  if (!f) return false;
+  size_t fileSize = f.size();
+  if (fileSize < 4 || fileSize > 100000) { f.close(); return false; }
+  uint8_t* fileBuf = psramMalloc(fileSize);
+  if (!fileBuf) { f.close(); return false; }
+  f.read(fileBuf, fileSize);
+  f.close();
+
+  bool ok = false;
+  if (fileBuf[0] == 0xFF && fileBuf[1] == 0xD8 &&
+      jpeg.openRAM(fileBuf, fileSize, standbyLogoCapture)) {
+    standbyLogoW = jpeg.getWidth();
+    standbyLogoH = jpeg.getHeight();
+    if (standbyLogoW > 0 && standbyLogoW <= STANDBY_LOGO_MAX_W &&
+        standbyLogoH > 0 && standbyLogoH <= STANDBY_LOGO_MAX_H) {
+      size_t bytes = (size_t)standbyLogoW * standbyLogoH * 2;
+      standbyLogoPixels = (uint16_t*)psramMalloc(bytes);
+      if (standbyLogoPixels) {
+        memset(standbyLogoPixels, 0, bytes);
+        jpeg.setPixelType(RGB565_BIG_ENDIAN);
+        ok = jpeg.decode(0, 0, 0);
+      }
+    }
+    jpeg.close();
+  }
+  free(fileBuf);
+  if (!ok && standbyLogoPixels) {
+    free(standbyLogoPixels);
+    standbyLogoPixels = nullptr;
+  }
+  return ok;
+}
+
+static void standbyLoadLogo() {
+  if (standbyLogoPixels) return;
+  if (standbyLoadLogoFile(STANDBY_LOGO_PATH)) return;
+  if (standbyLoadLogoFile(STANDBY_LOGO_FALLBACK)) return;
+  Serial.println("[STANDBY] No logo on the card - using text");
+}
+
+static void standbyFreeLogo() {
+  if (standbyLogoPixels) free(standbyLogoPixels);
+  standbyLogoPixels = nullptr;
+}
+
+// Height of what drawStandbyLogo() paints, to place things under it.
+static int standbyLogoHeight() {
+  return standbyLogoPixels ? standbyLogoH : 48;
+}
+
+// Logo centred on the panel at the given brightness (0-255), shared by every
+// standby screen. Channels are scaled with an ordered dither: 5 and 6 bits
+// per channel band visibly on a gradient once dimmed, and a fixed dither
+// pattern hides it without shimmering between repaints.
+static void drawStandbyLogo(int level) {
+  static const uint8_t bayer[4][4] = {
+    {  0,  8,  2, 10 }, { 12,  4, 14,  6 }, {  3, 11,  1,  9 }, { 15,  7, 13,  5 } };
+  static uint16_t rowBuf[STANDBY_LOGO_MAX_W];
+
+  if (!standbyLogoPixels) {
+    const char* label = "MiSTer FPGA";
+    int c = level >> 3;
+    M5.Display.setTextSize(6);                     // 36 px per character
+    M5.Display.setTextColor(M5.Display.color565(c << 3, c << 3, c << 3), THEME_BLACK);
+    M5.Display.setCursor((TARGET_WIDTH - (int)strlen(label) * 36) / 2,
+                         (TARGET_HEIGHT - 48) / 2);
+    M5.Display.print(label);
+    return;
+  }
+
+  int x0   = (TARGET_WIDTH  - standbyLogoW) / 2;
+  int y0   = (TARGET_HEIGHT - standbyLogoH) / 2;
+  int gain = level + 1;                            // 256 = pixels unchanged
+  M5.Display.startWrite();
+  for (int y = 0; y < standbyLogoH; y++) {
+    const uint16_t* src = &standbyLogoPixels[y * standbyLogoW];
+    for (int x = 0; x < standbyLogoW; x++) {
+      uint16_t p = (uint16_t)((src[x] >> 8) | (src[x] << 8));
+      int t = bayer[y & 3][x & 3] * 16 + 8;
+      int r = (((p >> 11) & 0x1F) * gain + t) >> 8;
+      int g = (((p >> 5)  & 0x3F) * gain + t) >> 8;
+      int b = (( p        & 0x1F) * gain + t) >> 8;
+      p = (uint16_t)((r << 11) | (g << 5) | b);
+      rowBuf[x] = (uint16_t)((p >> 8) | (p << 8));
+    }
+    M5.Display.pushImage(x0, y0 + y, standbyLogoW, 1, rowBuf);
+  }
+  M5.Display.endWrite();
+}
+
+// Link state as a steady dot in the bottom right corner, shared by every
+// standby screen: cyan while the MiSTer answers, orange while it does not.
+// Repainted only when the state changes.
+static void drawStandbyLinkDot() {
+  int link = connected ? 1 : 0;
+  if (link == standbyDrawnLink) return;
+  M5.Display.fillCircle(TARGET_WIDTH - STANDBY_DOT_MARGIN, TARGET_HEIGHT - STANDBY_DOT_MARGIN,
+                        STANDBY_DOT_R, connected ? THEME_CYAN : THEME_ORANGE);
+  standbyDrawnLink = link;
+}
+
+// Black screen with the logo breathing at its centre and the link dot in the
+// corner. The time line appears on its own once the clock has been set.
+static void drawStandbyMinimal(bool fullRedraw) {
+  if (fullRedraw) {
+    M5.Display.fillScreen(THEME_BLACK);
+    standbyLoadLogo();
+    standbyDrawnLevel  = -1;
+    standbyDrawnMinute = -1;
+    standbyDrawnLink   = -1;
+  }
+  drawStandbyLinkDot();
+
+  struct tm tmNow;
+  if (standbyLocalTime(&tmNow)) {
+    int minute = tmNow.tm_hour * 60 + tmNow.tm_min;
+    if (minute != standbyDrawnMinute) {
+      char buf[6];
+      snprintf(buf, sizeof(buf), "%02d:%02d", tmNow.tm_hour, tmNow.tm_min);
+      M5.Display.setTextSize(3);                   // 18 px per character
+      M5.Display.setTextColor(0x7BEF, THEME_BLACK);
+      M5.Display.setCursor(TARGET_WIDTH / 2 - 45,
+                           (TARGET_HEIGHT + standbyLogoHeight()) / 2 + STANDBY_TIME_GAP);
+      M5.Display.print(buf);
+      standbyDrawnMinute = minute;
+    }
+  }
+
+  int level = standbyBreathLevel(millis());
+  if (level == standbyDrawnLevel) return;
+  drawStandbyLogo(level);
+  standbyDrawnLevel = level;
+}
+
+static void drawStandbyScreen(bool fullRedraw) {
+  drawStandbyMinimal(fullRedraw);
+}
+
+// Put back whatever was on screen before standby, from the current state.
+static void standbyRestoreScreen() {
+  standbyFreeLogo();
+  if (standbyFromImage && sdCardAvailable) {
+    if (currentGame.length() > 0 && !currentCore.equalsIgnoreCase("MENU")) {
+      showGameSlide();
+    } else {
+      showCoreImageScreenWithAutoDownload(currentCore);
+    }
+    showingCoreImage   = true;
+    coreImageStartTime = millis();
+    lastCoreCheck      = millis();
+  } else {
+    showingCoreImage = false;
+    backgroundLoaded = false;
+    needsRedraw      = true;
+  }
+}
+
 void loop() {
   M5.update();
   screenshotServer.handleClient();  // Non-blocking screenshot server poll
@@ -3326,6 +3685,36 @@ void loop() {
     }
   }
   // --------------------------------------------------------------------------
+  // --- Standby ---------------------------------------------------------------
+  // Sits below the re-discovery block, which keeps probing for the MiSTer
+  // while the link is down, and above everything that draws. The wake tap is
+  // spent by returning: the touch edge is gone by the next pass.
+  {
+    bool touched = M5.Touch.getDetail().wasPressed();
+    if (standbyActive) {
+      standbyPoll();
+      if (connected) pollRA();
+      int wake = standbyWakeReason(touched);
+      if (wake == STANDBY_WAKE_NONE) {
+        wasConnected = connected;
+        drawStandbyScreen(false);
+        delay(20);
+        return;
+      }
+      standbyLeave(wake);
+      M5.Display.setBrightness(DISPLAY_BRIGHTNESS_NORMAL);
+      standbyRestoreScreen();
+      if (wake == STANDBY_WAKE_TOUCH) return;
+    } else {
+      standbyObserve(touched);
+      if (standbyShouldEnter()) {
+        standbyEnter();
+        M5.Display.setBrightness(STANDBY_BRIGHTNESS);
+        drawStandbyScreen(true);
+        return;
+      }
+    }
+  }
   // Reconnect banner: fire on any OFFLINE -> ONLINE transition, no matter which
   // path restored the link (re-discovery, screensaver refresh, normal polling).
   if (connected && !wasConnected) {
