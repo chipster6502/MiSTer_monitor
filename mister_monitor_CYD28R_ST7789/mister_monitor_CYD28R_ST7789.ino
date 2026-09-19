@@ -117,6 +117,18 @@ int32_t IMAGE_UPSCALE_MAX_Q16           = 2 << 16;  // [images] image_upscale_ma
 
 bool KIOSK_MODE                         = false;  // [ui] kiosk_mode
 int  KIOSK_HIDE_DELAY_MS                = 5000;   // [ui] kiosk_hide_delay_ms
+// [ui] standby - dimmed idle screen shown while the MiSTer is off or idle.
+#define DISPLAY_BRIGHTNESS_NORMAL   128     // backlight level outside standby
+bool STANDBY_WHEN_OFFLINE         = true;   // [ui] standby_when_offline
+int  STANDBY_OFFLINE_MIN          = 3;      // [ui] standby_offline_min
+int  STANDBY_IDLE_MIN             = 0;      // [ui] standby_idle_min (0 = never)
+int  STANDBY_BRIGHTNESS           = 10;     // [ui] standby_brightness (0-255)
+int  STANDBY_DIM_PCT              = 100;    // [ui] standby_dim (percent of full colour)
+bool   STANDBY_SCREEN_CLOCK       = true;   // [ui] standby_screen (clock | minimal)
+bool   CLOCK_24H                  = true;   // [ui] clock_24h
+String TIMEZONE_STR               = "";     // [ui] timezone; empty = no clock at all
+String NTP_SERVER_STR             = "pool.ntp.org";  // [ui] ntp_server
+static void standbyStartClock();            // defined with the standby block
 
 // [images] image_mode - what the fullscreen image mode shows for a game.
 enum ImageMode : uint8_t { IMAGE_MODE_ROTATE, IMAGE_MODE_GAME, IMAGE_MODE_SYSTEM };
@@ -2725,7 +2737,7 @@ void setup() {
   Serial.println("Speaker initialized");*/
   
   display.setRotation(1);
-  display.setBrightness(128);
+  display.setBrightness(DISPLAY_BRIGHTNESS_NORMAL);
   display.setColorDepth(16);
 
   // CYD: confirm panel resolution after init so we can spot rotation/driver issues.
@@ -2824,6 +2836,24 @@ void setup() {
   ARTWORK_MAX_HEIGHT               = KIOSK_MODE ? TARGET_HEIGHT : IMAGE_AREA_HEIGHT;
   // Kiosk mode starts with the artwork uncovered; a tap brings the footer up.
   g_imageFooterVisible             = !KIOSK_MODE;
+  STANDBY_WHEN_OFFLINE        = appConfig.standbyWhenOffline;
+  STANDBY_OFFLINE_MIN         = constrain(appConfig.standbyOfflineMin, 1, 1440);
+  STANDBY_IDLE_MIN            = constrain(appConfig.standbyIdleMin, 0, 1440);
+  STANDBY_BRIGHTNESS          = constrain(appConfig.standbyBrightness, 0, 255);
+  STANDBY_DIM_PCT             = constrain(appConfig.standbyDim, 5, 100);
+  {
+    String screen = appConfig.standbyScreen;
+    screen.toLowerCase();
+    STANDBY_SCREEN_CLOCK = (screen != "minimal");
+    if (screen != "minimal" && screen != "clock")
+      Serial.printf("[CONFIG] Unknown standby_screen '%s' - using clock\n", screen.c_str());
+  }
+  CLOCK_24H                   = appConfig.clock24h;
+  TIMEZONE_STR                = appConfig.timezone;
+  TIMEZONE_STR.trim();
+  NTP_SERVER_STR              = appConfig.ntpServer;
+  NTP_SERVER_STR.trim();
+  if (NTP_SERVER_STR.length() == 0) NTP_SERVER_STR = "pool.ntp.org";
   Serial.printf("[CONFIG] Image mode       : %s\n",
                 IMAGE_MODE == IMAGE_MODE_GAME   ? "game"   :
                 IMAGE_MODE == IMAGE_MODE_SYSTEM ? "system" : "rotate");
@@ -2831,6 +2861,11 @@ void setup() {
                 IMAGE_UPSCALE ? "on" : "off", IMAGE_UPSCALE_MAX_Q16 / 65536.0f);
   Serial.printf("[CONFIG] Kiosk mode       : %s (%d ms)\n", KIOSK_MODE ? "on" : "off", KIOSK_HIDE_DELAY_MS);
   Serial.printf("[CONFIG] Artwork height   : %d px\n", ARTWORK_MAX_HEIGHT);
+  Serial.printf("[CONFIG] Standby          : offline %s (%d min), idle %d min, brightness %d, dim %d%%\n",
+                STANDBY_WHEN_OFFLINE ? "on" : "off", STANDBY_OFFLINE_MIN,
+                STANDBY_IDLE_MIN, STANDBY_BRIGHTNESS, STANDBY_DIM_PCT);
+  Serial.printf("[CONFIG] Standby screen   : %s, %s-hour\n",
+                STANDBY_SCREEN_CLOCK ? "clock" : "minimal", CLOCK_24H ? "24" : "12");
   {
     String mode = appConfig.imageMode;
     mode.toLowerCase();
@@ -2879,6 +2914,7 @@ void setup() {
   
   // FIRST: Connect WiFi (highest priority)
   connectWithAnimation();
+  standbyStartClock();   // time sync runs in the background from here on
 
   // Get current core and game BEFORE showing interface
   if (!getStateSnapshot()) {
@@ -2921,6 +2957,669 @@ void setup() {
   }
 }
 
+// ========== STANDBY: STATE LOGIC ==========
+// Nothing in this block draws. It decides when the standby screen starts and
+// ends; everything that touches the panel lives in the drawing block below.
+
+#define STANDBY_WAKE_NONE        0
+#define STANDBY_WAKE_TOUCH       1
+#define STANDBY_WAKE_LINK        2       // the MiSTer answered again
+#define STANDBY_WAKE_ACTIVITY    3       // core, game or achievement change
+
+#define STANDBY_POLL_ONLINE_MS   10000UL // state check while the link is up
+#define STANDBY_POLL_OFFLINE_MS  60000UL // single-request probe while it is down
+#define STANDBY_BREATH_MS        6000UL  // one full breath of the logo
+#define STANDBY_STATUS_PULSE_MS  3000UL  // one full pulse of the clock screen status dot
+
+static bool          standbyActive        = false;
+static bool          standbyFromImage     = false;  // image mode was up on entry
+static unsigned long standbyLastActivity  = 0;      // core/game change, touch or wake
+static bool          standbyOffline       = false;  // link currently down
+static unsigned long standbyOfflineSince  = 0;      // valid while standbyOffline
+static unsigned long standbyLastPoll      = 0;
+static bool          standbyPrevConnected = false;
+static String        standbySeenCore      = "";
+static String        standbySeenGame      = "";
+
+// Friendly timezone names, one word each. Anything not listed here is taken
+// as a POSIX TZ string and passed through untouched. POSIX offsets are
+// inverted with respect to UTC: a zone one hour ahead of UTC is written "-1".
+struct StandbyTzName { const char* name; const char* posix; };
+static const StandbyTzName STANDBY_TZ_NAMES[] = {
+  { "uk",          "GMT0BST,M3.5.0/1,M10.5.0"     }, // United Kingdom, Ireland
+  { "portugal",    "WET0WEST,M3.5.0/1,M10.5.0"    }, // Portugal
+  { "iceland",     "GMT0"                         }, // Iceland, Ghana, Senegal, Mali
+  { "spain",       "CET-1CEST,M3.5.0,M10.5.0/3"   }, // Spain, France, Germany, Italy, Netherlands, Poland, Sweden
+  { "nigeria",     "WAT-1"                        }, // Nigeria, Algeria, Tunisia, Angola, Cameroon
+  { "greece",      "EET-2EEST,M3.5.0/3,M10.5.0/4" }, // Greece, Finland, Romania, Bulgaria, Ukraine, Estonia
+  { "southafrica", "SAST-2"                       }, // South Africa, Zimbabwe, Zambia, Botswana
+  { "turkey",      "<+03>-3"                      }, // Turkey, Saudi Arabia, Kenya, Russia (Moscow)
+  { "dubai",       "<+04>-4"                      }, // UAE, Oman, Georgia, Armenia, Azerbaijan
+  { "india",       "IST-5:30"                     }, // India, Sri Lanka
+  { "thailand",    "<+07>-7"                      }, // Thailand, Vietnam, Cambodia, Indonesia (Jakarta)
+  { "china",       "CST-8"                        }, // China, Taiwan, Hong Kong, Singapore, Malaysia, Philippines
+  { "japan",       "JST-9"                        }, // Japan, South Korea
+  { "sydney",      "AEST-10AEDT,M10.1.0,M4.1.0/3" }, // Australia (Sydney, Melbourne, Hobart)
+  { "newzealand",  "NZST-12NZDT,M9.5.0,M4.1.0/3"  }, // New Zealand
+  { "argentina",   "<-03>3"                       }, // Argentina, Uruguay, Brazil (Sao Paulo, Rio)
+  { "venezuela",   "<-04>4"                       }, // Venezuela, Bolivia, Paraguay, Dominican Republic
+  { "colombia",    "<-05>5"                       }, // Colombia, Peru, Ecuador
+  { "useastern",   "EST5EDT,M3.2.0,M11.1.0"       }, // USA (New York, Miami), Canada (Toronto)
+  { "mexico",      "CST6"                         }, // Mexico, Guatemala, Costa Rica, El Salvador
+  { "uscentral",   "CST6CDT,M3.2.0,M11.1.0"       }, // USA (Chicago, Dallas), Canada (Winnipeg)
+  { "usmountain",  "MST7MDT,M3.2.0,M11.1.0"       }, // USA (Denver), Canada (Edmonton)
+  { "uspacific",   "PST8PDT,M3.2.0,M11.1.0"       }, // USA (Los Angeles, Seattle), Canada (Vancouver)
+};
+
+static bool standbyClockEnabled = false;   // a timezone is set and sync was started
+
+// Starts the background time sync. Without a timezone there is no clock at
+// all: showing UTC to someone who never chose it would be showing the wrong
+// time. The server name must outlive the call, the sync client keeps the
+// pointer, which is why it is read from a global.
+static void standbyStartClock() {
+  if (TIMEZONE_STR.length() == 0) {
+    Serial.println("[CLOCK] No timezone set - clock disabled");
+    return;
+  }
+  String wanted = TIMEZONE_STR;
+  wanted.toLowerCase();
+  const char* posix = TIMEZONE_STR.c_str();
+  for (size_t i = 0; i < sizeof(STANDBY_TZ_NAMES) / sizeof(STANDBY_TZ_NAMES[0]); i++) {
+    if (wanted == STANDBY_TZ_NAMES[i].name) {
+      posix = STANDBY_TZ_NAMES[i].posix;
+      break;
+    }
+  }
+  Serial.printf("[CLOCK] Timezone '%s' -> %s, server %s\n",
+                TIMEZONE_STR.c_str(), posix, NTP_SERVER_STR.c_str());
+  configTzTime(posix, NTP_SERVER_STR.c_str());
+  standbyClockEnabled = true;
+}
+
+// Wall-clock time, or false while the clock is disabled or was never set.
+// Reads the clock directly so it never blocks waiting for a time sync.
+static bool standbyLocalTime(struct tm* out) {
+  static bool announced = false;
+  if (!standbyClockEnabled) return false;
+  time_t now = time(nullptr);
+  if (now < 1609459200) return false;
+  localtime_r(&now, out);
+  if (!announced) {
+    announced = true;
+    Serial.printf("[CLOCK] Time set: %04d-%02d-%02d %02d:%02d\n", out->tm_year + 1900,
+                  out->tm_mon + 1, out->tm_mday, out->tm_hour, out->tm_min);
+  }
+  return true;
+}
+
+// Hour as shown on screen: 0-23, or 1-12 with clock_24h off.
+static int standbyDisplayHour(const struct tm* t) {
+  if (CLOCK_24H) return t->tm_hour;
+  int h = t->tm_hour % 12;
+  return h == 0 ? 12 : h;
+}
+
+// Brightness of a breathing element, 48-255, for a breath of periodMs. Never
+// reaches zero, so the element never vanishes. Quantised so it is repainted a
+// fixed number of times per breath rather than on every pass.
+static int standbyBreathLevel(unsigned long now, unsigned long periodMs) {
+  float phase = (float)(now % periodMs) / (float)periodMs;
+  float wave  = 0.5f - 0.5f * cosf(phase * 6.2831853f);
+  int level   = 48 + (int)(wave * 207.0f);
+  return level & ~0x03;
+}
+
+// Software dimming. The backlight of some units only switches on and off, so
+// standby also darkens what it draws. Both helpers are plain arithmetic on
+// standby_dim: a brightness level (0-255) and an RGB565 colour.
+static int standbyDimLevel(int level) {
+  int dimmed = level * STANDBY_DIM_PCT / 100;
+  return dimmed < 16 ? 16 : dimmed;          // never fade out completely
+}
+
+static uint16_t standbyDimColor(uint16_t color) {
+  if (STANDBY_DIM_PCT >= 100) return color;
+  // Rounded, not truncated: very dark colours keep their hue a little longer.
+  int r = (((color >> 11) & 0x1F) * STANDBY_DIM_PCT + 50) / 100;
+  int g = (((color >> 5)  & 0x3F) * STANDBY_DIM_PCT + 50) / 100;
+  int b = (( color        & 0x1F) * STANDBY_DIM_PCT + 50) / 100;
+  return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+// Called on every pass while awake. Watches the state variables themselves
+// instead of hooking the poll sites, so every path that updates them is
+// covered, whichever screen is up.
+static void standbyObserve(bool touched) {
+  unsigned long now = millis();
+  bool stateChanged = connected && (currentCore != standbySeenCore ||
+                                    currentGame != standbySeenGame);
+  if (touched || stateChanged || raPopupUntil != 0) {
+    standbyLastActivity = now;
+  }
+  standbySeenCore = currentCore;
+  standbySeenGame = currentGame;
+
+  if (connected) {
+    standbyOffline = false;
+  } else if (!standbyOffline) {
+    standbyOffline      = true;
+    standbyOfflineSince = now;
+  }
+}
+
+// The offline trigger also waits out the last touch, so the screen does not
+// go dark under someone browsing the monitor pages with the MiSTer off.
+static bool standbyShouldEnter() {
+  unsigned long now = millis();
+  if (STANDBY_WHEN_OFFLINE && standbyOffline) {
+    unsigned long need = (unsigned long)STANDBY_OFFLINE_MIN * 60000UL;
+    if (now - standbyOfflineSince >= need && now - standbyLastActivity >= need) {
+      Serial.printf("[STANDBY] Enter: MiSTer offline for %d min\n", STANDBY_OFFLINE_MIN);
+      return true;
+    }
+  }
+  if (STANDBY_IDLE_MIN > 0 &&
+      now - standbyLastActivity >= (unsigned long)STANDBY_IDLE_MIN * 60000UL) {
+    Serial.printf("[STANDBY] Enter: no activity for %d min\n", STANDBY_IDLE_MIN);
+    return true;
+  }
+  return false;
+}
+
+static void standbyEnter() {
+  standbyActive        = true;
+  standbyFromImage     = showingCoreImage;
+  standbyPrevConnected = connected;
+  standbySeenCore      = currentCore;
+  standbySeenGame      = currentGame;
+  standbyLastPoll      = millis();
+}
+
+// Standby runs its own state check: the regular ones sit further down the
+// loop, past the early return. With the link down it is one request a minute,
+// because every request against a powered-off host blocks until it times out
+// and touch is not read meanwhile. Re-discovery keeps running on top of this.
+static void standbyPoll() {
+  unsigned long interval = connected ? STANDBY_POLL_ONLINE_MS : STANDBY_POLL_OFFLINE_MS;
+  if (millis() - standbyLastPoll < interval) return;
+  if (connected) {
+    if (!getStateSnapshot()) {
+      getCurrentCore();
+      getCurrentGame();
+    }
+  } else {
+    getCurrentCore();
+  }
+  standbyLastPoll = millis();
+}
+
+static int standbyWakeReason(bool touched) {
+  if (touched) return STANDBY_WAKE_TOUCH;
+  bool linkRestored    = connected && !standbyPrevConnected;
+  standbyPrevConnected = connected;
+  if (linkRestored) return STANDBY_WAKE_LINK;
+  // Core and game fall back to cached values while the link is down, so a
+  // difference only counts as activity when it comes from a live answer.
+  if (connected && (currentCore != standbySeenCore || currentGame != standbySeenGame ||
+                    raPopupUntil != 0)) {
+    return STANDBY_WAKE_ACTIVITY;
+  }
+  return STANDBY_WAKE_NONE;
+}
+
+// Leaving restamps every idle timer, so nothing that was counting down
+// before standby fires on the first pass after it, and a touch wake with the
+// MiSTer still off earns a full offline period before the screen dims again.
+static void standbyLeave(int reason) {
+  Serial.printf("[STANDBY] Leave: %s\n",
+                reason == STANDBY_WAKE_TOUCH ? "touch" :
+                reason == STANDBY_WAKE_LINK  ? "MiSTer is back" : "activity");
+  if (reason == STANDBY_WAKE_LINK && !getStateSnapshot()) {
+    getCurrentCore();
+    getCurrentGame();
+  }
+  unsigned long now = millis();
+  standbyActive        = false;
+  standbyLastActivity  = now;
+  standbyOfflineSince  = now;
+  standbySeenCore      = currentCore;
+  standbySeenGame      = currentGame;
+  lastButtonPress      = now;
+  coreImageStartTime   = now;
+  lastCoreCheck        = now;
+  g_imageFooterShownAt = now;
+  // Link up: refresh the monitor pages at once. Link down: hold the full
+  // refresh back, it would block the first minute after the wake.
+  lastUpdate           = connected ? 0 : now;
+}
+
+// ========== STANDBY: DRAWING ==========
+// Layout for a 320x240 panel. The logo is decoded straight to the panel and
+// stays still; on the minimal screen it is the backlight that breathes.
+#define STANDBY_LOGO_RAW_PATH    "/cores/logo_standby.565"        // minimal screen, preferred
+#define STANDBY_LOGO_PATH        "/cores/logo_standby.jpg"        // minimal screen, fallback
+#define STANDBY_CLOCK_LOGO_PATH  "/cores/logo_standby_clock.jpg"  // clock screen; optional
+#define STANDBY_LOGO_MAX_BYTES   60000
+#define STANDBY_DOT_R            4
+#define STANDBY_DOT_MARGIN       12      // dot centre to the right and bottom edges
+
+#define STANDBY_CLOCK_LOGO_Y     -1       // negative: no logo on the clock screen
+#define STANDBY_DIGIT_Y          30
+#define STANDBY_DIGIT_W          42
+#define STANDBY_DIGIT_H          76
+#define STANDBY_DIGIT_T          9       // segment thickness
+#define STANDBY_DIGIT_GAP        10       // between digits, and around the colon
+#define STANDBY_COLON_W          14
+#define STANDBY_SEG_JOIN         1       // dark gap where two segments meet
+#define STANDBY_DATE_Y           122
+#define STANDBY_DATE_FONT        fonts::DejaVu18
+#define STANDBY_DATE_BAND_H      24
+#define STANDBY_RULE_Y           162
+#define STANDBY_STATUS_TOP       176     // band shared by the status and game lines
+#define STANDBY_STATUS_BAND_H    44
+#define STANDBY_STATUS_Y         182     // status line when the game line is under it
+#define STANDBY_STATUS_Y_ALONE   182     // status line with no game line under it
+#define STANDBY_GAME_Y           204
+#define STANDBY_TEXT_SIZE        1       // default font: 6x8 px per character, times this
+#define STANDBY_LINE_MARGIN      22      // text window of the two bottom lines, each side
+#define STANDBY_STATUS_DOT_R     3
+#define STANDBY_SEG_LIT          THEME_CYAN
+#define STANDBY_SEG_GHOST        0x08E3  // unlit segments: a faint tint of the lit colour
+
+// ---- Backlight --------------------------------------------------------------
+// The display library drives the backlight with 8-bit brightness, too coarse
+// for a slow breath at low levels: the steps show. Standby takes the pin over
+// at 13 bits and hands it back on the way out. ledcAttach() refuses a pin
+// that is still attached, so the pin is released first and every step checked.
+#define STANDBY_BL_PIN           21
+#define STANDBY_BL_FREQ          5000
+#define STANDBY_BL_BITS          13
+
+static bool     standbyBlFine   = false;
+static uint32_t standbyBlDuty   = 0xFFFFFFFF;
+
+static void standbyBacklightBegin() {
+  ledcDetach(STANDBY_BL_PIN);
+  standbyBlFine = ledcAttach(STANDBY_BL_PIN, STANDBY_BL_FREQ, STANDBY_BL_BITS);
+  standbyBlDuty = 0xFFFFFFFF;
+  if (!standbyBlFine) {
+    Serial.println("[STANDBY] Fine backlight control unavailable - using 8-bit steps");
+    display.light()->init(STANDBY_BRIGHTNESS);
+  }
+}
+
+static void standbyBacklightEnd() {
+  if (standbyBlFine) ledcDetach(STANDBY_BL_PIN);
+  standbyBlFine = false;
+  display.light()->init(DISPLAY_BRIGHTNESS_NORMAL);
+}
+
+// level is 0-255 of standby_brightness. Squared, so the breath looks even to
+// the eye instead of lingering at the bright end.
+static void standbyBacklightWrite(int level) {
+  if (!standbyBlFine) {
+    uint32_t b = (uint32_t)STANDBY_BRIGHTNESS * level * level / (255UL * 255UL);
+    if (b != standbyBlDuty) { display.setBrightness((uint8_t)b); standbyBlDuty = b; }
+    return;
+  }
+  uint64_t full = (1UL << STANDBY_BL_BITS) - 1;
+  uint32_t duty = (uint32_t)((uint64_t)STANDBY_BRIGHTNESS * level * level * full /
+                             (255ULL * 255ULL * 255ULL));
+  if (duty == 0 && STANDBY_BRIGHTNESS > 0 && level > 0) duty = 1;
+  if (duty != standbyBlDuty) { ledcWrite(STANDBY_BL_PIN, duty); standbyBlDuty = duty; }
+}
+
+static void standbyBacklightBreathe() {
+  float phase = (float)(millis() % STANDBY_BREATH_MS) / (float)STANDBY_BREATH_MS;
+  float wave  = 0.5f - 0.5f * cosf(phase * 6.2831853f);
+  standbyBacklightWrite(60 + (int)(wave * 195.0f));
+}
+
+// ---- Logo ---------------------------------------------------------------------
+static int  standbyDrawnLink   = -1;        // -1 = dot not painted yet
+static int  standbyDrawnMask[4] = { -1, -1, -1, -1 };
+static int  standbyDrawnDay    = -1;
+static int  standbyDrawnAmPm   = -1;
+static int  standbyStatusDotX  = 0;         // where the status line put its dot
+static int  standbyStatusDotY  = 0;
+static int  standbyDrawnPulse  = -1;
+
+// The two lines under the rule scroll when they do not fit, with the same
+// helper and the same [ui] scroll timings as the rest of the interface.
+static ScrollTextState standbyStatusScroll = {"", 0, 0, 0, 0, false, false, false};
+static ScrollTextState standbyGameScroll   = {"", 0, 0, 0, 0, false, false, false};
+static String   standbyDrawnStatus = "";
+static String   standbyDrawnGame   = "";
+static int      standbyStatusX     = 0;
+static int      standbyGameX       = 0;
+static int      standbyStatusLineY = 0;
+static uint16_t standbyStatusColor = 0;
+static bool     standbyShowGame    = false;
+
+// Anything close to black is forced to black, which removes the faint
+// speckles JPEG leaves around sharp edges (these panels lift the dark end
+// enough to show them), and the rest follows standby_dim. Pixels are
+// byte-swapped RGB565, as both logo paths hand them over.
+static void standbyLogoPixels(uint16_t* px, int n) {
+  for (int i = 0; i < n; i++) {
+    uint16_t p = (uint16_t)((px[i] >> 8) | (px[i] << 8));
+    if (((p >> 11) & 0x1F) < 5 && ((p >> 5) & 0x3F) < 10 && (p & 0x1F) < 5) p = 0;
+    else p = standbyDimColor(p);
+    px[i] = (uint16_t)((p >> 8) | (p << 8));
+  }
+}
+
+static int standbyLogoBlock(JPEGDRAW *pDraw) {
+  standbyLogoPixels(pDraw->pPixels, pDraw->iWidth * pDraw->iHeight);
+  display.pushImage(pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels);
+  return 1;
+}
+
+// Raw logo: a 4-byte header (width, height, little-endian) followed by
+// RGB565 pixels, high byte first, row by row. It is copied to the panel one
+// row at a time, so it needs no memory and reaches the screen exactly as it
+// was drawn. The JPEG decoder rounds its arithmetic for speed, which on a
+// 16-bit panel leaves lighter and darker blotches in flat colours.
+static bool drawStandbyLogoRaw(const char* path, int yTop) {
+  static uint16_t row[TARGET_WIDTH];
+  if (!sdCardAvailable || !SD.exists(path)) return false;
+  File f = SD.open(path);
+  if (!f) return false;
+  uint8_t head[4];
+  bool ok = (f.read(head, 4) == 4);
+  int w = head[0] | (head[1] << 8);
+  int h = head[2] | (head[3] << 8);
+  ok = ok && w > 0 && w <= TARGET_WIDTH && h > 0 && h <= TARGET_HEIGHT &&
+       f.size() == (size_t)(4 + w * h * 2);
+  if (ok) {
+    int x = (TARGET_WIDTH - w) / 2;
+    int y = (yTop < 0) ? (TARGET_HEIGHT - h) / 2 : yTop;
+    for (int r = 0; r < h && ok; r++) {
+      ok = (f.read((uint8_t*)row, w * 2) == w * 2);
+      if (!ok) break;
+      standbyLogoPixels(row, w);
+      display.pushImage(x, y + r, w, 1, row);
+    }
+  }
+  f.close();
+  return ok;
+}
+
+// Decodes a logo file to the panel, centred horizontally. yTop < 0 centres it
+// vertically too. halfScale decodes at half size, which is how one file
+// serves both screens.
+static bool drawStandbyLogoFile(const char* path, int yTop, bool halfScale) {
+  if (!sdCardAvailable || !SD.exists(path)) return false;
+  File f = SD.open(path);
+  if (!f) return false;
+  size_t fileSize = f.size();
+  if (fileSize < 4 || fileSize > STANDBY_LOGO_MAX_BYTES) { f.close(); return false; }
+  uint8_t* buf = (uint8_t*)malloc(fileSize);
+  if (!buf) { f.close(); return false; }
+  f.read(buf, fileSize);
+  f.close();
+
+  bool ok = false;
+  if (buf[0] == 0xFF && buf[1] == 0xD8 && jpeg.openRAM(buf, fileSize, standbyLogoBlock)) {
+    int w = jpeg.getWidth()  / (halfScale ? 2 : 1);
+    int h = jpeg.getHeight() / (halfScale ? 2 : 1);
+    int x = (TARGET_WIDTH - w) / 2;
+    int y = (yTop < 0) ? (TARGET_HEIGHT - h) / 2 : yTop;
+    jpeg.setPixelType(RGB565_BIG_ENDIAN);
+    ok = jpeg.decode(x, y, halfScale ? JPEG_SCALE_HALF : 0);
+    jpeg.close();
+  }
+  free(buf);
+  return ok;
+}
+
+static void drawStandbyLogoText(int yTop) {
+  const char* label = "MiSTer FPGA";
+  int size = 2;
+  display.setTextSize(size);
+  display.setTextColor(standbyDimColor(THEME_WHITE), THEME_BLACK);
+  display.setCursor((TARGET_WIDTH - (int)strlen(label) * 6 * size) / 2,
+                    yTop < 0 ? (TARGET_HEIGHT - 8 * size) / 2 : yTop);
+  display.print(label);
+}
+
+// Link state as a steady dot in the bottom right corner: cyan while the
+// MiSTer answers, orange while it does not. Repainted only on a change.
+static void drawStandbyLinkDot() {
+  int link = connected ? 1 : 0;
+  if (link == standbyDrawnLink) return;
+  display.fillCircle(TARGET_WIDTH - STANDBY_DOT_MARGIN, TARGET_HEIGHT - STANDBY_DOT_MARGIN,
+                     STANDBY_DOT_R, standbyDimColor(connected ? THEME_CYAN : THEME_ORANGE));
+  standbyDrawnLink = link;
+}
+
+// Black screen, the logo at its centre, the link dot in the corner, and the
+// backlight breathing.
+static void drawStandbyMinimal(bool fullRedraw) {
+  if (fullRedraw) {
+    display.fillScreen(THEME_BLACK);
+    if (!drawStandbyLogoRaw(STANDBY_LOGO_RAW_PATH, -1) &&
+        !drawStandbyLogoFile(STANDBY_LOGO_PATH, -1, false)) {
+      drawStandbyLogoText(-1);
+    }
+    standbyDrawnLink = -1;
+  }
+  drawStandbyLinkDot();
+  standbyBacklightBreathe();
+}
+
+// ---- Clock screen: logo, seven-segment time, date, link status lines ----
+// Segments are drawn as shapes, not taken from a font: they stay sharp at any
+// size, and lit and unlit segments cover exactly the same pixels, so a digit
+// changes without clearing anything and without flicker.
+static void drawStandbySegH(int x0, int x1, int yc, int t, uint16_t color) {
+  int h = t / 2;
+  display.fillRect(x0 + h, yc - h, (x1 - x0) - 2 * h + 1, 2 * h + 1, color);
+  display.fillTriangle(x0, yc, x0 + h, yc - h, x0 + h, yc + h, color);
+  display.fillTriangle(x1, yc, x1 - h, yc - h, x1 - h, yc + h, color);
+}
+
+static void drawStandbySegV(int xc, int y0, int y1, int t, uint16_t color) {
+  int h = t / 2;
+  display.fillRect(xc - h, y0 + h, 2 * h + 1, (y1 - y0) - 2 * h + 1, color);
+  display.fillTriangle(xc, y0, xc - h, y0 + h, xc + h, y0 + h, color);
+  display.fillTriangle(xc, y1, xc - h, y1 - h, xc + h, y1 - h, color);
+}
+
+// mask bits: 0 top, 1 upper right, 2 lower right, 3 bottom, 4 lower left,
+// 5 upper left, 6 middle. A zero mask draws the digit fully unlit.
+static void drawStandbyDigit(int x, int mask) {
+  const int t = STANDBY_DIGIT_T, j = STANDBY_SEG_JOIN;
+  int left = x + t / 2, right = x + STANDBY_DIGIT_W - t / 2;
+  int top  = STANDBY_DIGIT_Y + t / 2;
+  int mid  = STANDBY_DIGIT_Y + STANDBY_DIGIT_H / 2;
+  int bot  = STANDBY_DIGIT_Y + STANDBY_DIGIT_H - t / 2;
+  auto color = [mask](int bit) -> uint16_t {
+    return standbyDimColor(((mask >> bit) & 1) ? STANDBY_SEG_LIT : STANDBY_SEG_GHOST);
+  };
+  drawStandbySegH(left + j, right - j, top, t, color(0));
+  drawStandbySegV(right, top + j, mid - j, t, color(1));
+  drawStandbySegV(right, mid + j, bot - j, t, color(2));
+  drawStandbySegH(left + j, right - j, bot, t, color(3));
+  drawStandbySegV(left, mid + j, bot - j, t, color(4));
+  drawStandbySegV(left, top + j, mid - j, t, color(5));
+  drawStandbySegH(left + j, right - j, mid, t, color(6));
+}
+
+// Text window of the two bottom lines, in characters of the default
+// fixed-width font, and where it starts.
+static int standbyLineChars() {
+  return (TARGET_WIDTH - 2 * STANDBY_LINE_MARGIN) / (6 * STANDBY_TEXT_SIZE);
+}
+
+// A line that fits is centred. One that does not starts at the left edge of
+// the window and scrolls inside it, so whatever sits to its left stays put.
+static int standbyLineX(int length) {
+  if (length > standbyLineChars()) return STANDBY_LINE_MARGIN;
+  return (TARGET_WIDTH - length * 6 * STANDBY_TEXT_SIZE) / 2;
+}
+
+// Repaints a line only when its visible part changed. A scrolling line is
+// padded to the full window, so each step overwrites the previous one and
+// nothing has to be cleared.
+static void drawStandbyScrollLine(ScrollTextState* state, String* drawn, int x, int y,
+                                  uint16_t color) {
+  String visible = getScrolledText(state);
+  if (visible == *drawn) return;
+  *drawn = visible;
+  if (state->needsScroll) {
+    while ((int)visible.length() < state->maxChars) visible += ' ';
+  }
+  display.setTextSize(STANDBY_TEXT_SIZE);
+  display.setTextColor(standbyDimColor(color), THEME_BLACK);
+  display.setCursor(x, y);
+  display.print(visible);
+}
+
+static void drawStandbyClock(bool fullRedraw, const struct tm* t) {
+  static const uint8_t segMask[10] = { 0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
+  static const char* const dayName[7]    = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
+  static const char* const monthName[12] = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                                             "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+  const int total = 4 * STANDBY_DIGIT_W + STANDBY_COLON_W + 4 * STANDBY_DIGIT_GAP;
+  const int x0    = (TARGET_WIDTH - total) / 2;
+  const int step  = STANDBY_DIGIT_W + STANDBY_DIGIT_GAP;
+  const int digitX[4] = { x0, x0 + step,
+                          x0 + 2 * step + STANDBY_COLON_W + STANDBY_DIGIT_GAP,
+                          x0 + 3 * step + STANDBY_COLON_W + STANDBY_DIGIT_GAP };
+
+  if (fullRedraw) {
+    display.fillScreen(THEME_BLACK);
+    // A dedicated clock logo wins; without one the main logo goes in at half size.
+    if (STANDBY_CLOCK_LOGO_Y >= 0 &&
+        !drawStandbyLogoFile(STANDBY_CLOCK_LOGO_PATH, STANDBY_CLOCK_LOGO_Y, false) &&
+        !drawStandbyLogoFile(STANDBY_LOGO_PATH, STANDBY_CLOCK_LOGO_Y, true)) {
+      drawStandbyLogoText(STANDBY_CLOCK_LOGO_Y);
+    }
+    uint16_t lit = standbyDimColor(STANDBY_SEG_LIT);
+    int cx = x0 + 2 * step + STANDBY_COLON_W / 2;
+    int d  = STANDBY_DIGIT_T;
+    display.fillRect(cx - d / 2, STANDBY_DIGIT_Y + STANDBY_DIGIT_H / 3 - d / 2, d, d, lit);
+    display.fillRect(cx - d / 2, STANDBY_DIGIT_Y + 2 * STANDBY_DIGIT_H / 3 - d / 2, d, d, lit);
+    display.fillRect(TARGET_WIDTH / 4, STANDBY_RULE_Y, TARGET_WIDTH / 2, 1, standbyDimColor(0x4208));
+    for (int i = 0; i < 4; i++) standbyDrawnMask[i] = -1;
+    standbyDrawnDay   = -1;
+    standbyDrawnAmPm  = -1;
+    standbyDrawnLink  = -1;
+    standbyDrawnPulse = -1;
+  }
+  standbyBacklightWrite(255);
+
+  // Time. With clock_24h off the leading zero of the hour stays unlit.
+  int hour = standbyDisplayHour(t);
+  int mask[4] = { segMask[hour / 10], segMask[hour % 10],
+                  segMask[t->tm_min / 10], segMask[t->tm_min % 10] };
+  if (!CLOCK_24H && hour < 10) mask[0] = 0;
+  for (int i = 0; i < 4; i++) {
+    if (mask[i] == standbyDrawnMask[i]) continue;
+    drawStandbyDigit(digitX[i], mask[i]);
+    standbyDrawnMask[i] = mask[i];
+  }
+  if (!CLOCK_24H) {
+    int pm = t->tm_hour >= 12 ? 1 : 0;
+    if (pm != standbyDrawnAmPm) {
+      display.setTextSize(STANDBY_TEXT_SIZE);
+      display.setTextColor(standbyDimColor(0x0410), THEME_BLACK);
+      display.setCursor(x0 + total + 4, STANDBY_DIGIT_Y + STANDBY_DIGIT_H - 8 * STANDBY_TEXT_SIZE);
+      display.print(pm ? "PM" : "AM");
+      standbyDrawnAmPm = pm;
+    }
+  }
+
+  // Date, in a proportional font. The default font goes back in afterwards:
+  // the rest of the interface assumes it.
+  if (t->tm_yday != standbyDrawnDay) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%s  %d  %s  %d", dayName[t->tm_wday % 7], t->tm_mday,
+             monthName[t->tm_mon % 12], t->tm_year + 1900);
+    display.fillRect(0, STANDBY_DATE_Y - 2, TARGET_WIDTH, STANDBY_DATE_BAND_H, THEME_BLACK);
+    display.setFont(&STANDBY_DATE_FONT);
+    display.setTextSize(1);
+    display.setTextColor(standbyDimColor(THEME_YELLOW), THEME_BLACK);
+    display.setCursor((TARGET_WIDTH - (int)display.textWidth(buf)) / 2, STANDBY_DATE_Y);
+    display.print(buf);
+    display.setFont(&fonts::Font0);
+    standbyDrawnDay = t->tm_yday;
+  }
+
+  // Link status line, with the running game on a line of its own under it.
+  // Core and game changes end standby, so the link state is the only part of
+  // this that can change while the screen is up.
+  int link = connected ? 1 : 0;
+  if (link != standbyDrawnLink) {
+    standbyShowGame = connected && currentGame.length() > 0;
+    String line     = connected ? String("MiSTer ONLINE - ") + foldForDisplay(currentCore)
+                                : String("MiSTer OFFLINE");
+    String game     = standbyShowGame ? foldForDisplay(currentGame) : String("");
+    display.fillRect(0, STANDBY_STATUS_TOP, TARGET_WIDTH, STANDBY_STATUS_BAND_H, THEME_BLACK);
+    initScrollText(&standbyStatusScroll, line, standbyLineChars());
+    initScrollText(&standbyGameScroll,   game, standbyLineChars());
+    standbyStatusX     = standbyLineX(line.length());
+    standbyGameX       = standbyLineX(game.length());
+    standbyStatusLineY = standbyShowGame ? STANDBY_STATUS_Y : STANDBY_STATUS_Y_ALONE;
+    standbyStatusColor = connected ? 0x05E0 : 0xBBE0;
+    standbyDrawnStatus = "";
+    standbyDrawnGame   = "";
+    // The dot sits left of where the status text starts, outside the scroll window.
+    standbyStatusDotX  = standbyStatusX - 3 * STANDBY_STATUS_DOT_R;
+    standbyStatusDotY  = standbyStatusLineY + 4 * STANDBY_TEXT_SIZE;
+    standbyDrawnLink   = link;
+    standbyDrawnPulse  = -1;
+  }
+  drawStandbyScrollLine(&standbyStatusScroll, &standbyDrawnStatus, standbyStatusX,
+                        standbyStatusLineY, standbyStatusColor);
+  if (standbyShowGame) {
+    drawStandbyScrollLine(&standbyGameScroll, &standbyDrawnGame, standbyGameX,
+                          STANDBY_GAME_Y, 0xBDE0);
+  }
+
+  // Status dot, pulsing slowly in the colour of the link state.
+  int pulse = standbyBreathLevel(millis(), STANDBY_STATUS_PULSE_MS);
+  if (pulse != standbyDrawnPulse) {
+    int r = connected ? 0   : 255;
+    int g = connected ? 255 : 165;
+    display.fillCircle(standbyStatusDotX, standbyStatusDotY, STANDBY_STATUS_DOT_R,
+                       standbyDimColor(display.color565(r * pulse / 255, g * pulse / 255, 0)));
+    standbyDrawnPulse = pulse;
+  }
+}
+
+// The clock screen needs a valid time. Until there is one the minimal screen
+// stands in, and the clock takes over on its own once the sync lands.
+static void drawStandbyScreen(bool fullRedraw) {
+  static int drawnScreen = -1;
+  struct tm tmNow;
+  int screen = (STANDBY_SCREEN_CLOCK && standbyLocalTime(&tmNow)) ? 1 : 0;
+  if (screen != drawnScreen) fullRedraw = true;
+  drawnScreen = screen;
+  if (screen == 1) drawStandbyClock(fullRedraw, &tmNow);
+  else             drawStandbyMinimal(fullRedraw);
+}
+
+// Put back whatever was on screen before standby, from the current state.
+static void standbyRestoreScreen() {
+  if (standbyFromImage && sdCardAvailable) {
+    if (currentGame.length() > 0 && !currentCore.equalsIgnoreCase("MENU")) {
+      showGameSlide();
+    } else {
+      showCoreImageScreenWithAutoDownload(currentCore);
+    }
+    showingCoreImage   = true;
+    coreImageStartTime = millis();
+    lastCoreCheck      = millis();
+  } else {
+    showingCoreImage = false;
+    backgroundLoaded = false;
+    needsRedraw      = true;
+  }
+}
+
 void loop() {
   Board.update();
   screenshotServer.handleClient();  // Non-blocking screenshot server poll
@@ -2945,6 +3644,36 @@ void loop() {
     }
   }
   // --------------------------------------------------------------------------
+  // --- Standby ---------------------------------------------------------------
+  // Sits below the re-discovery block, which keeps probing for the MiSTer
+  // while the link is down, and above everything that draws. The wake tap is
+  // spent by returning: the touch edge is gone by the next pass.
+  {
+    bool touched = Board.Touch.getDetail().wasPressed();
+    if (standbyActive) {
+      standbyPoll();
+      if (connected) pollRA();
+      int wake = standbyWakeReason(touched);
+      if (wake == STANDBY_WAKE_NONE) {
+        wasConnected = connected;
+        drawStandbyScreen(false);
+        delay(20);
+        return;
+      }
+      standbyLeave(wake);
+      standbyBacklightEnd();
+      standbyRestoreScreen();
+      if (wake == STANDBY_WAKE_TOUCH) return;
+    } else {
+      standbyObserve(touched);
+      if (standbyShouldEnter()) {
+        standbyEnter();
+        standbyBacklightBegin();
+        drawStandbyScreen(true);
+        return;
+      }
+    }
+  }
   // Reconnect banner: fire on any OFFLINE -> ONLINE transition, no matter which
   // path restored the link (re-discovery, screensaver refresh, normal polling).
   if (connected && !wasConnected) {

@@ -128,6 +128,24 @@ struct AppConfig {
   bool   kioskMode        = false;
   int    kioskHideDelayMs = 5000;  // how long the footer stays up, 500..600000
 
+  // --- Standby -----------------------------------------------------------------
+  // Dimmed idle screen. Starts once the MiSTer has been unreachable for
+  // standbyOfflineMin minutes and/or after standbyIdleMin minutes without a
+  // core or game change or a touch (0 = never). A touch always ends it.
+  String standbyScreen      = "clock";
+  bool   standbyWhenOffline = true;
+  int    standbyOfflineMin  = 3;
+  int    standbyIdleMin     = 0;
+  int    standbyBrightness  = 10;
+  int    standbyDim         = 100;
+
+  // --- Clock -------------------------------------------------------------------
+  // timezone is a friendly name or a POSIX TZ string. Empty = no time sync and
+  // no clock anywhere, standby falls back to its minimal screen.
+  String timezone  = "";
+  String ntpServer = "pool.ntp.org";
+  bool   clock24h  = true;
+
   // What the fullscreen image mode shows for a game:
   //   rotate  game artwork and system artwork in turn (default)
   //   game    game artwork only
@@ -237,6 +255,15 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "image_upscale_max")             { cfg.imageUpscaleMax = val.toFloat(); }
     else if (key == "kiosk_mode")                    { cfg.kioskMode = parseBool(val); }
     else if (key == "kiosk_hide_delay_ms")           { cfg.kioskHideDelayMs = val.toInt(); }
+    else if (key == "standby_screen")         { cfg.standbyScreen = val; }
+    else if (key == "standby_when_offline")   { cfg.standbyWhenOffline = parseBool(val); }
+    else if (key == "standby_offline_min")    { cfg.standbyOfflineMin = val.toInt(); }
+    else if (key == "standby_idle_min")       { cfg.standbyIdleMin = val.toInt(); }
+    else if (key == "standby_brightness")     { cfg.standbyBrightness = val.toInt(); }
+    else if (key == "standby_dim")            { cfg.standbyDim = val.toInt(); }
+    else if (key == "timezone")               { cfg.timezone = val; }
+    else if (key == "ntp_server")             { cfg.ntpServer = val; }
+    else if (key == "clock_24h")              { cfg.clock24h = parseBool(val); }
     // [ui]
     else if (key == "scroll_speed_ms")        { cfg.scrollSpeedMs = val.toInt(); }
     else if (key == "scroll_pause_start_ms")  { cfg.scrollPauseStartMs = val.toInt(); }
