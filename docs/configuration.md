@@ -39,8 +39,8 @@ ssid=YOUR_WIFI_SSID
 password=YOUR_WIFI_PASSWORD
 
 [mister]
-; IP address of the MiSTer. LEAVE BLANK to auto-discover it on the LAN (recommended).
-; Set it only as a fallback if your router blocks UDP broadcast.
+; IP address of the MiSTer. Blank = auto-discover it on the LAN (recommended
+; with a single MiSTer). Set = use that MiSTer and no other.
 ip=
 
 [screenscraper]
@@ -60,8 +60,15 @@ option.
 The display locates the MiSTer automatically at boot via UDP broadcast —
 no static IP is needed on the MiSTer and no value is required in `config.ini`.
 
-If your router blocks UDP broadcast (uncommon in home networks), set a
-fallback IP manually:
+With `ip=` blank the display adopts the first MiSTer that answers the
+broadcast. That is what you want with a single MiSTer, but with several on
+the same network you cannot choose which one answers first.
+
+Setting `ip=` pins the display to that MiSTer: it never adopts a different
+one, even while the pinned MiSTer is powered off. Set it when:
+
+- you have **several MiSTers** and want each display to follow a specific one;
+- your router blocks UDP broadcast (uncommon in home networks).
 
 ```ini
 [mister]

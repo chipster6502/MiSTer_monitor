@@ -52,7 +52,7 @@ console and computer games via the MiSTer Remote web application.*
 - **Self-auditing core coverage** — official cores are mapped from their own CONF_STR, a weekly audit proposes mappings for new ones, and unrecognised CORENAMEs are recorded at `/status/unknown_cores`.
 - **Automatic Arcade subsystem detection** for correct per-system artwork.
 - **Manual SCAN button** on the image screen for the rare case where the CRC couldn't be detected automatically.
-- **Automatic MiSTer discovery** via UDP broadcast (no static IP needed), with reconnection if the MiSTer isn't ready at boot.
+- **Automatic MiSTer discovery** via UDP broadcast (no static IP needed), with reconnection if the MiSTer isn't ready at boot. With several MiSTers on the network, `ip=` in `config.ini` pins each display to its own MiSTer.
 - **Screenshot capture** of the display over HTTP on the local network (Tab5 and 2.8" CYD boards; not on 3.5"/ST7796 panels, which have no SPI readback).
 
 </details>
