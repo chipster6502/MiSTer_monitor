@@ -114,8 +114,10 @@ configure_autostart() {
 }
 
 configure_ini() {
-    # Only flip an existing log_file_entry=0 to 1, and only inside [MiSTer].
-    # The key is never created and nothing else in the file is touched.
+    # Evaluates log_file_entry the way MiSTer does: only keys under [MiSTer]
+    # count, and the last one wins. When the effective value is 0, the
+    # existing lines are flipped to 1. The key is never created or moved, and
+    # nothing else in the file is touched.
     if [ ! -f "${MISTER_INI}" ]; then
         echo "WARNING: ${MISTER_INI} not found."
         echo "         Please ensure 'log_file_entry=1' is set so the monitor can"
@@ -123,72 +125,120 @@ configure_ini() {
         return 0
     fi
 
-    if grep -qiE '^[[:space:]]*log_file_entry[[:space:]]*=[[:space:]]*1' "${MISTER_INI}"; then
-        echo "MiSTer.ini already has log_file_entry=1"
-        return 0
-    fi
-
-    if ! grep -qiE '^[[:space:]]*log_file_entry[[:space:]]*=[[:space:]]*0' "${MISTER_INI}"; then
-        echo "WARNING: log_file_entry not found in MiSTer.ini."
-        echo "         MiSTer Monitor needs 'log_file_entry=1' under the [MiSTer]"
-        echo "         section to detect core/game changes. Please add it manually."
-        return 0
-    fi
-
-    echo "Setting log_file_entry=1 in MiSTer.ini (was 0)..."
-    cp "${MISTER_INI}" "${MISTER_INI}.mmon.bak"
-    # The rewrite is only committed when a change actually happened, so a failed
-    # pass can never truncate the INI. Python is used (not sed/awk) because it
-    # preserves the file byte-for-byte — including whether it ends without a
-    # trailing newline — changing only the target line.
+    # Python is used (not sed/awk) because it preserves the file byte-for-byte,
+    # changing only the target lines. Exit code 10 means a rewrite is ready.
     tmp_ini="$(mktemp)"
-    if python3 - "${MISTER_INI}" "${tmp_ini}" <<'PYEOF'
+    rc=0
+    python3 - "${MISTER_INI}" "${tmp_ini}" <<'PYEOF' || rc=$?
 import re
 import sys
 
 src, dst = sys.argv[1], sys.argv[2]
+KEY = 'log_file_entry'
 
-with open(src, 'r', newline='') as f:
-    content = f.read()
+# latin-1 maps every byte to one character, so any encoding round-trips intact.
+with open(src, 'rb') as f:
+    lines = f.read().decode('latin-1').split('\n')
 
-had_trailing_newline = content.endswith('\n')
-lines = content.split('\n')
-if had_trailing_newline:
-    lines = lines[:-1]   # drop the empty element produced by the final '\n'
+# Characters the MiSTer INI reader keeps; everything else is dropped.
+invalid_re = re.compile(r'[^A-Za-z0-9\[\]()\-+/=#$@_,.!*:~ \t]')
+# Groups: key and separators / value / trailing blanks, comment and CR.
+raw_re = re.compile(
+    r'^((?:\xef\xbb\xbf)?[ \t]*' + KEY + r'[ \t=]+)([^;\r]*?)([ \t]*(?:;.*)?\r?)$',
+    re.IGNORECASE)
 
-sec_re = re.compile(r'^\s*\[(.+?)\]\s*$')
-key_re = re.compile(r'^\s*log_file_entry\s*=\s*0\s*$')
 
-in_mister = False
-changed = False
-for i, line in enumerate(lines):
-    m = sec_re.match(line)
+def normalize(raw):
+    # Comment stripped, invalid characters dropped, outer blanks trimmed.
+    return invalid_re.sub('', raw.split(';', 1)[0]).strip(' \t')
+
+
+def to_flag(text):
+    # strtoul(text, 0) clamped to 0..1; non-numeric text reads as 0.
+    m = re.match(r'0[xX][0-9a-fA-F]+', text)
     if m:
-        in_mister = (m.group(1).strip().lower() == 'mister')
+        return int(int(m.group(0), 16) > 0)
+    m = re.match(r'[0-9]+', text)
+    return int(int(m.group(0), 10) > 0) if m else 0
+
+
+def is_main(name):
+    return name is not None and name.lower() == 'mister'
+
+
+section = None      # None until the first [section] header
+found = []          # (line index, section name, value)
+for i, raw in enumerate(lines):
+    text = normalize(raw)
+    if text.startswith('['):
+        section = text[1:].split(']', 1)[0]
         continue
-    # Only flip the value, only inside [MiSTer]. Leave indentation intact.
-    if in_mister and key_re.match(line):
-        lines[i] = re.sub(r'(=\s*)0(\s*)$', r'\g<1>1\g<2>', line)
-        changed = True
+    m = re.match(r'([^= \t]+)[= \t]*(.*)$', text)
+    if m and m.group(1).lower() == KEY:
+        found.append((i, section, to_flag(m.group(2))))
 
-if not changed:
-    sys.exit(9)
+inside = [o for o in found if is_main(o[1])]
+outside = [o for o in found if not is_main(o[1])]
+rewrite = False
 
-out = '\n'.join(lines)
-if had_trailing_newline:
-    out += '\n'
-with open(dst, 'w', newline='') as f:
-    f.write(out)
+if not inside:
+    print("WARNING: log_file_entry is not set under the [MiSTer] section.")
+    print("         MiSTer Monitor needs 'log_file_entry=1' there to detect game")
+    print("         changes. Please add it manually, right below the [MiSTer] line.")
+else:
+    if len(inside) > 1:
+        nums = ', '.join(str(o[0] + 1) for o in inside)
+        print(f"NOTE: log_file_entry appears {len(inside)} times under [MiSTer] (lines {nums}).")
+        print("      MiSTer uses the last one.")
+    if inside[-1][2] == 1:
+        print("MiSTer.ini already has log_file_entry=1")
+    else:
+        done, failed = [], []
+        for i, _, value in inside:
+            if value != 0:
+                continue
+            m = raw_re.match(lines[i])
+            if m:
+                lines[i] = m.group(1) + '1' + m.group(3)
+                done.append(i + 1)
+            else:
+                failed.append(i + 1)
+        if done and not failed:
+            where = ('line ' if len(done) == 1 else 'lines ') + ', '.join(str(n) for n in done)
+            print(f"Setting log_file_entry=1 in MiSTer.ini ({where}, was 0)...")
+            rewrite = True
+        else:
+            nums = ', '.join(str(n) for n in failed)
+            print(f"WARNING: log_file_entry is 0 and line {nums} could not be updated.")
+            print("         Please set it to 1 manually.")
+
+if outside:
+    print("NOTE: log_file_entry also appears outside [MiSTer]:")
+    for i, name, value in outside:
+        if name is None:
+            print(f"        line {i + 1} (={value}), before any [section]: MiSTer ignores it.")
+        else:
+            effect = "turns it off for" if value == 0 else "only applies to"
+            print(f"        line {i + 1} (={value}), under [{name}]: {effect} that core or video mode.")
+
+if rewrite:
+    with open(dst, 'wb') as f:
+        f.write('\n'.join(lines).encode('latin-1'))
+    sys.exit(10)
 sys.exit(0)
 PYEOF
-    then
+
+    if [ "${rc}" -eq 10 ]; then
+        cp "${MISTER_INI}" "${MISTER_INI}.mmon.bak"
         mv "${tmp_ini}" "${MISTER_INI}"
         echo "  Done. A backup was saved to ${MISTER_INI}.mmon.bak"
-    else
-        rm -f "${tmp_ini}"
-        echo "  NOTE: log_file_entry=0 was only found outside the [MiSTer]"
-        echo "        section; MiSTer.ini was left unchanged. Please make sure"
-        echo "        log_file_entry=1 is set under [MiSTer] manually."
+        return 0
+    fi
+
+    rm -f "${tmp_ini}"
+    if [ "${rc}" -ne 0 ]; then
+        echo "WARNING: MiSTer.ini could not be checked. Please make sure"
+        echo "         'log_file_entry=1' is set under the [MiSTer] section."
     fi
 }
 
