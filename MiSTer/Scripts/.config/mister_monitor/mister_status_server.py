@@ -307,6 +307,12 @@ CORE_NAME_MAPPING = {
     'SGIIndy': 'SGI Indy',
     'Studio-II': 'RCA Studio II',
     'SuperAcan': 'Funtech Super Acan',
+
+    # Reported by the runtime unknown-core log. The CORENAME here is the
+    # literal string the core wrote, which the .rbf name does not always give.
+    'ABC80': 'Luxor ABC 80',
+    'Amstrad PCW': 'Amstrad PCW',
+    'Tamagotchi': 'Tamagotchi',
 }
 
 # names.txt only names cores the curated table does not know. Lookups are
