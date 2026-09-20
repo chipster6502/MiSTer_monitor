@@ -296,6 +296,17 @@ CORE_NAME_MAPPING = {
     'VECTOR06': 'Vector-06C',
     'VT52': 'DEC VT52',
     '3DO': '3DO Interactive Multiplayer',
+    'CBM-II': 'Commodore CBM-II',
+    'FM-7': 'Fujitsu FM-7',
+    'Gamecom': 'Tiger Game.com',
+    'GameKing': 'TimeTop GameKing',
+    'JR100': 'National JR-100',
+    'Loopy': 'Casio Loopy',
+    'NeXT': 'NeXT Computer',
+    'PocketStation': 'Sony PocketStation',
+    'SGIIndy': 'SGI Indy',
+    'Studio-II': 'RCA Studio II',
+    'SuperAcan': 'Funtech Super Acan',
 }
 
 # names.txt only names cores the curated table does not know. Lookups are
