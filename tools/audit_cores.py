@@ -79,7 +79,8 @@ def _skip_folder(folder):
     f = (folder or "").lower()
     # '|' prefixes a user-data folder in the downloader DB ('|games/MemTest/'):
     # the .rbf files under it are payloads a core loads, not cores themselves.
-    if f.startswith("|") or f == "scripts":
+    # Some databases publish the same folder without the prefix.
+    if f.startswith("|") or f in ("scripts", "games"):
         return True
     return "arcade" in f or f in ("_utility", "_unstable")
 
@@ -248,16 +249,27 @@ def parse_server_mapping(path):
     return {k.lower(): v for k, v in pairs}
 
 
+# Fewer names than this means the parser lost the table, not that the firmware
+# dropped its systems.
+MIN_SS_NAMES = 50
+
+
 def parse_ino_ss_ids(path):
-    """Friendly names getScreenScraperSystemId() can turn into a system id."""
+    """
+    Names the firmware can turn into a ScreenScraper system id, lowercased.
+
+    Holds both spellings the firmware accepts: friendly names (compared against
+    'core') and raw CORENAMEs (compared against 'coreLower').
+    """
     src = io.open(path, encoding="utf-8").read()
-    m = re.search(r"String getScreenScraperSystemId\(String coreName\)\s*\{(.*?)\n\}",
-                  src, re.S)
+    m = re.search(r"^String mapCoreToScreenScraperId\(String coreName\)\s*\{(.*?)^\}",
+                  src, re.S | re.M)
     if not m:
-        raise SystemExit(f"getScreenScraperSystemId not found in {path}")
-    body = m.group(1)
-    names = re.findall(r'core\s*==\s*"([^"]+)"', body)
-    names += re.findall(r'core\.indexOf\("([^"]+)"\)', body)
+        raise SystemExit(f"mapCoreToScreenScraperId not found in {path}")
+    names = re.findall(r'\bcore(?:Lower)?\s*==\s*"([^"]+)"', m.group(1))
+    if len(names) < MIN_SS_NAMES:
+        raise SystemExit(f"only {len(names)} ScreenScraper names parsed from "
+                         f"{path}: the table has moved or changed shape")
     return {n.lower() for n in names}
 
 
@@ -339,7 +351,8 @@ def main():
             "folder": info["folder"],
             "dbs": sorted(set(info["dbs"])),
             "friendly": friendly,
-            "screenscraper": bool(friendly and friendly.lower() in ss_names),
+            "screenscraper": bool((friendly and friendly.lower() in ss_names)
+                                  or core.lower() in ss_names),
             "retroachievements": bool(friendly and ra_covered(friendly, ra_needles)),
             "triaged": core.lower() in baseline,
         })
