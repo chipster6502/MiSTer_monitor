@@ -404,9 +404,25 @@ static const uint16_t MMON_DISCOVERY_PORT = 51234;
 static const char*    MMON_DISCOVER_REQ   = "MMON_DISCOVER_V1";
 static const char*    MMON_REPLY_PREFIX   = "MMON_SERVER_V1";
 
+// A non-empty ip= in config.ini pins the display to that server: discovery
+// only accepts replies from it and never adopts a different one.
+static bool      misterPinned        = false;
+static bool      misterPinnedHasAddr = false;  // false when ip= holds a hostname
+static IPAddress misterPinnedAddr;
+
+// Call once, after loadConfig() and before the first discovery.
+void pinMisterFromConfig() {
+  misterPinned        = appConfig.misterIP.length() > 0;
+  misterPinnedHasAddr = misterPinned && misterPinnedAddr.fromString(appConfig.misterIP);
+}
+
 // Locate the server by UDP broadcast. On success sets the global misterIP
 // (the same one used to build the http://misterIP:8081 URLs) and returns true.
+// When pinned, returns true only if the pinned server itself replied.
 bool discoverMister(uint8_t attempts = 5, uint16_t replyWaitMs = 600) {
+  // Pinned to a hostname: there is no address to match replies against.
+  if (misterPinned && !misterPinnedHasAddr) return false;
+
   WiFiUDP udp;
   udp.begin(0);                          // ephemeral local port
   IPAddress broadcast(255, 255, 255, 255);
@@ -423,7 +439,13 @@ bool discoverMister(uint8_t attempts = 5, uint16_t replyWaitMs = 600) {
         char buf[64] = {0};
         int len = udp.read(buf, sizeof(buf) - 1);
         if (len > 0 && strncmp(buf, MMON_REPLY_PREFIX, strlen(MMON_REPLY_PREFIX)) == 0) {
-          appConfig.misterIP = udp.remoteIP().toString();  // persistent String backing store
+          IPAddress from = udp.remoteIP();
+          if (misterPinned && !(from == misterPinnedAddr)) {
+            Serial.printf("Discovery: ignoring %s (pinned to %s)\n",
+                          from.toString().c_str(), misterIP);
+            continue;                                     // keep draining replies
+          }
+          appConfig.misterIP = from.toString();            // persistent String backing store
           misterIP = appConfig.misterIP.c_str();           // repoint const char* (same idiom as setup)
           Serial.printf("Discovery: server at %s\n", misterIP);
           udp.stop();
@@ -2792,11 +2814,11 @@ void setup() {
 
   ssid     = appConfig.ssid.c_str();
   password = appConfig.wifiPass.c_str();
-  // MiSTer IP from config.ini. UDP discovery overwrites this at boot on
-  // success; on failure this value remains as the fallback (which is the
-  // whole point of the config.ini ip= key). appConfig is global, so the
+  // MiSTer IP from config.ini. When set it pins the display to that server;
+  // when blank, UDP discovery fills it in. appConfig is global, so the
   // c_str() pointer stays valid for the program's lifetime.
   misterIP = appConfig.misterIP.c_str();
+  pinMisterFromConfig();
     if (appConfig.ssDevUser.length() > 0) {
     _ss_dev_user_str = appConfig.ssDevUser;
     _ss_dev_pass_str = appConfig.ssDevPass;
@@ -5569,7 +5591,8 @@ void connectWithAnimation() {
     Lcd.print("Testing MiSTer...");
 
     // Auto-discover the MiSTer server IP.
-    // On success overwrites misterIP; on failure leaves the config.ini value unchanged.
+    // Blank ip=: adopts the first server that replies.
+    // Pinned ip=: only confirms that server is up; misterIP never changes.
     Serial.println("=== DISCOVERING MiSTer SERVER ===");
     bool discovered = discoverMister();
 
