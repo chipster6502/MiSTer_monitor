@@ -33,6 +33,18 @@ The Downloader drop-in database does the same for setups that run the
 Downloader without either, and a manual install is documented last as a
 fallback.
 
+> ⚠️ **Whichever method you use: run `MiSTer_Monitor` once.**
+>
+> Installing the files is only half the job. **The last step of every method
+> below is to run `MiSTer_Monitor` one time from the MiSTer's Scripts menu.**
+> That single run enables auto-start on boot, sets `log_file_entry=1` in
+> `MiSTer.ini` and starts the server.
+>
+> `log_file_entry=1` is what makes MiSTer report the loaded game to the
+> server. Skip this step and the display will connect, show system stats and
+> then sit there with **no game detection and no artwork** — the most common
+> reason a fresh install appears to do nothing.
+
 ### Recommended: Update All or MiSTer Companion
 
 1. Enable MiSTer Monitor from whichever you use:
@@ -48,11 +60,12 @@ fallback.
    - `/media/fat/Scripts/MiSTer_Monitor.sh`
    - `/media/fat/Scripts/MiSTer_Monitor_uninstall.sh`
    - `/media/fat/Scripts/.config/mister_monitor/mister_status_server.py`
-3. Back in the Scripts menu, run **`MiSTer_Monitor`** once.
-   This enables auto-start on boot, ensures `log_file_entry=1` in
-   `MiSTer.ini`, and starts the server. You can run it again at any time; it
-   is safe to repeat, and it restarts the server so a freshly downloaded
-   update takes effect right away.
+3. **⚠️ Required — back in the Scripts menu, run `MiSTer_Monitor` once.**
+   Without this run nothing starts and no artwork is ever detected. It
+   enables auto-start on boot, ensures `log_file_entry=1` in `MiSTer.ini`,
+   and starts the server. You can run it again at any time; it is safe to
+   repeat, and it restarts the server so a freshly downloaded update takes
+   effect right away.
 
 That's it. Future updates to the server are picked up automatically whenever
 you run *Update All* or update from *MiSTer Companion* — no need to run the
@@ -86,11 +99,12 @@ installs the same files and keeps them updated the same way.
    - `/media/fat/Scripts/MiSTer_Monitor.sh`
    - `/media/fat/Scripts/MiSTer_Monitor_uninstall.sh`
    - `/media/fat/Scripts/.config/mister_monitor/mister_status_server.py`
-4. Back in the Scripts menu, run **`MiSTer_Monitor`** once.
-   This enables auto-start on boot, ensures `log_file_entry=1` in
-   `MiSTer.ini`, and starts the server. You can run it again at any time; it
-   is safe to repeat, and it restarts the server so a freshly downloaded
-   update takes effect right away.
+4. **⚠️ Required — back in the Scripts menu, run `MiSTer_Monitor` once.**
+   Without this run nothing starts and no artwork is ever detected. It
+   enables auto-start on boot, ensures `log_file_entry=1` in `MiSTer.ini`,
+   and starts the server. You can run it again at any time; it is safe to
+   repeat, and it restarts the server so a freshly downloaded update takes
+   effect right away.
 
 That's it. Future updates to the server are picked up automatically whenever
 you run *Update All* or *Downloader* — no need to run the setup again unless

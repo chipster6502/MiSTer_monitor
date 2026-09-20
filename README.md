@@ -101,11 +101,19 @@ on the display.
 
 - **MiSTer side** — enable **MiSTer Monitor** in *Update All* (**Settings →
   Tools & Scripts**, Update All 2.10 or newer) or install it from *MiSTer
-  Companion*'s **Install Center**, run the update, then run `MiSTer_Monitor`
-  once from the Scripts menu. The **Downloader database** drop-in `.ini` is
-  still supported for Downloader-only setups. Optionally enable the
-  **artwork packs** under *Settings → Extra Content → Game Artwork DBs* in
-  the same Update All session.
+  Companion*'s **Install Center**, then run the update. The **Downloader
+  database** drop-in `.ini` is still supported for Downloader-only setups.
+  Optionally enable the **artwork packs** under *Settings → Extra Content →
+  Game Artwork DBs* in the same Update All session.
+
+  > ⚠️ **Then run `MiSTer_Monitor` once from the Scripts menu.**
+  >
+  > **Downloading the files is not enough.** After the update finishes, go
+  > back to the MiSTer's **Scripts** menu and run **`MiSTer_Monitor`** one
+  > time. It enables auto-start on boot, sets `log_file_entry=1` in
+  > `MiSTer.ini` — which is what lets the server see the loaded game, so
+  > **without it no artwork will ever appear** — and starts the server.
+  > Running it again later is safe and restarts the server.
 - **Display side** — the easiest path is the **web flasher**: open
   [the flasher page](https://chipster6502.github.io/MiSTer_monitor/flasher/)
   in Chrome or Edge on desktop, connect the display via USB, and flash the
