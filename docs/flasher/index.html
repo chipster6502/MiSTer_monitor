@@ -49,6 +49,15 @@
   <esp-web-install-button manifest="./manifest-tab5.json"></esp-web-install-button>
 
   <h2>Guition JC8012P4A1C 10.1" (ESP32-P4, 1280x800)</h2>
+  <p><strong>Colour bands instead of the interface?</strong> Guition ships this
+     board with two different LCD panels. Units from batch 2624 onward — the
+     figure in parentheses after the SKU on the back sticker — need
+     <code>panel_rev=v2</code> in the <code>[ui]</code> section of
+     <code>config.ini</code>. <strong>WiFi network listed but never
+     connected?</strong> Copy <code>c6_firmware.bin</code> from
+     <code>SD_card_content/Guition/</code> to the root of the card: the display
+     updates its WiFi coprocessor from it at boot. Both are explained in
+     <a href="https://github.com/chipster6502/MiSTer_monitor/blob/main/docs/configuration.md#guition-jc8012p4a1c">configuration.md</a>.</p>
   <esp-web-install-button manifest="./manifest-guition10inch.json"></esp-web-install-button>
 
   <hr>

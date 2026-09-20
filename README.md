@@ -37,6 +37,8 @@ console and computer games via the MiSTer Remote web application.*
 - **Detection from multiple sources** — recognises games loaded from the OSD, the MiSTer Remote web app, and Super Attract Mode (SAM); auto-discovers the MiSTer on the LAN.
 - **System monitor** — CPU, memory, uptime, storage, network, and USB device panels, with touch navigation.
 - **Web interface** — edit `config.ini` and browse, upload or delete files on the display's SD card from any browser on your network, at `http://<Display-IP>:8080`. Handy for swapping artwork or changing a setting without pulling the card.
+- **Standby with a clock** — when the MiSTer is switched off the display dims to a standby screen: a large seven-segment clock with the date and the MiSTer's state, or just the MiSTer logo. It wakes on its own when the MiSTer comes back, and at a touch.
+- **Kiosk mode and display options** — give the whole panel to the artwork, keep it on the game or on the system instead of alternating (`image_mode`), or upscale small artwork to fill the larger panels. All from `config.ini`; see [`docs/configuration.md`](docs/configuration.md).
 
 <details>
 <summary><b>More detail</b></summary>
@@ -53,7 +55,10 @@ console and computer games via the MiSTer Remote web application.*
 - **Automatic Arcade subsystem detection** for correct per-system artwork.
 - **Manual SCAN button** on the image screen for the rare case where the CRC couldn't be detected automatically.
 - **Automatic MiSTer discovery** via UDP broadcast (no static IP needed), with reconnection if the MiSTer isn't ready at boot. With several MiSTers on the network, `ip=` in `config.ini` pins each display to its own MiSTer.
-- **Screenshot capture** of the display over HTTP on the local network (Tab5 and 2.8" CYD boards; not on 3.5"/ST7796 panels, which have no SPI readback).
+- **Screenshot capture** of the display over HTTP on the local network (Tab5, Guition and 2.8" CYD boards; not on 3.5"/ST7796 panels, which have no SPI readback).
+- **Standby details** — goes to standby after the MiSTer has been unreachable for a few minutes, and optionally after a period with no activity; the time comes from NTP with a friendly `timezone` name, 12- or 24-hour. The logo breathes on the Tab5 and the Guition, the backlight on the CYD boards.
+- **System artwork of your choice** — `core_media_order` drives system images, including the `screenmarquee` style that fills the frame; `screenshot` fetches an in-game shot and `titlescreen` the title screen.
+- **Sound options on the Tab5** — mute the boot jingle and touch beeps, or set the volume.
 
 </details>
 
@@ -79,6 +84,13 @@ the touch controller. The
 [web flasher](https://chipster6502.github.io/MiSTer_monitor/flasher/) walks you
 through picking the right build. Screenshot capture over HTTP is available on
 all boards **except the 3.5" (ST7796)**, whose panel has no SPI readback.
+
+**Guition JC8012P4A1C:** Guition ships this board with two different LCD
+panels. Units from batch 2624 onward need `panel_rev=v2` in `config.ini` —
+without it the screen shows horizontal colour banding — and some units need a
+one-time WiFi coprocessor update, which the display performs by itself from a
+file on the card. Both are explained in
+[`docs/configuration.md`](docs/configuration.md#guition-jc8012p4a1c).
 
 See `docs/PORTING.md` for porting guidelines.
 

@@ -1,9 +1,9 @@
 # Installation
 
 This guide walks through installing the MiSTer Monitor **server** on your
-MiSTer, the **firmware** on your display target (M5Stack Tab5 or any of the
-Cheap Yellow Display variants), and creating the free ScreenScraper account
-used for artwork retrieval.
+MiSTer, the **firmware** on your display target (M5Stack Tab5, Guition
+JC8012P4A1C or any of the Cheap Yellow Display variants), and creating the free
+ScreenScraper account used for artwork retrieval.
 
 > Prefer a printable, illustrated walkthrough? The same procedure is in
 > **[MiSTer_Monitor_Setup_Guide.pdf](MiSTer_Monitor_Setup_Guide.pdf)** — six
@@ -201,6 +201,22 @@ The fastest way to install the firmware. No Arduino IDE, no compiling.
 5. Prepare the display's microSD card — formatted as **FAT32**, not exFAT —
    with `config.ini` and the asset images
    (see [`configuration.md`](configuration.md)), then insert it and power on.
+
+> **Guition JC8012P4A1C:** if the screen shows horizontal colour bands instead
+> of the interface, your unit carries the newer panel — set `panel_rev=v2` in
+> the `[ui]` section of `config.ini`. If it lists your WiFi network but never
+> connects, make sure `c6_firmware.bin` from `SD_card_content/Guition/` is in
+> the root of the card: the display updates its WiFi coprocessor from it at
+> boot. Details in
+> [`configuration.md`](configuration.md#guition-jc8012p4a1c).
+
+> **Updating from an earlier version?** Flash the new firmware the same way.
+> Your `config.ini` keeps working — options added since then stay at their
+> defaults until you copy them from the `config.ini` under `SD_card_content/`
+> for your board. Copy `cores/logo_standby.565` from the same folder to
+> `/cores/` on your card as well; it is the logo of the standby screen. Both
+> can be done from the display's
+> [web interface](configuration.md#web-interface) without taking the card out.
 
 ### Alternative: Building from source (advanced)
 
