@@ -2472,18 +2472,22 @@ def _update_state():
             if game_name:
                 print(f"🔗 Scratch MGL is the only witness: '{game_path}'")
 
-        # Every source rejected as a system path leaves game_name empty, but on
-        # a genuinely new core that emptiness is the truth, while on an unchanged
-        # core (a script or cheat picked during play) blanking would wipe the
-        # panel mid-session — so the current identity is re-asserted instead.
+        # Every source rejected as a system path or as a folder leaves
+        # game_name empty, but on a genuinely new core that emptiness is the
+        # truth, while on an unchanged core (a script or cheat picked during
+        # play, or the game folder a folder launch leaves in CURRENTPATH once
+        # the OSD rewrites FILESELECT) blanking would wipe the panel
+        # mid-session — so the current identity is re-asserted instead.
         if (not game_name and not currentpath_is_core_name
-                and (activegame_is_system or cp_is_system)
+                and (activegame_is_system or cp_is_system
+                     or activegame_is_folder or cp_is_folder)
                 and not core_changed):
             with _state_lock:
                 game_name = _state['game']
                 game_path = _state['game_path']
             if game_name:
-                print("🛡️ Only system paths on offer — keeping current game")
+                print("🛡️ Only system paths or folders on offer — "
+                      "keeping current game")
 
         # NeoGeo: whichever source won, an id on the panel means no browser
         # supplied the title. romsets.xml has it.
