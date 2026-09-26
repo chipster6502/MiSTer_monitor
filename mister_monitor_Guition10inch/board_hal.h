@@ -89,6 +89,7 @@ struct BoardClass {
     display.setColorDepth(16);
     if (cfg.clear_display) {
       display.fillScreen(TFT_BLACK);
+      display.panel().presentIfDirty();
     }
     display.setBrightness(204);      // 80%
 
@@ -101,6 +102,10 @@ struct BoardClass {
   }
 
   bool touchReady() const { return _touchReady; }
+
+  // Commit one complete back buffer to the DPI engine. Safe to call often;
+  // it is a no-op when LovyanGFX has not modified the frame.
+  bool present() { return display.panel().presentIfDirty(); }
 
   // Mount the card. Slot, pins and LDO come from the board variant.
   bool beginSD() {

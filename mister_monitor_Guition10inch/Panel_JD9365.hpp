@@ -20,7 +20,11 @@
 //  rotation 1 gives 1280x720 landscape with a 40-pixel black band top and
 //  bottom. Set JD9365_UI_INSET to 0 for the full 1280x800 canvas.
 //
-//  The DPI framebuffer is DMA-coherent: no cache flush is needed after drawing.
+//  V3 note: the DPI engine must not scan the same framebuffer that LovyanGFX is
+//  actively modifying. This port therefore uses TWO driver-owned framebuffers.
+//  LovyanGFX draws into the back buffer; presentIfDirty() atomically presents
+//  that complete buffer, switches drawing to the other buffer, and seeds it
+//  with the just-presented frame so incremental UI updates remain correct.
 // =============================================================================
 
 #pragma once
@@ -129,6 +133,7 @@ struct Panel_JD9365 : public lgfx::v1::Panel_FrameBufferBase
       JD9365_LOG("Panel_FrameBufferBase::init FAILED");
       return false;
     }
+    setAutoDisplay(true);   // display() marks the back buffer dirty
     if (!_dphyPower())   { JD9365_LOG("LDO power FAILED");    return false; }
     if (!_bringUp())     { JD9365_LOG("DSI bring-up FAILED"); return false; }
     if (!_mapLines())    { JD9365_LOG("line map FAILED");     return false; }
@@ -137,11 +142,46 @@ struct Panel_JD9365 : public lgfx::v1::Panel_FrameBufferBase
     return true;
   }
 
-  // No display() override: the framebuffer is DMA-coherent.
+  // LovyanGFX calls display() after drawing when auto-display is enabled.
+  // Do the normal cache write-back bookkeeping, but defer the actual DPI
+  // framebuffer switch until the end of the application loop. This prevents
+  // the P4 DMA engine from scanning a buffer while the CPU is modifying it.
+  void display(uint_fast16_t x, uint_fast16_t y, uint_fast16_t w, uint_fast16_t h) override
+  {
+    lgfx::v1::Panel_FrameBufferBase::display(x, y, w, h);
+    _dirty = true;
+  }
 
-  void*  framebuffer(void)      const { return _fb; }
+  void*  framebuffer(void)      const { return _drawFb; }
   size_t framebufferBytes(void) const { return _fbBytes(); }
   esp_lcd_panel_handle_t dpiHandle(void) const { return _panel; }
+
+  bool presentIfDirty(void)
+  {
+    if (!_dirty || _panel == nullptr || _drawFb == nullptr) return true;
+
+    // Present the COMPLETE driver-owned back buffer. ESP-IDF recognizes its
+    // own framebuffer pointer and switches the DPI scanout buffer cleanly.
+    esp_err_t r = esp_lcd_panel_draw_bitmap(_panel, 0, 0, PANEL_W, PANEL_H, _drawFb);
+    JD9365_LOG("present fb=%p -> %s", _drawFb, esp_err_to_name(r));
+    if (r != ESP_OK) return false;
+
+    // draw_bitmap() schedules the framebuffer switch on the DPI engine. Give
+    // it one frame interval before touching the old front buffer, so we never
+    // clone into memory that may still be in the tail end of scanout.
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    // The buffer we just presented is now the front buffer. Draw subsequent
+    // incremental UI changes into the other buffer, first cloning the current
+    // complete frame so unchanged pixels are preserved.
+    void* oldFront = _frontFb;
+    _frontFb = _drawFb;
+    _drawFb = oldFront;
+    memcpy(_drawFb, _frontFb, _fbBytes());
+    _mapLinesTo(_drawFb);
+    _dirty = false;
+    return true;
+  }
 
   // 0..255, as elsewhere in lgfx.
   void setBrightness(uint8_t brightness) override
@@ -155,7 +195,11 @@ private:
   esp_lcd_panel_io_handle_t _io    = nullptr;
   esp_lcd_panel_handle_t    _panel = nullptr;
   esp_ldo_channel_handle_t  _ldo   = nullptr;
-  void*                     _fb    = nullptr;
+  void*                     _fb0     = nullptr;
+  void*                     _fb1     = nullptr;
+  void*                     _frontFb = nullptr;
+  void*                     _drawFb  = nullptr;
+  bool                      _dirty   = false;
 
   size_t _fbBytes(void) const
   {
@@ -176,7 +220,12 @@ private:
   // Vendor sequence: bus -> DBI IO -> DPI panel -> JD9365 -> reset -> init.
   bool _bringUp(void)
   {
-    esp_lcd_dsi_bus_config_t bus_cfg = JD9365_PANEL_BUS_DSI_2CH_CONFIG();
+    // IMPORTANT for ESP32-P4 v3.2: construct this explicitly. The helper
+    // macro path caused esp_lcd_new_dsi_bus() to crash on the tested V3 unit.
+    esp_lcd_dsi_bus_config_t bus_cfg = {};
+    bus_cfg.bus_id = 0;
+    bus_cfg.num_data_lanes = 2;
+    bus_cfg.lane_bit_rate_mbps = jd9365UseV2Panel() ? 840 : 1500;
     esp_err_t r = esp_lcd_new_dsi_bus(&bus_cfg, &_bus);
     JD9365_LOG("dsi bus (%d lanes @ %d Mbps) -> %s", bus_cfg.num_data_lanes,
                (int)bus_cfg.lane_bit_rate_mbps, esp_err_to_name(r));
@@ -194,16 +243,22 @@ private:
     vendor_cfg.init_cmds      = nullptr;   // built-in init table (revision 1)
     vendor_cfg.init_cmds_size = 0;
 
-    // Revision 2 panel: same controller, different glass. The vendor driver
-    // takes an external init table through init_cmds, so it stays untouched;
-    // only the DPI clock and the vertical back porch differ from revision 1.
-    // Horizontal timings and the 1500 Mbps lane rate are the same for both.
+    // Revision 2 panel: same controller, different glass. Supply its external
+    // command table, DPI timing and 840 Mbps DSI lane rate.
     if (jd9365UseV2Panel()) {
-      dpi_cfg.dpi_clock_freq_mhz             = 70;
-      dpi_cfg.video_timing.vsync_back_porch  = 10;
+      // Validated on SKU 10153001-V3 / batch 2635 / ESP32-P4 v3.2.
+      dpi_cfg.dpi_clock_freq_mhz              = 70;
+      dpi_cfg.video_timing.hsync_pulse_width  = 20;
+      dpi_cfg.video_timing.hsync_back_porch   = 20;
+      dpi_cfg.video_timing.hsync_front_porch  = 40;
+      dpi_cfg.video_timing.vsync_pulse_width  = 4;
+      dpi_cfg.video_timing.vsync_back_porch   = 10;
+      dpi_cfg.video_timing.vsync_front_porch  = 30;
       vendor_cfg.init_cmds      = jd9365_init_cmds_v2;
       vendor_cfg.init_cmds_size = jd9365_init_cmds_v2_size;
     }
+    // Two complete driver-owned buffers are required for clean P4 scanout.
+    dpi_cfg.num_fbs = 2;
     JD9365_LOG("panel revision %s (dpi %d MHz, vbp %d)",
                jd9365UseV2Panel() ? "v2" : "v1",
                (int)dpi_cfg.dpi_clock_freq_mhz,
@@ -230,33 +285,39 @@ private:
     JD9365_LOG("panel_init -> %s", esp_err_to_name(r));
     if (r != ESP_OK) return false;
 
-    r = esp_lcd_dpi_panel_get_frame_buffer(_panel, 1, &_fb);
-    JD9365_LOG("get_frame_buffer -> %s  fb=%p (%u bytes)",
-               esp_err_to_name(r), _fb, (unsigned)_fbBytes());
-    if (r != ESP_OK || _fb == nullptr) return false;
+    r = esp_lcd_dpi_panel_get_frame_buffer(_panel, 2, &_fb0, &_fb1);
+    JD9365_LOG("get_frame_buffers -> %s  fb0=%p fb1=%p (%u bytes each)",
+               esp_err_to_name(r), _fb0, _fb1, (unsigned)_fbBytes());
+    if (r != ESP_OK || _fb0 == nullptr || _fb1 == nullptr || _fb0 == _fb1) return false;
 
-    // Whole framebuffer, including the hidden bands, starts black.
-    memset(_fb, 0, _fbBytes());
+    // Start with buffer 0 as scanout/front and let LovyanGFX render into 1.
+    _frontFb = _fb0;
+    _drawFb  = _fb1;
+    memset(_frontFb, 0, _fbBytes());
+    memset(_drawFb,  0, _fbBytes());
+    _dirty = false;
     return true;
   }
 
-  // Hand the UI window of each framebuffer row to lgfx as a row pointer.
+  // Hand the UI window of the current DRAW framebuffer to LovyanGFX.
   bool _mapLines(void)
   {
     const size_t la_size = (size_t)PANEL_H * sizeof(uint8_t*);
-    uint8_t** lineArray = (uint8_t**)heap_caps_malloc(la_size, MALLOC_CAP_DMA);
-    if (lineArray == nullptr) return false;
-    memset(lineArray, 0, la_size);
+    _lines_buffer = (uint8_t**)heap_caps_malloc(la_size, MALLOC_CAP_DMA);
+    if (_lines_buffer == nullptr) return false;
+    memset(_lines_buffer, 0, la_size);
+    return _mapLinesTo(_drawFb);
+  }
 
-    // Physical row stride (whole panel width), 4-byte aligned like lgfx does.
+  bool _mapLinesTo(void* framebuffer)
+  {
+    if (_lines_buffer == nullptr || framebuffer == nullptr) return false;
     const size_t line_length = (((size_t)PANEL_W * _write_bits >> 3) + 3) & ~3u;
     const size_t inset_bytes = (size_t)JD9365_UI_INSET * (_write_bits >> 3);
-    uint8_t* ptr = (uint8_t*)_fb + inset_bytes;
-    for (int y = 0; y < PANEL_H; y++) { lineArray[y] = ptr; ptr += line_length; }
-    _lines_buffer = lineArray;
-
-    JD9365_LOG("line map ok (stride %u bytes, inset %u px)",
-               (unsigned)line_length, (unsigned)JD9365_UI_INSET);
+    uint8_t* ptr = (uint8_t*)framebuffer + inset_bytes;
+    for (int y = 0; y < PANEL_H; y++) { _lines_buffer[y] = ptr; ptr += line_length; }
+    JD9365_LOG("line map fb=%p (stride %u bytes, inset %u px)",
+               framebuffer, (unsigned)line_length, (unsigned)JD9365_UI_INSET);
     return true;
   }
 

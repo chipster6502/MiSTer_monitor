@@ -32,7 +32,14 @@
 #include "mister_types.h"
 #include "AppConfig.h"
 #include <WiFiUdp.h>
-#include "ss_credentials.h"
+// CI provides this header for release builds; local builds can supply
+// ScreenScraper developer credentials in /config.ini instead.
+#if __has_include("ss_credentials.h")
+  #include "ss_credentials.h"
+#else
+  #define SS_DEV_ID_EMBEDDED   ""
+  #define SS_DEV_PASS_EMBEDDED ""
+#endif
 
 // ===== ANTI-CRASH: Reset diagnostics, memory safety =====
 #include "esp_system.h"       // esp_reset_reason()
@@ -3215,6 +3222,9 @@ void setup() {
   } else {
     _ss_dev_user_str = SS_DEV_ID_EMBEDDED;
     _ss_dev_pass_str = SS_DEV_PASS_EMBEDDED;
+    if (_ss_dev_user_str.length() == 0) {
+      Serial.println("[CONFIG] No embedded ScreenScraper developer credentials; use ss_dev_user/ss_dev_pass in config.ini");
+    }
   }
 
   _ss_user_str            = appConfig.ssUser;
@@ -3367,6 +3377,7 @@ void setup() {
     registerWebFilesRoutes();    // /files SD card browser on the same server
     setupScreenshotServer();
   }
+  Board.present();
 }
 
 // ========== STANDBY: STATE LOGIC ==========
@@ -4024,7 +4035,13 @@ static void standbyRestoreScreen() {
   }
 }
 
+struct LoopFrameCommit {
+  ~LoopFrameCommit() { Board.present(); }
+};
+
 void loop() {
+  // Commit a complete frame even if an application-loop path returns early.
+  LoopFrameCommit frameCommit;
   Board.update();
   screenshotServer.handleClient();  // Non-blocking screenshot server poll
 
@@ -5938,6 +5955,7 @@ void showBootSequence() {
     
     // Update progress squares as each line completes
     drawProgressSquares(i + 1);
+    Board.present();
     delay(100);
   }
   
@@ -5966,6 +5984,7 @@ void showBootSequence() {
     
     Board.Display.fillRect(barX + 2*scale, barY + 2*scale, fillWidth, barH - 4*scale, barColor);
     Board.Display.drawFastHLine(barX + 2*scale, barY + 2*scale, fillWidth, THEME_WHITE);
+    Board.present();
     
     delay(15);
   }
@@ -6210,6 +6229,7 @@ void connectWithAnimation() {
     
     // Draw updated circles with current attempt count
     drawWiFiProgressCircles(attempts, false, maxAttempts);
+    Board.present();
     
     Serial.printf("WiFi attempt %d/%d (status %d)...\n", attempts, maxAttempts, (int)WiFi.status());
     delay(1000);
@@ -6241,6 +6261,7 @@ void connectWithAnimation() {
     // Right panel: Turn all circles GREEN
     Board.Display.fillRect(670, 320, 570, 120, THEME_BLACK);
     drawWiFiProgressCircles(attempts, true, maxAttempts);
+    Board.present();
     
     // Test MiSTer connectivity
     delay(1000);
