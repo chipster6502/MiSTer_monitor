@@ -688,6 +688,7 @@ void showBootSequence();
 void drawWiFiProgressCircles(int currentAttempt, bool connected, int maxAttempts);
 void drawC6UpdateProgress(int pct);
 void drawC6UpdateMessage(const String &msg);
+void drawC6StatusLine(const String &msg);
 void connectWithAnimation();
 void testMiSTerConnectivity(bool discovered);
 void showReconnectBanner();
@@ -6018,6 +6019,41 @@ void drawC6UpdateMessage(const String &msg) {
   Board.Display.print(msg);
 }
 
+// Coprocessor messages when no update ran: the WiFi screen is up, not the
+// progress screen. The strip between the radar box (ends at y=500) and the IP
+// line (y=600) is never repainted by the connection loop, so the text stays
+// readable. Wrapped to the left panel, up to three lines, breaking at a
+// phrase boundary where there is one.
+void drawC6StatusLine(const String &msg) {
+  const int x = 110, y = 520, w = 600;
+  const int charW = 12, lineH = 22;          // default font at text size 2
+  const int maxChars = w / charW;
+  const int len = msg.length();
+
+  Board.Display.fillRect(x, y, w, lineH * 3, THEME_BLACK);
+  Board.Display.setTextColor(THEME_YELLOW);
+  Board.Display.setTextSize(2);
+
+  int start = 0;
+  for (int line = 0; line < 3 && start < len; line++) {
+    int end = min(len, start + maxChars);
+    bool breakAtSpace = false;
+    if (end < len) {
+      // Prefer a phrase boundary (", " "; " ": " " - ") so a clause is not
+      // split across lines; fall back to the last space that fits.
+      int sp = -1;
+      for (int i = end; i > start + maxChars / 3; i--) {
+        if (msg[i] == ' ' && strchr(",;:-", msg[i - 1])) { sp = i; break; }
+      }
+      if (sp < 0) sp = msg.lastIndexOf(' ', end);
+      if (sp > start) { end = sp; breakAtSpace = true; }
+    }
+    Board.Display.setCursor(x, y + line * lineH);
+    Board.Display.print(msg.substring(start, end));
+    start = breakAtSpace ? end + 1 : end;    // drop the space we broke at
+  }
+}
+
 void drawWiFiProgressCircles(int currentAttempt, bool connected, int maxAttempts = 30) {
   int startX = 670;      // Start position X (right panel)
   int startY = 320;      // Start position Y (same as progress squares)
@@ -6123,7 +6159,10 @@ void connectWithAnimation() {
   // through; see CoprocessorUpdate.h for why there is no prompt.
   {
     C6UpdateStatus c6 = c6UpdateIfNeeded(SD, drawC6UpdateProgress);
-    if (c6.message.length() > 0) drawC6UpdateMessage(c6.message);
+    if (c6.message.length() > 0) {
+      if (c6.ok) drawC6UpdateMessage(c6.message);   // progress screen, restart follows
+      else       drawC6StatusLine(c6.message);      // WiFi screen, connection goes on
+    }
     if (c6.ok) {
       delay(1500);          // let the message be read before it disappears
       ESP.restart();        // the new radio firmware needs a clean start

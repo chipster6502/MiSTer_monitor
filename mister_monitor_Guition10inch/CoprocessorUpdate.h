@@ -37,10 +37,20 @@
 // place and the check simply runs again next boot.
 //
 // Getting the image: the URL is version-specific, and the core knows which one
-// belongs to it. hostedGetUpdateURL() returns it, e.g.
-//     https://espressif.github.io/arduino-esp32/hosted/esp32c6-v2.12.11.bin
+// belongs to it. hostedGetUpdateURL() returns it:
+//     https://espressif.github.io/arduino-esp32/hosted/esp32c6-v<host version>.bin
 // That file goes on the card as /c6_firmware.bin, and ships in
-// SD_card_content/Guition/. It is Espressif's build, Apache-2.0.
+// SD_card_content/Guition/. It is Espressif's build, Apache-2.0. The core is
+// pinned in release.yml; bumping it bumps the host version, and this file has
+// to be replaced with the matching image in the same commit.
+//
+// Two safeguards keep a wrong image from turning into a restart loop. An image
+// older than the host is refused before anything is written: flashing it would
+// "succeed", the slave would still be behind, and the next boot would try
+// again. And if an update did complete but the slave still reports the old
+// version, the same image is not pushed again -- that attempt is remembered in
+// NVS, keyed by host version and image size, so replacing the file on the card
+// is enough to allow a fresh try.
 //
 // Call site: after WiFi.mode(WIFI_STA), before WiFi.begin(). The SDIO link is
 // only alive once the radio has been put into station mode -- ask any earlier
@@ -53,6 +63,7 @@
 #include <Arduino.h>
 #include <FS.h>
 #include "esp32-hal-hosted.h"
+#include <Preferences.h>
 
 // Espressif's own OTA loop uses 2 KB chunks; no reason to differ.
 static const size_t   C6_UPDATE_CHUNK      = 2048;
@@ -81,6 +92,55 @@ static bool c6SlaveOlderThanHost(const uint32_t s[3], const uint32_t h[3]) {
   return false;
 }
 
+static String c6VersionString(const uint32_t v[3]) {
+  return String(v[0]) + "." + String(v[1]) + "." + String(v[2]);
+}
+
+// Reads major.minor.patch from the esp_app_desc_t every ESP-IDF app image
+// carries: magic word at offset 0x20, version string at 0x30. Returns false if
+// the file is not an app image or the string is not a plain x.y.z version, in
+// which case the caller cannot tell and should not block on it. Leaves the file
+// positioned at 0 either way.
+static bool c6ImageVersion(File &f, uint32_t v[3]) {
+  uint8_t hdr[0x50];
+  bool readOk = f.seek(0) && f.read(hdr, sizeof(hdr)) == sizeof(hdr);
+  f.seek(0);
+  if (!readOk) return false;
+
+  uint32_t magic;
+  memcpy(&magic, hdr + 0x20, sizeof(magic));
+  if (magic != 0xABCD5432UL) return false;
+
+  char ver[33];
+  memcpy(ver, hdr + 0x30, 32);
+  ver[32] = '\0';
+  const char *p = (ver[0] == 'v') ? ver + 1 : ver;
+  unsigned a, b, c;
+  if (sscanf(p, "%u.%u.%u", &a, &b, &c) != 3) return false;
+  v[0] = a; v[1] = b; v[2] = c;
+  return true;
+}
+
+// Identifies one update attempt: this host version with this image file.
+static String c6AttemptKey(const uint32_t hostVer[3], uint32_t imageSize) {
+  return c6VersionString(hostVer) + "/" + String(imageSize);
+}
+
+static bool c6AttemptAlreadyDone(const String &key) {
+  Preferences prefs;
+  prefs.begin("c6update", false);  // read-write: a read-only open of a missing namespace logs an error
+  bool done = prefs.getString("done", "") == key;
+  prefs.end();
+  return done;
+}
+
+static void c6RememberAttempt(const String &key) {
+  Preferences prefs;
+  prefs.begin("c6update", false);
+  prefs.putString("done", key);
+  prefs.end();
+}
+
 // Runs the update from the image on the card. `fs` is the mounted SD.
 // `onProgress` is optional and receives 0..100 so the caller can draw a bar
 // without this file knowing anything about the display.
@@ -104,7 +164,7 @@ inline C6UpdateStatus c6UpdateIfNeeded(fs::FS &fs,
     return st;
   }
 
-  if (!c6SlaveOlderThanHost(st.slaveVer, st.hostVer)) {
+    if (!c6SlaveOlderThanHost(st.slaveVer, st.hostVer)) {
     Serial.println("[C6] Coprocessor firmware is current");
     return st;
   }
@@ -125,6 +185,29 @@ inline C6UpdateStatus c6UpdateIfNeeded(fs::FS &fs,
     f.close();
     st.message = F("Coprocessor image on the card looks truncated - not used");
     Serial.printf("[C6] %s (%u bytes)\n", st.message.c_str(), (unsigned)total);
+    return st;
+  }
+
+  // An image older than the host would flash fine and change nothing that
+  // matters: the slave would still be behind and every boot would repeat this.
+  uint32_t imageVer[3];
+  if (c6ImageVersion(f, imageVer) && c6SlaveOlderThanHost(imageVer, st.hostVer)) {
+    f.close();
+    st.message = String(F("Coprocessor image on the card is v")) +
+                 c6VersionString(imageVer) + F(", this firmware needs v") +
+                 c6VersionString(st.hostVer);
+    Serial.printf("[C6] %s\n", st.message.c_str());
+    return st;
+  }
+
+  // This exact update already completed once and the slave did not move.
+  // Pushing it again would only restart the display into the same state.
+  const String attemptKey = c6AttemptKey(st.hostVer, total);
+  if (c6AttemptAlreadyDone(attemptKey)) {
+    f.close();
+    st.message = String(F("Coprocessor still on v")) + c6VersionString(st.slaveVer) +
+                 F(" after the update - not retrying");
+    Serial.printf("[C6] %s\n", st.message.c_str());
     return st;
   }
 
@@ -187,6 +270,10 @@ inline C6UpdateStatus c6UpdateIfNeeded(fs::FS &fs,
     Serial.printf("[C6] %s\n", st.message.c_str());
     return st;
   }
+
+  // Recorded only on success: every failure path above leaves the old firmware
+  // running and does not restart, so it can safely be retried next boot.
+  c6RememberAttempt(attemptKey);
 
   st.ok = true;
   st.message = F("WiFi coprocessor updated - restarting");
