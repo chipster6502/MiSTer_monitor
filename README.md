@@ -91,6 +91,8 @@ without it the screen shows horizontal colour banding — and some units need a
 one-time WiFi coprocessor update, which the display performs by itself from a
 file on the card. Both are explained in
 [`docs/configuration.md`](docs/configuration.md#guition-jc8012p4a1c).
+The V3 / batch 2635 panel uses the V2 setting. Its DSI bus and framebuffer
+changes were validated on an ESP32-P4 v3.2 board.
 
 See `docs/PORTING.md` for porting guidelines.
 
