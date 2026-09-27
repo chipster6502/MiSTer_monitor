@@ -54,10 +54,14 @@
      figure in parentheses after the SKU on the back sticker — need
      <code>panel_rev=v2</code> in the <code>[ui]</code> section of
      <code>config.ini</code>. <strong>WiFi network listed but never
-     connected?</strong> Copy <code>c6_firmware.bin</code> from
-     <code>SD_card_content/Guition/</code> to the root of the card: the display
-     updates its WiFi coprocessor from it at boot. Both are explained in
+     connected?</strong> On units set to <code>panel_rev=v1</code>, copy <code>c6_firmware.bin</code> from
+     <code>SD_card_content/Guition/</code> to the root of the card for the
+     automatic WiFi coprocessor update. The V2 panel build skips this update
+     check while its startup restart is investigated. Both are explained in
      <a href="https://github.com/chipster6502/MiSTer_monitor/blob/main/docs/configuration.md#guition-jc8012p4a1c">configuration.md</a>.</p>
+  <h3>ESP32-P4 v3.00 or newer (V3 / batch 2635)</h3>
+  <esp-web-install-button manifest="./manifest-guition10inch-v3.json"></esp-web-install-button>
+  <h3>ESP32-P4 before v3.00</h3>
   <esp-web-install-button manifest="./manifest-guition10inch.json"></esp-web-install-button>
 
   <hr>

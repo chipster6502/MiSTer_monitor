@@ -148,6 +148,14 @@ inline C6UpdateStatus c6UpdateIfNeeded(fs::FS &fs,
                                        void (*onProgress)(int) = nullptr) {
   C6UpdateStatus st;
 
+  // V2 panel boards can restart during this version/update check. On the
+  // tested V3 board, skipping it allows normal WiFi setup to complete.
+  // Leave the existing update path in place for V1 panel boards.
+  if (jd9365UseV2Panel()) {
+    Serial.println("[C6] Skipping automatic update check on V2 panel");
+    return st;
+  }
+
   hostedGetHostVersion (&st.hostVer[0],  &st.hostVer[1],  &st.hostVer[2]);
   hostedGetSlaveVersion(&st.slaveVer[0], &st.slaveVer[1], &st.slaveVer[2]);
 

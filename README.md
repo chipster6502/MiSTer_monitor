@@ -93,6 +93,14 @@ file on the card. Both are explained in
 [`docs/configuration.md`](docs/configuration.md#guition-jc8012p4a1c).
 The V3 / batch 2635 panel uses the V2 setting. Its DSI bus and framebuffer
 changes were validated on an ESP32-P4 v3.2 board.
+When building for that board, select **Chip Variant: v3.00 or newer**
+(`ChipVariant=postv3` with Arduino CLI), enable PSRAM, and select 16 MB flash.
+The Arduino default is **Before v3.00**; a binary built with that setting
+left the tested v3.2 display black. The release and web flasher provide
+separate binaries for pre-v3 and v3+ chips.
+On V2 panels the automatic C6 firmware update check is currently skipped:
+it caused the tested V3 board to restart after the boot animation. WiFi
+startup continues normally.
 
 See `docs/PORTING.md` for porting guidelines.
 
