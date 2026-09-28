@@ -49,6 +49,12 @@
   <esp-web-install-button manifest="./manifest-tab5.json"></esp-web-install-button>
 
   <h2>Guition JC8012P4A1C 10.1" (ESP32-P4, 1280x800)</h2>
+  <p><strong>Use the USB-C port marked USB UART</strong>, the one right next to
+     the small white connector. The other two also power the board, but the
+     flasher cannot connect through them.</p>
+  <p><img src="./guition-usb-uart.jpg" width="480"
+          style="max-width:100%;height:auto"
+          alt="The Guition's USB-C ports, with the USB UART port next to the white connector highlighted"></p>
   <p><strong>Colour bands instead of the interface?</strong> Guition ships this
      board with two different LCD panels. Units from batch 2624 onward — the
      figure in parentheses after the SKU on the back sticker — need
@@ -58,7 +64,31 @@
      <code>SD_card_content/Guition/</code> to the root of the card: the display
      updates its WiFi coprocessor from it at boot. Both are explained in
      <a href="https://github.com/chipster6502/MiSTer_monitor/blob/main/docs/configuration.md#guition-jc8012p4a1c">configuration.md</a>.</p>
+
+  <h3>Standard build</h3>
   <esp-web-install-button manifest="./manifest-guition10inch.json"></esp-web-install-button>
+
+  <h3>ESP32-P4 v3 chip (SKU ending in -V3)</h3>
+  <p>Recent units carry a newer revision of the ESP32-P4 that needs its own
+     build: on them the standard build restarts in a loop right after
+     flashing. This page cannot flash the v3 chip yet, but Espressif's own
+     browser tool can:</p>
+  <ol>
+    <li>Download
+      <a href="./mister_monitor_guition10inch_v3.bin" download>mister_monitor_guition10inch_v3.bin</a>.</li>
+    <li>Open <a href="https://espressif.github.io/esptool-js/">espressif.github.io/esptool-js</a>
+      and set <strong>Baudrate</strong> to <strong>115200</strong> before
+      connecting.</li>
+    <li>Click <strong>Connect</strong> and pick the USB UART port.</li>
+    <li>In <strong>Program</strong>, set <strong>Flash Address</strong> to
+      <code>0x0</code>, choose the file you downloaded and click
+      <strong>Program</strong>. When it finishes, unplug the board and plug
+      it back in.</li>
+  </ol>
+  <p>With Python, esptool does the same:
+     <code>esptool --chip esp32p4 write-flash 0x0 mister_monitor_guition10inch_v3.bin</code></p>
+  <p>These units also need <code>panel_rev=v2</code>. More in
+     <a href="https://github.com/chipster6502/MiSTer_monitor/blob/main/docs/installation.md#guition-jc8012p4a1c">installation.md</a>.</p>
 
   <hr>
   <p style="font-size:0.85em;opacity:0.8">
