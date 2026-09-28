@@ -301,6 +301,11 @@ The Tab5 is the only board with a speaker.
 
 ### Guition JC8012P4A1C
 
+**Chip revision.** The most recent units carry the ESP32-P4 v3 and need their
+own firmware build; see
+[installation.md](installation.md#guition-jc8012p4a1c) for how to tell and how
+to flash it. Nothing in `config.ini` changes between the two.
+
 **Panel revision.** Guition ships this 10.1" board with two different LCD
 panels behind the same controller, and the two cannot be told apart by the
 firmware. Units from **batch 2624 onward need `panel_rev=v2`**; earlier ones
@@ -325,6 +330,15 @@ file and restarts. The image is written to the coprocessor's spare slot and
 only made active at the end, so a power cut mid-update leaves the old firmware
 in place and the check runs again at the next boot. On a board that is already
 up to date the file is ignored.
+
+Keep the file in step with the firmware: each release ships the image its
+firmware expects, so replace `c6_firmware.bin` whenever you update. Two checks
+keep a mismatched file from causing trouble. An image older than the one the
+firmware needs is refused before anything is written, and the connection
+screen says which version the card holds and which one is needed. And if an
+update completes but the coprocessor still reports its old version afterwards,
+the display says so and does not try again with the same file; replacing the
+file allows a fresh attempt.
 
 ## Web interface
 

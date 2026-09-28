@@ -18,6 +18,7 @@ ScreenScraper account used for artwork retrieval.
   - [Artwork packs (optional)](#artwork-packs-optional)
 - [Display side](#display-side)
   - [Recommended: Quick install (web flasher)](#recommended-quick-install-web-flasher)
+    - [Guition JC8012P4A1C](#guition-jc8012p4a1c)
   - [Alternative: Building from source (advanced)](#alternative-building-from-source-advanced)
 - [Creating a ScreenScraper account](#creating-a-screenscraper-account)
   - [Advanced: using your own developer account](#advanced-using-your-own-developer-account)
@@ -190,7 +191,8 @@ The fastest way to install the firmware. No Arduino IDE, no compiling.
 1. Use **Google Chrome or Microsoft Edge on a desktop computer** (the flasher
    relies on Web Serial, which mobile browsers and Firefox/Safari do not
    support).
-2. Connect the display to the computer with a USB cable.
+2. Connect the display to the computer with a USB cable. On the Guition, use
+   the port marked **USB UART** (see [below](#guition-jc8012p4a1c)).
 3. Open the flasher page:
    [https://chipster6502.github.io/MiSTer_monitor/flasher/](https://chipster6502.github.io/MiSTer_monitor/flasher/)
 4. Click the **Connect** button for your display, select the serial port in
@@ -202,14 +204,6 @@ The fastest way to install the firmware. No Arduino IDE, no compiling.
    with `config.ini` and the asset images
    (see [`configuration.md`](configuration.md)), then insert it and power on.
 
-> **Guition JC8012P4A1C:** if the screen shows horizontal colour bands instead
-> of the interface, your unit carries the newer panel — set `panel_rev=v2` in
-> the `[ui]` section of `config.ini`. If it lists your WiFi network but never
-> connects, make sure `c6_firmware.bin` from `SD_card_content/Guition/` is in
-> the root of the card: the display updates its WiFi coprocessor from it at
-> boot. Details in
-> [`configuration.md`](configuration.md#guition-jc8012p4a1c).
-
 > **Updating from an earlier version?** Flash the new firmware the same way.
 > Your `config.ini` keeps working — options added since then stay at their
 > defaults until you copy them from the `config.ini` under `SD_card_content/`
@@ -217,6 +211,74 @@ The fastest way to install the firmware. No Arduino IDE, no compiling.
 > `/cores/` on your card as well; it is the logo of the standby screen. Both
 > can be done from the display's
 > [web interface](configuration.md#web-interface) without taking the card out.
+> On the Guition, also replace `c6_firmware.bin` in the root of the card with
+> the one from the new release.
+
+#### Guition JC8012P4A1C
+
+**Which USB-C port.** The board has three USB-C ports side by side. Flash and
+read logs through the one right next to the small white connector, labelled
+*USB UART* inside the case. The other two also power the board, but the
+flasher cannot connect through them.
+
+![The Guition's USB-C ports, with the USB UART port next to the white connector highlighted](images/guition-usb-uart.jpg)
+
+**Which build.** Guition changes this board between batches, and the most
+recent units carry a newer revision of the ESP32-P4 (v3.x) that cannot run
+firmware built for the earlier one. So far they have come with a sticker SKU
+ending in `-V3`, for example `10153001-V3 (2637)`, and esptool reports them as
+`Chip is ESP32-P4 (revision v3.x)` when it connects. With the standard build
+such a unit restarts in a loop right after flashing, and its serial log stops
+after `entry 0x4ff29ed0`. Flashing the wrong build does no harm: flash the
+other one.
+
+The web flasher cannot talk to the v3 chip yet. Download
+`mister_monitor_guition10inch_v3.bin` from the
+[latest release](https://github.com/chipster6502/MiSTer_monitor/releases/latest)
+or the flasher page, then flash it one of two ways.
+
+**In the browser, with Espressif's own tool** (Chrome or Edge on desktop):
+
+1. Open [espressif.github.io/esptool-js](https://espressif.github.io/esptool-js/).
+2. Set **Baudrate** to **115200** before connecting. At higher rates the board
+   resets when the tool switches speed.
+3. Click **Connect** and pick the serial port of the USB UART connection.
+4. In the **Program** section, set **Flash Address** to `0x0`, choose
+   `mister_monitor_guition10inch_v3.bin` and click **Program**.
+5. When it finishes, unplug the board and plug it back in.
+
+**With [esptool](https://docs.espressif.com/projects/esptool/)**, if you have
+Python: install it with `pip install esptool` and run this from the folder you
+saved the file to:
+
+```bash
+esptool --chip esp32p4 write-flash 0x0 mister_monitor_guition10inch_v3.bin
+```
+
+esptool finds the port on its own; add `--port COM5` (or your port) if it
+picks the wrong one.
+
+**Before the first boot**, put these on the card (details in
+[`configuration.md`](configuration.md#guition-jc8012p4a1c)):
+
+- `panel_rev=v2` in the `[ui]` section of `config.ini`, for units from batch
+  2624 onward. The batch is the figure in parentheses after the SKU on the
+  sticker. Without it the screen shows horizontal colour bands instead of the
+  interface. Every v3 unit needs it.
+- `c6_firmware.bin` from `SD_card_content/Guition/`, in the root of the card.
+  Some units ship with WiFi coprocessor firmware that lists your network but
+  never connects; the display updates it from this file at boot, shows a
+  progress bar and restarts once. Take the file from the same release as the
+  firmware: the display refuses an image older than the one it needs.
+
+**Power.** Use a 5 V / 2 A supply, such as a phone charger. Some MiSTer USB
+ports cannot feed a 10.1" panel with WiFi: the boot animation runs, and the
+board restarts as the WiFi comes up. The display talks to the MiSTer over
+WiFi, so it does not need to be plugged into the MiSTer at all.
+
+**WiFi not connecting after opening the case?** The back cover has to come off
+to reach the microSD card, and the small antenna cable inside snaps off
+easily. Check that it is still connected.
 
 ### Alternative: Building from source (advanced)
 

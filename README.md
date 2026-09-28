@@ -85,11 +85,16 @@ the touch controller. The
 through picking the right build. Screenshot capture over HTTP is available on
 all boards **except the 3.5" (ST7796)**, whose panel has no SPI readback.
 
-**Guition JC8012P4A1C:** Guition ships this board with two different LCD
-panels. Units from batch 2624 onward need `panel_rev=v2` in `config.ini` —
-without it the screen shows horizontal colour banding — and some units need a
+**Guition JC8012P4A1C:** Guition changes this board between batches. Units
+from batch 2624 onward carry a second LCD panel and need `panel_rev=v2` in
+`config.ini` — without it the screen shows horizontal colour banding. The most
+recent units (SKU ending in `-V3`) also carry a newer revision of the ESP32-P4
+and need their own firmware build, which the web flasher cannot install yet:
+it goes on from Espressif's browser tool or with esptool. Some units need a
 one-time WiFi coprocessor update, which the display performs by itself from a
-file on the card. Both are explained in
+file on the card. Flash through the USB-C port marked **USB UART**, and
+power the board from a proper 5 V / 2 A supply. All of it is explained in
+[`docs/installation.md`](docs/installation.md#guition-jc8012p4a1c) and
 [`docs/configuration.md`](docs/configuration.md#guition-jc8012p4a1c).
 
 See `docs/PORTING.md` for porting guidelines.
