@@ -67,11 +67,12 @@ esp_err_t esp_lcd_new_panel_jd9365(const esp_lcd_panel_io_handle_t io, const esp
  * @brief MIPI-DSI bus configuration structure
  *
  */
+/* phy_clk_src is left at 0 on purpose: ESP-IDF then picks PLL_F20M on
+ * pre-v3 chips and XTAL on v3+. Naming a clock here aborts on v3 silicon. */
 #define JD9365_PANEL_BUS_DSI_2CH_CONFIG()                \
     {                                                    \
         .bus_id = 0,                                     \
         .num_data_lanes = 2,                             \
-        .phy_clk_src = MIPI_DSI_PHY_CLK_SRC_DEFAULT,     \
         .lane_bit_rate_mbps = 1500,                      \
     }
 
