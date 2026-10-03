@@ -120,6 +120,24 @@ static void pngPlanSize(int w, int h, int boxW, int boxH, int& outW, int& outH) 
   if (outH < 1) outH = 1;
 }
 
+void pngFitSize(int w, int h, int boxW, int boxH, int* outW, int* outH) {
+  int ow = 0, oh = 0;
+  pngPlanSize(w, h, boxW, boxH, ow, oh);
+  if (outW) *outW = ow;
+  if (outH) *outH = oh;
+}
+
+bool pngIsSupported(fs::FS& fs, const char* pngPath) {
+  // IHDR: bit depth at 24, interlace method at 28.
+  File f = fs.open(pngPath, FILE_READ);
+  if (!f) return false;
+  uint8_t hd[29];
+  bool ok = f.read(hd, 29) == 29 && hd[0] == 0x89 && hd[1] == 'P' &&
+            hd[12] == 'I' && hd[13] == 'H' && hd[14] == 'D' && hd[15] == 'R';
+  f.close();
+  return ok && hd[24] <= 8 && hd[28] == 0;
+}
+
 bool pngReadHeader(fs::FS& fs, const char* pngPath, int* w, int* h, int* colorType) {
   // Signature, then the IHDR chunk: width at 16, height at 20, bit depth at
   // 24 and colour type at 25, all big-endian.

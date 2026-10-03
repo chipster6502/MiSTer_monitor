@@ -825,6 +825,9 @@ bool lastGameFoundNoMedia    = false;  // game IS catalogued in SS, but has zero
 // "no artwork exists" (clean NOMEDIA answers) from transient transport hiccups:
 bool g_mediaSawNoMedia       = false;
 bool g_mediaSawValidJpeg     = false;
+// Set while downloading a game's images: screenshots and title screens are
+// then fetched as stored on ScreenScraper (see downloadMediaOriginal()).
+bool g_gameOriginalShots     = false;
 int  g_mediaAttemptCount     = 0;      // attempts in the current media run (drives the HUD)
                                         // (either cached or freshly downloaded)
 bool lastGameSearchExhausted = false;  // true when ScreenScraper search with valid
@@ -853,6 +856,7 @@ bool tryMediaTypesForToken(String baseUrl, String savePath, String token);
 bool applyMediaOrderAndDownload(String baseUrl, String savePath, String orderStr);
 bool applyGameMediaOrder(String baseUrl, String savePath, String orderStr, bool arcade);
 bool findGameImage(const String& coreName, const String& gameName, String& imagePath, bool* stale);
+bool displayGameImage(const String& imagePath);
 void recordGameImage(const String& base, const String& cat, const String& source,
                      const String& token, const String& order, const String& etag,
                      const String& ext);
@@ -3466,6 +3470,64 @@ static bool drawPngInBox(const char* path, int boxX, int boxY, int boxW, int box
   display.endWrite();
   if (scaleOut) *scaleOut = s.k;
   return ok;
+}
+
+// Width and height stored in a .565 header, false if unreadable.
+static bool raw565Size(const String& path, int* w, int* h) {
+  File f = SD.open(path);
+  if (!f) return false;
+  uint8_t head[4];
+  bool ok = f.read(head, 4) == 4;
+  f.close();
+  if (!ok) return false;
+  *w = head[0] | (head[1] << 8);
+  *h = head[2] | (head[3] << 8);
+  return true;
+}
+
+// Game image from a PNG, in the same box as displayCoreImageCentered().
+// Palette and grayscale PNGs are decoded straight to the panel; RGB ones are
+// drawn from a .565 beside the PNG, made on first use and remade whenever it
+// is not the size the current box calls for (kiosk mode changes the box).
+// Measured on this board: a palette PNG decodes faster than its .565 reads,
+// while a 640x480 RGB one takes 480 ms to decode against 140 ms to read.
+static bool displayGamePngCentered(const String& pngPath) {
+  int w = 0, h = 0, type = -1;
+  if (!sdCardAvailable || !pngReadHeader(SD, pngPath.c_str(), &w, &h, &type)) return false;
+  g_artBoxW = TARGET_WIDTH;
+  g_artBoxH = KIOSK_MODE ? TARGET_HEIGHT : IMAGE_AREA_HEIGHT;
+  Lcd.fillScreen(THEME_BLACK);
+
+  PngConvInfo info;
+  if (type == 2 || type == 6) {
+    String raw = pngPath.substring(0, pngPath.lastIndexOf('.')) + ".565";
+    int wantW = 0, wantH = 0, haveW = -1, haveH = -1;
+    pngFitSize(w, h, g_artBoxW, g_artBoxH, &wantW, &wantH);
+    if (!raw565Size(raw, &haveW, &haveH) || haveW != wantW || haveH != wantH) {
+      if (!convertPngTo565(SD, pngPath.c_str(), raw.c_str(), g_artBoxW, g_artBoxH, &info)) {
+        Serial.printf("[PNG] %s: no .565 (%s), decoding directly\n",
+                      pngPath.c_str(), info.error);
+      } else {
+        Serial.printf("[PNG] .565 made in %u ms (largest block %u)\n",
+                      (unsigned)info.ms, (unsigned)info.largestBlock);
+      }
+    }
+    if (drawRaw565InBox(raw.c_str(), 0, 0, g_artBoxW, g_artBoxH, nullptr)) return true;
+  }
+
+  int k = 1;
+  bool ok = drawPngInBox(pngPath.c_str(), 0, 0, g_artBoxW, g_artBoxH, &k, &info);
+  Serial.printf("[PNG] %s %dx%d -> %dx%d x%d, %u ms, largest block %u%s%s\n",
+                pngPath.c_str(), info.srcW, info.srcH, info.outW, info.outH, k,
+                (unsigned)info.ms, (unsigned)info.largestBlock,
+                ok ? "" : ", failed: ", ok ? "" : info.error);
+  return ok;
+}
+
+// Shows a cached game image whatever its format.
+bool displayGameImage(const String& imagePath) {
+  if (imagePath.endsWith(".png")) return displayGamePngCentered(imagePath);
+  return displayCoreImageCentered(imagePath);
 }
 
 // Decodes a logo file to the panel, centred horizontally. yTop < 0 centres it
@@ -7978,9 +8040,10 @@ bool findGameImage(const String& coreName, const String& gameName, String& image
   }
 
   // Manifest missing or unreadable: any image of the current layout will do.
-  static const char* cats[] = { "box", "art", "snap", "title" };
-  for (const char* c : cats) {
-    String p = base + "." + c + ".jpg";
+  static const char* files[] = { ".box.jpg", ".art.jpg", ".snap.png", ".snap.jpg",
+                                  ".title.png", ".title.jpg" };
+  for (const char* tail : files) {
+    String p = base + tail;
     if (SD.exists(p)) { imagePath = p; return true; }
   }
 
@@ -10527,12 +10590,118 @@ bool downloadImageFromMediaJeu(String mediaUrl, String savePath) {
   return result;
 }
 // HELPER FUNCTION - MINIMAL STACK USAGE
+// Media types fetched as stored for games: ScreenScraper's screenshots and
+// title screens are native-size PNG almost always, which keeps pixel art exact.
+static bool isShotMedia(const char* mediaType) {
+  return strcmp(mediaType, "ss") == 0 || strncmp(mediaType, "ss(", 3) == 0 ||
+         strncmp(mediaType, "sstitle", 7) == 0;
+}
+
+static bool fileIsPng(const String& path) {
+  File f = SD.open(path);
+  uint8_t sig[4] = {0, 0, 0, 0};
+  bool png = f && f.read(sig, 4) == 4 && sig[0] == 0x89 && sig[1] == 'P' &&
+             sig[2] == 'N' && sig[3] == 'G';
+  if (f) f.close();
+  return png;
+}
+
+// Downloads a ScreenScraper media as stored: no maxwidth, maxheight or
+// outputformat, streamed to the card. writeToStream() undoes the chunked
+// transfer encoding ScreenScraper's CDN uses. The Content-Type header is
+// unreliable (JPEG arrives labelled image/png), so the format is told from the
+// file's signature.
+// Returns 1 when savePath holds a usable PNG or JPEG, 0 when there is nothing
+// to fetch for this media type, and -1 when the original exists but cannot be
+// used here (too large, or a PNG the decoder does not support): the caller
+// then asks for the reduced JPEG instead.
+static int downloadMediaOriginal(const String& url, const String& savePath,
+                                 const char* mediaName) {
+  g_mediaAttemptCount++;
+  int mediaProgress = 50 + g_mediaAttemptCount;
+  if (mediaProgress > 90) mediaProgress = 90;
+  showDownloadProgressColored(mediaProgress, String("Trying ") + mediaName + "...",
+                              THEME_CYAN);
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(25000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+  int httpCode = http.GET();
+  g_lastSSHttpCode = httpCode;
+  if (httpCode != 200) {
+    http.end();
+    return 0;
+  }
+  int len = http.getSize();
+  if (len > MAX_IMAGE_SIZE) {
+    Serial.printf("[MEDIA] %s original is %d bytes, over the limit\n", mediaName, len);
+    http.end();
+    return -1;
+  }
+  File f = SD.open(savePath, FILE_WRITE);
+  if (!f) {
+    http.end();
+    return -1;
+  }
+  int written = http.writeToStream(&f);
+  f.close();
+  http.end();
+  if (written <= 0 || (len > 0 && written != len)) {
+    SD.remove(savePath);
+    return 0;
+  }
+  if (written > MAX_IMAGE_SIZE) {
+    SD.remove(savePath);
+    return -1;
+  }
+
+  uint8_t head[64];
+  size_t n = 0;
+  File r = SD.open(savePath);
+  if (r) { n = r.read(head, sizeof(head)); r.close(); }
+
+  if (n >= 3 && head[0] == 0xFF && head[1] == 0xD8 && head[2] == 0xFF) {
+    g_mediaSawValidJpeg = true;
+    Serial.printf("[MEDIA] %s original: JPEG, %d bytes\n", mediaName, written);
+    return 1;
+  }
+  if (n >= 4 && head[0] == 0x89 && head[1] == 'P' && head[2] == 'N' && head[3] == 'G') {
+    if (pngIsSupported(SD, savePath.c_str())) {
+      g_mediaSawValidJpeg = true;     // "a usable image arrived"; predates PNG
+      Serial.printf("[MEDIA] %s original: PNG, %d bytes\n", mediaName, written);
+      return 1;
+    }
+    Serial.printf("[MEDIA] %s original: PNG the decoder cannot read\n", mediaName);
+    SD.remove(savePath);
+    return -1;
+  }
+
+  // Not an image: ScreenScraper answers in plain text ("NOMEDIA", errors).
+  String text;
+  for (size_t i = 0; i < n; i++) text += (char)head[i];
+  if (text.indexOf("NOMEDIA") != -1) g_mediaSawNoMedia = true;
+  SD.remove(savePath);
+  return 0;
+}
+
 bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* mediaType, const char* mediaName) {
   // Check memory before each attempt
   int currentHeap = ESP.getFreeHeap();
   if (currentHeap < 60000) {
     Serial.printf("Low memory before %s (%d bytes), stopping\n", mediaName, currentHeap);
     return false;
+  }
+
+  // Screenshots and title screens for games: the original first; the reduced
+  // JPEG below remains for originals the panel cannot use.
+  if (g_gameOriginalShots && isShotMedia(mediaType)) {
+    int r = downloadMediaOriginal(baseUrl + "&media=" + String(mediaType), savePath, mediaName);
+    if (r > 0) return true;
+    if (r == 0) {
+      pumpedDelay(1000);
+      return false;
+    }
   }
   
   String currentUrl = baseUrl + "&media=" + String(mediaType);
@@ -10772,13 +10941,24 @@ bool applyGameMediaOrder(String baseUrl, String savePath, String orderStr, bool 
     token.trim();
     if (token.length() > 0) {
       String cat = gameImageCategory(token);
-      String finalPath = base + "." + cat + ".jpg";
-      String tmpPath = finalPath + ".tmp";
+      String tmpPath = base + "." + cat + ".tmp";
       if (SD.exists(tmpPath)) SD.remove(tmpPath);
-      if (tryMediaTypesForToken(baseUrl, tmpPath, token)) {
-        if (SD.exists(finalPath)) SD.remove(finalPath);
+      g_gameOriginalShots = true;
+      bool got = tryMediaTypesForToken(baseUrl, tmpPath, token);
+      g_gameOriginalShots = false;
+      if (got) {
+        // The format decides the name: screenshots and title screens may
+        // arrive as PNG. Whatever the category held before goes, its .565
+        // included, so a stale file can never shadow the new one.
+        String ext = fileIsPng(tmpPath) ? "png" : "jpg";
+        String finalPath = base + "." + cat + "." + ext;
+        static const char* olds[] = { ".jpg", ".png", ".565" };
+        for (const char* o : olds) {
+          String old = base + "." + cat + o;
+          if (SD.exists(old)) SD.remove(old);
+        }
         if (SD.rename(tmpPath, finalPath)) {
-          recordGameImage(base, cat, "ss", token, mediaOrderStamp(arcade), "-", "jpg");
+          recordGameImage(base, cat, "ss", token, mediaOrderStamp(arcade), "-", ext);
           return true;
         }
         SD.remove(tmpPath);
@@ -10910,7 +11090,7 @@ void showGameImageScreenCorrected(String coreName, String gameName) {
   } else {
     Serial.printf("Game image found: %s\n", imagePath.c_str());
     
-    if (displayCoreImageCentered(imagePath)) {
+    if (displayGameImage(imagePath)) {
       Serial.println("Game image displayed correctly");
       lastGameImageOK = true;
       addGameImageFooter(gameName);
@@ -10946,7 +11126,7 @@ void showGameImageScreenCorrected(String coreName, String gameName) {
       // Final memory check before download
       if (ESP.getFreeHeap() < 120000) {
         Serial.printf("Insufficient memory for download (%d bytes)\n", ESP.getFreeHeap());
-        if (staleImage.length() > 0 && displayCoreImageCentered(staleImage)) {
+        if (staleImage.length() > 0 && displayGameImage(staleImage)) {
           lastGameImageOK = true;
           addGameImageFooter(gameName);
           return;
@@ -10963,7 +11143,7 @@ void showGameImageScreenCorrected(String coreName, String gameName) {
       if (downloadGameBoxartStreamingSafeJSON(coreName, gameName)) {
         Serial.println("STREAMING-SAFE download successful! Displaying...");
         
-        if (findGameImage(coreName, gameName, imagePath, nullptr) && displayCoreImageCentered(imagePath)) {
+        if (findGameImage(coreName, gameName, imagePath, nullptr) && displayGameImage(imagePath)) {
           Serial.println("Downloaded streaming-safe image displayed successfully");
           
           // Only update cache on successful download AND display
@@ -11003,7 +11183,7 @@ void showGameImageScreenCorrected(String coreName, String gameName) {
   }
   
   // A stale image that could not be replaced is still better than the core.
-  if (staleImage.length() > 0 && displayCoreImageCentered(staleImage)) {
+  if (staleImage.length() > 0 && displayGameImage(staleImage)) {
     Serial.println("Search found nothing new - keeping the cached image");
     lastGameImageOK = true;
     addGameImageFooter(gameName);

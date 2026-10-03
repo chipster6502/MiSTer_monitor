@@ -54,6 +54,13 @@ struct PngConvInfo {
 // is not a PNG.
 bool pngReadHeader(fs::FS& fs, const char* pngPath, int* w, int* h, int* colorType);
 
+// Size decodePngScaled() produces for a w x h source in a boxW x boxH box.
+void pngFitSize(int w, int h, int boxW, int boxH, int* outW, int* outH);
+
+// False for a PNG this decoder cannot read: interlaced, or more than 8 bits
+// per sample. Checks the header only.
+bool pngIsSupported(fs::FS& fs, const char* pngPath);
+
 // Receives output row y (outW pixels, RGB565 high byte first). The buffer is
 // only valid during the call. Return false to abort the decode.
 typedef bool (*PngRowSink)(void* user, int y, const uint16_t* row, int w);
