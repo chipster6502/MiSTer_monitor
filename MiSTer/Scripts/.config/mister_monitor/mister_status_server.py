@@ -490,6 +490,10 @@ _state = {
     'game_system':       '',       # the GAME's real system when a backwards-compatible core opened it
     'artwork_path':      '',       # absolute path of the pack image for the loaded game, '' when none
     'artwork_seq':       -1,       # the seq that artwork_path was resolved for; a mismatch means stale
+    'snap_path':         '',       # same pair for the screenshot pack
+    'snap_seq':          -1,
+    'title_path':        '',       # same pair for the title-screen pack
+    'title_seq':         -1,
     'game':              '',       # game name (filename without extension)
     'game_path':         '',       # absolute path to ROM file
     'is_arcade':         False,    # True if current core is arcade
@@ -1397,12 +1401,13 @@ def _path_names_game(candidate, game):
 
 
 # ---------------------------------------------------------------------------
-# Boxart Pack — local artwork resolution
+# Artwork packs — local image resolution
 #
-# One image per GAME (not per dump) at docs/<System>/Artwork/<key>.jpg, plus an
-# index.tsv of (name, crc, size, key) rows mapping every known dump of a game to
-# the image that represents it, so a regional variant with no file of its own
-# is sent to the image of the dump the pack picked.
+# One image per GAME (not per dump) at docs/<System>/<Folder>/<key>.<ext>, one
+# folder per media kind (see _PACK_MEDIA), each with an index.tsv of (name, crc,
+# size, key) rows mapping every known dump of a game to the image that
+# represents it, so a regional variant with no file of its own is sent to the
+# image of the dump the pack picked.
 # Installed with path 'pext', so the mount points are probed, never assumed.
 # ---------------------------------------------------------------------------
 
@@ -1458,18 +1463,29 @@ _PACK_SYSTEM = {
 
 _PACK_MOUNTS = ['/media/fat'] + ['/media/usb%d' % i for i in range(8)]
 
+# Media kind -> (folder under docs/<System>/, file extension). Each folder has
+# its own index.tsv: representative keys differ between kinds, so a key is only
+# ever resolved against the index of the folder it will be read from.
+_PACK_MEDIA = {
+    'artwork': ('Artwork', '.jpg'),
+    'snap':    ('Screenshots', '.png'),
+    'title':   ('Titles', '.png'),
+}
+
 # dir -> (mtime_ns, {name_lower: key}, {'crc:size': key}). Arcade's index is 12k
 # rows and only changes when the Downloader rewrites it.
 _pack_index_cache = {}
 _pack_index_lock = threading.Lock()
 
 
-def _pack_dir(system_folder):
-    """Absolute path of the pack folder for a system, '' when not installed."""
+def _pack_dir(system_folder, media='artwork'):
+    """Absolute path of a system's pack folder for one media kind, '' when not
+    installed."""
     if not system_folder:
         return ''
+    subdir = _PACK_MEDIA[media][0]
     for mount in _PACK_MOUNTS:
-        candidate = os.path.join(mount, 'docs', system_folder, 'Artwork')
+        candidate = os.path.join(mount, 'docs', system_folder, subdir)
         if os.path.isdir(candidate):
             return candidate
     return ''
@@ -1506,19 +1522,20 @@ def _pack_folders(friendly):
     return [folder] + list(_PACK_SIBLINGS.get(folder, ()))
 
 
-def _pack_lookup_any(folders, keys, crc, size):
+def _pack_lookup_any(folders, keys, crc, size, media='artwork'):
     """First (path, resolved_key, folder) any folder yields for any key.
     Folders come from the shared-catalogue rule; several keys appear when the
     reported game name is ambiguous as a path (see _pack_key_from_state).
     """
     if isinstance(keys, str):
         keys = [keys]
+    ext = _PACK_MEDIA[media][1]
     for folder in folders:
-        pack_dir = _pack_dir(folder)
+        pack_dir = _pack_dir(folder, media)
         if not pack_dir:
             continue
         for key in keys or ['']:
-            found, resolved = _pack_lookup(pack_dir, key, crc, size)
+            found, resolved = _pack_lookup(pack_dir, key, crc, size, ext)
             if found:
                 return found, resolved, folder
     return '', '', (folders[0] if folders else '')
@@ -1577,7 +1594,7 @@ def _pack_index(pack_dir):
     return by_name, by_hash, by_title
 
 
-def _pack_lookup(pack_dir, key, crc, size):
+def _pack_lookup(pack_dir, key, crc, size, ext='.jpg'):
     """(abs_path, resolved_key) for a game, ('', '') when the pack has no image.
     Steps, cheapest first:
 
@@ -1595,7 +1612,7 @@ def _pack_lookup(pack_dir, key, crc, size):
         return '', ''
 
     if key:
-        direct = os.path.join(pack_dir, key + '.jpg')
+        direct = os.path.join(pack_dir, key + ext)
         if os.path.isfile(direct):
             return direct, key
 
@@ -1604,7 +1621,7 @@ def _pack_lookup(pack_dir, key, crc, size):
     if key:
         mapped = by_name.get(key.strip().lower())
         if mapped:
-            candidate = os.path.join(pack_dir, mapped + '.jpg')
+            candidate = os.path.join(pack_dir, mapped + ext)
             if os.path.isfile(candidate):
                 return candidate, mapped
 
@@ -1616,7 +1633,7 @@ def _pack_lookup(pack_dir, key, crc, size):
         tail = re.search(r'\(([^()]+)\)\s*$', key)
         if tail:
             setname = tail.group(1).strip()
-            candidate = os.path.join(pack_dir, setname + '.jpg')
+            candidate = os.path.join(pack_dir, setname + ext)
             if setname and os.path.isfile(candidate):
                 return candidate, setname
 
@@ -1625,18 +1642,30 @@ def _pack_lookup(pack_dir, key, crc, size):
     if crc and size:
         mapped = by_hash.get('%s:%s' % (str(crc).strip().lower(), str(size).strip()))
         if mapped:
-            candidate = os.path.join(pack_dir, mapped + '.jpg')
+            candidate = os.path.join(pack_dir, mapped + ext)
             if os.path.isfile(candidate):
                 return candidate, mapped
 
     if key:
         mapped = by_title.get(_pack_title(key))
         if mapped:
-            candidate = os.path.join(pack_dir, mapped + '.jpg')
+            candidate = os.path.join(pack_dir, mapped + ext)
             if os.path.isfile(candidate):
                 return candidate, mapped
 
     return '', ''
+
+
+def _pack_etag(path):
+    """Fingerprint of a pack image: which file and which version of it. Every
+    kind is served from one fixed URL whatever the game, so the path must be
+    part of it or two games' images could share a tag. '' when unreadable."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return ''
+    return '%08x-%x-%x' % (zlib.crc32(path.encode('utf-8', 'replace')),
+                           st.st_size, int(st.st_mtime))
 
 
 def _pack_key_from_state(game_path, is_arcade):
@@ -1676,33 +1705,41 @@ def _pack_key_from_state(game_path, is_arcade):
 
 
 def _pack_resolve_for_state(game_path, is_arcade, game_system, core, seq):
-    """Resolves the pack image at state-commit time and records which seq it
-    belongs to, so /media/artwork is correct before the display asks."""
-    path = ''
+    """Resolves every pack image at state-commit time and records which seq
+    they belong to, so /media/* is correct before the display asks."""
+    paths = dict.fromkeys(_PACK_MEDIA, '')
     try:
         folders = (['Arcade'] if is_arcade
                    else _pack_folders(game_system or core))
         if folders:
             keys = _pack_key_from_state(game_path, is_arcade)
-            path, resolved, system_folder = _pack_lookup_any(folders, keys, '', '')
-            if path:
-                print("\U0001f5bc\ufe0f local artwork: %s/%s.jpg" % (system_folder, resolved))
+            for media, (_, ext) in _PACK_MEDIA.items():
+                path, resolved, system_folder = _pack_lookup_any(
+                    folders, keys, '', '', media)
+                if path:
+                    paths[media] = path
+                    print("\U0001f5bc\ufe0f local %s: %s/%s%s"
+                          % (media, system_folder, resolved, ext))
     except Exception as e:
         print("\u26a0\ufe0f local artwork lookup failed: %s" % e)
     with _state_lock:
-        _state['artwork_path'] = path
-        _state['artwork_seq'] = seq
+        for media, path in paths.items():
+            _state[media + '_path'] = path
+            _state[media + '_seq'] = seq
 
 
 def _pack_annotate(result):
-    """Adds artwork_local / artwork_key / artwork_system to a rom-details result
-    and caches the resolved path for /media/artwork to serve.
+    """Adds <media>_local / <media>_key / <media>_etag for every pack kind, plus
+    artwork_system, to a rom-details result, and caches the resolved paths for
+    /media/* to serve.
 
     Never raises: a pack problem must not be able to break rom-details, which
     the firmware needs for everything else.
     """
-    result['artwork_local'] = False
-    result['artwork_key'] = ''
+    for media in _PACK_MEDIA:
+        result[media + '_local'] = False
+        result[media + '_key'] = ''
+        result[media + '_etag'] = ''
     result['artwork_system'] = ''
     try:
         with _state_lock:
@@ -1728,20 +1765,25 @@ def _pack_annotate(result):
             # Consoles: the standard dump name without its extension.
             key = os.path.splitext(result.get('filename') or '')[0]
 
-        found, resolved, system_folder = _pack_lookup_any(
-            folders, key, result.get('crc32'), result.get('size'))
-        result['artwork_system'] = system_folder
-        if found:
-            result['artwork_local'] = True
-            result['artwork_key'] = resolved
+        for media, (_, ext) in _PACK_MEDIA.items():
+            found, resolved, system_folder = _pack_lookup_any(
+                folders, key, result.get('crc32'), result.get('size'), media)
+            if media == 'artwork':
+                result['artwork_system'] = system_folder
+            if not found:
+                continue
+            result[media + '_local'] = True
+            result[media + '_key'] = resolved
+            result[media + '_etag'] = _pack_etag(found)
             # Only ever UPGRADES what the state commit resolved: the CRC step
             # can find an image the name step missed, but a miss here must not
             # wipe a good path.
             with _state_lock:
-                if _state['artwork_path'] != found:
-                    _state['artwork_path'] = found
-                    _state['artwork_seq'] = _state['seq']
-            print("\U0001f5bc\ufe0f local artwork: %s/%s.jpg" % (system_folder, resolved))
+                if _state[media + '_path'] != found:
+                    _state[media + '_path'] = found
+                    _state[media + '_seq'] = _state['seq']
+            print("\U0001f5bc\ufe0f local %s: %s/%s%s"
+                  % (media, system_folder, resolved, ext))
     except Exception as e:
         print("\u26a0\ufe0f local artwork lookup failed: %s" % e)
     return result
@@ -2705,6 +2747,8 @@ PUBLIC_ENDPOINTS = [
     ('/status/error_state',       'Current error state (troubleshooting)'),
     ('/status/version',           'Server version'),
     ('/media/artwork',            'Artwork for the loaded game, from the installed pack'),
+    ('/media/snap',               'Screenshot for the loaded game, from the installed pack'),
+    ('/media/title',              'Title screen for the loaded game, from the installed pack'),
 ]
 
 class MiSTerStatusHandler(BaseHTTPRequestHandler):
@@ -2792,11 +2836,11 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
                 self.send_json_response(self.get_rom_details_forced())
             else:
                 self.send_json_response(self.get_rom_details())
-        elif path == '/media/artwork':
-            # Serves the pack image for the loaded game: the display cannot read
+        elif path in ('/media/artwork', '/media/snap', '/media/title'):
+            # Serves a pack image for the loaded game: the display cannot read
             # the MiSTer's SD, so the bytes have to travel. 404 means "no local
             # image" and the firmware falls back to ScreenScraper.
-            self.send_artwork_response()
+            self.send_pack_media_response(path[len('/media/'):])
         elif path == '/status/error_state':
             # NEW ENDPOINT: Return current error state
             global server_error_state, last_valid_core, last_valid_core_timestamp
@@ -4345,8 +4389,8 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
     # ========== HTTP RESPONSE HELPERS ==========
     
-    def _artwork_by_hash(self, seq_at_start):
-        """Second attempt at the pack image, using the CRC the state commit did
+    def _pack_by_hash(self, seq_at_start, media):
+        """Second attempt at a pack image, using the CRC the state commit did
         not have. Returns '' when there is nothing to serve, and never raises.
 
         Arcade is excluded: a MAME set is a zip of many files and has no single
@@ -4377,62 +4421,84 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
 
             key = os.path.splitext(details.get('filename') or '')[0]
             found, resolved, system_folder = _pack_lookup_any(
-                folders, key, details.get('crc32'), details.get('size'))
+                folders, key, details.get('crc32'), details.get('size'), media)
             if not found:
                 return ''
 
             with _state_lock:
                 if _state['seq'] != seq_at_start:
                     return ''
-                _state['artwork_path'] = found
-                _state['artwork_seq'] = seq_at_start
-            print("\U0001f5bc\ufe0f local artwork by hash: %s/%s.jpg"
-                  % (system_folder, resolved))
+                _state[media + '_path'] = found
+                _state[media + '_seq'] = seq_at_start
+            print("\U0001f5bc\ufe0f local %s by hash: %s/%s%s"
+                  % (media, system_folder, resolved, _PACK_MEDIA[media][1]))
             return found
         except Exception as e:
             print("\u26a0\ufe0f local artwork hash lookup failed: %s" % e)
             return ''
 
-    def send_artwork_response(self):
-        """Sends the pack image for the loaded game, or 404.
+    def send_pack_media_response(self, media):
+        """Sends the pack image of one kind for the loaded game, or 404.
 
-        The path is resolved during rom-details, not here, so this handler stays
-        cheap enough to hit on every game change. Content-Length is mandatory:
-        the ESP32 HTTP client needs it to size its read.
+        The path is resolved at state commit and refined during rom-details,
+        not here, so this handler stays cheap enough to hit on every game
+        change. Content-Length is mandatory: the ESP32 HTTP client needs it to
+        size its read.
+
+        Caching is ETag-only. The URL is the same for every game, so a
+        date-based validator could confirm an older file belonging to another
+        game; no-cache makes clients revalidate on every request.
         """
         with _state_lock:
-            artwork_path = _state.get('artwork_path', '')
+            image_path = _state.get(media + '_path', '')
             seq_at_start = _state['seq']
-            fresh = (_state.get('artwork_seq', -1) == seq_at_start)
+            fresh = (_state.get(media + '_seq', -1) == seq_at_start)
 
         # Serving an image resolved for a PREVIOUS game is worse than serving
         # none: 404 sends the display to ScreenScraper instead.
         if not fresh:
-            self.send_error_response(404, 'Artwork not resolved for the current game')
+            self.send_error_response(
+                404, '%s not resolved for the current game' % media.capitalize())
             return
 
-        # Fresh but EMPTY is not the same as "no artwork exists": the state
+        # Fresh but EMPTY is not the same as "no image exists": the state
         # commit resolves the pack from the game's NAME alone, so _pack_lookup's
         # crc+size step — the one that catches a renamed dump — never ran. Retry
         # here with the hash: it costs once per game and only after the cheap
         # name lookup has already missed.
-        if not artwork_path:
-            artwork_path = self._artwork_by_hash(seq_at_start)
+        if not image_path:
+            image_path = self._pack_by_hash(seq_at_start, media)
 
-        if not artwork_path or not os.path.isfile(artwork_path):
-            self.send_error_response(404, 'No local artwork for the loaded game')
+        if not image_path or not os.path.isfile(image_path):
+            self.send_error_response(404, 'No local %s for the loaded game' % media)
             return
+
+        etag = _pack_etag(image_path)
+        quoted = '"%s"' % etag
+        if etag:
+            sent = [t.strip() for t in self.headers.get('If-None-Match', '').split(',')]
+            if quoted in [t[2:] if t.startswith('W/') else t for t in sent]:
+                self.send_response(304)
+                self.send_header('ETag', quoted)
+                self.send_header('Cache-Control', 'no-cache')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                return
 
         try:
-            with open(artwork_path, 'rb') as f:
+            with open(image_path, 'rb') as f:
                 body = f.read()
         except OSError as e:
-            self.send_error_response(500, 'Artwork unreadable: %s' % e)
+            self.send_error_response(500, '%s unreadable: %s' % (media.capitalize(), e))
             return
 
+        ctype = 'image/png' if image_path.lower().endswith('.png') else 'image/jpeg'
         self.send_response(200)
-        self.send_header('Content-type', 'image/jpeg')
+        self.send_header('Content-type', ctype)
         self.send_header('Content-Length', str(len(body)))
+        if etag:
+            self.send_header('ETag', quoted)
+        self.send_header('Cache-Control', 'no-cache')
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(body)
