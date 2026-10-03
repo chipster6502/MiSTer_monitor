@@ -192,10 +192,6 @@ int  DEBUG_FORCE_LEVEL            = 0;
 bool ENABLE_AUTO_DOWNLOAD         = true;
 int  MAX_IMAGE_SIZE               = 500000;
 int  DOWNLOAD_TIMEOUT             = 30000;
-// Streaming window for artwork transfers. Deliberately a compile-time
-// constant and not a config knob: the point of it is that no allocation in
-// the artwork path scales with the image. Matches JPEGDEC's own file window.
-#define PACK_STREAM_CHUNK           2048
 int  SCROLL_SPEED_MS              = 300;
 int  SCROLL_PAUSE_START_MS        = 2000;
 int  SCROLL_PAUSE_END_MS          = 3000;
@@ -741,7 +737,6 @@ String getSavePath(String exactFileName, String searchCore);
 String gameCacheDir(const String& exactFileName, String searchCore);
 
 // Media and image functions
-bool downloadArtworkFromPack(String savePath);
 bool downloadImageFromScreenScraper(String imageUrl, String savePath);
 bool downloadImageFromMediaJeu(String mediaUrl, String savePath);
 bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload = FORCE_CORE_REDOWNLOAD);
@@ -857,6 +852,7 @@ bool applyMediaOrderAndDownload(String baseUrl, String savePath, String orderStr
 bool applyGameMediaOrder(String baseUrl, String savePath, String orderStr, bool arcade);
 bool findGameImage(const String& coreName, const String& gameName, String& imagePath, bool* stale);
 bool displayGameImage(const String& imagePath);
+bool gameLocalPass(const String& base, bool arcade, uint32_t timeoutMs);
 void recordGameImage(const String& base, const String& cat, const String& source,
                      const String& token, const String& order, const String& etag,
                      const String& ext);
@@ -8062,6 +8058,133 @@ bool findGameImage(const String& coreName, const String& gameName, String& image
   return false;
 }
 
+// =============================================================================
+// Local pass: the MiSTer's packs, walked in media order
+// =============================================================================
+// Each token maps to what the server can serve for it from the installed
+// packs; screenshot falls back to the title screen, as it does on
+// ScreenScraper. The first token with a local image wins, ahead of any
+// ScreenScraper source: a pack is installed to be used.
+
+// fetchPackMedia() results.
+enum { PACK_NONE, PACK_SAME, PACK_NEW, PACK_ERROR };
+
+static int localSourcesFor(const String& token, const char* out[2]) {
+  if (strcmp(gameImageCategory(token), "box") == 0) { out[0] = "artwork"; return 1; }
+  if (token == "screenshot")  { out[0] = "snap"; out[1] = "title"; return 2; }
+  if (token == "titlescreen") { out[0] = "title"; return 1; }
+  return 0;
+}
+
+// Asks the server for one pack image of the loaded game. etagIn, when set, is
+// sent as If-None-Match: 304 means the cached copy is still current. A new
+// image is stored as <base>.<cat>.<ext> (ext from its signature) through a
+// temporary name, replacing whatever the category held, .565 included.
+static int fetchPackMedia(const char* kind, const String& base, const String& cat,
+                                const String& etagIn, uint32_t timeoutMs,
+                                String& extOut, String& etagOut) {
+  String url = String("http://") + misterIP + ":8081/media/" + kind;
+  HTTPClient http;
+  http.begin(url);
+  http.setConnectTimeout(timeoutMs);
+  http.setTimeout(timeoutMs);
+  const char* wanted[] = { "ETag" };
+  http.collectHeaders(wanted, 1);
+  if (etagIn.length() > 0) http.addHeader("If-None-Match", "\"" + etagIn + "\"");
+  int code = http.GET();
+  if (code == 304) { http.end(); return PACK_SAME; }
+  if (code == 404) { http.end(); return PACK_NONE; }
+  if (code != 200) {
+    Serial.printf("[LOCAL] /media/%s: HTTP %d\n", kind, code);
+    http.end();
+    return PACK_ERROR;
+  }
+  int len = http.getSize();
+  if (len <= 0 || len > MAX_IMAGE_SIZE) { http.end(); return PACK_NONE; }
+  etagOut = http.header("ETag");
+  etagOut.replace("\"", "");
+
+  String tmpPath = base + "." + cat + ".tmp";
+  File f = SD.open(tmpPath, FILE_WRITE);
+  if (!f) { http.end(); return PACK_ERROR; }
+  int written = http.writeToStream(&f);
+  f.close();
+  http.end();
+  if (written != len) { SD.remove(tmpPath); return PACK_ERROR; }
+
+  uint8_t sig[4] = {0, 0, 0, 0};
+  File r = SD.open(tmpPath);
+  if (r) { r.read(sig, 4); r.close(); }
+  bool jpeg = (sig[0] == 0xFF && sig[1] == 0xD8);
+  bool png  = (sig[0] == 0x89 && sig[1] == 'P' && sig[2] == 'N' && sig[3] == 'G');
+  if (!jpeg && !(png && pngIsSupported(SD, tmpPath.c_str()))) {
+    SD.remove(tmpPath);
+    return PACK_NONE;
+  }
+  extOut = png ? "png" : "jpg";
+  static const char* olds[] = { ".jpg", ".png", ".565" };
+  for (const char* o : olds) {
+    String old = base + "." + cat + o;
+    if (SD.exists(old)) SD.remove(old);
+  }
+  String finalPath = base + "." + cat + "." + extOut;
+  if (!SD.rename(tmpPath, finalPath)) { SD.remove(tmpPath); return PACK_ERROR; }
+  Serial.printf("[LOCAL] /media/%s -> %s (%d bytes)\n", kind, finalPath.c_str(), written);
+  return PACK_NEW;
+}
+
+// Walks the media order over the packs. Returns true when the image to show
+// changed: a new file was stored, or a cached pack image of another category
+// now leads. A cached pack image counts as available even when the server
+// answers 404 for it. False when no local image applies, nothing changed, or the
+// server could not be reached (the cache is then left exactly as it was).
+bool gameLocalPass(const String& base, bool arcade, uint32_t timeoutMs) {
+  if (strlen(misterIP) == 0) return false;
+  GameImageManifest m;
+  bool haveM = loadGameImageManifest(base, m);
+  String stamp = mediaOrderStamp(arcade);
+  const String& order = arcade ? ARCADE_MEDIA_ORDER_STR : GAME_MEDIA_ORDER_STR;
+
+  int start = 0;
+  while (start < (int)order.length()) {
+    int comma = order.indexOf(',', start);
+    String token = (comma == -1) ? order.substring(start) : order.substring(start, comma);
+    token.trim();
+    start = (comma == -1) ? order.length() : comma + 1;
+    const char* kinds[2];
+    int nk = localSourcesFor(token, kinds);
+    if (nk == 0) continue;
+    String cat = gameImageCategory(token);
+
+    for (int k = 0; k < nk; k++) {
+      // Only a pack image still on the card can be confirmed by its tag.
+      String etagIn;
+      GameImageEntry* e = haveM ? m.find(cat) : nullptr;
+      if (e && e->source == "pack" && e->etag != "-" && SD.exists(gameImagePath(base, *e)))
+        etagIn = e->etag;
+
+      String ext, etag;
+      int r = fetchPackMedia(kinds[k], base, cat, etagIn, timeoutMs, ext, etag);
+      if (r == PACK_ERROR) return false;
+      // A pack image already on the card is a local copy too: it still
+      // answers for its token when the server no longer has it (pack removed,
+      // or a moment when the server is between games).
+      if (r == PACK_NONE && etagIn.length() > 0) r = PACK_SAME;
+      if (r == PACK_NONE) continue;
+      if (r == PACK_NEW) {
+        recordGameImage(base, cat, "pack", token, stamp, etag, ext);
+        return true;
+      }
+      // PACK_SAME: the cached copy stands; make sure it is the one shown and
+      // carries the order it now answers to.
+      if (m.main == cat && e->order == stamp) return false;
+      recordGameImage(base, cat, "pack", token, stamp, e->etag, e->ext);
+      return true;
+    }
+  }
+  return false;
+}
+
 bool saveGameMeta(const String &metaPath, const GameMeta &m) {
   File f = SD.open(metaPath, FILE_WRITE);
   if (!f) {
@@ -9805,127 +9928,6 @@ String mapCoreToScreenScraperId(String coreName) {
 // spent, no g_lastSSHttpCode written (that global is the ScreenScraper
 // diagnostic and must keep whatever the SS path put there). The caller simply
 // carries on to ScreenScraper exactly as it always has.
-bool downloadArtworkFromPack(String savePath) {
-  if (strlen(misterIP) == 0) return false;
-
-  // savePath names the game (<base>.jpg); the pack's box goes to <base>.box.jpg.
-  String base = savePath.substring(0, savePath.lastIndexOf('.'));
-  savePath = base + ".box.jpg";
-
-  String url = String("http://") + misterIP + ":8081/media/artwork";
-
-  HTTPClient http;
-  http.begin(url);
-  http.setTimeout(DOWNLOAD_TIMEOUT);
-  const char* wanted[] = { "ETag" };
-  http.collectHeaders(wanted, 1);
-  int httpCode = http.GET();
-
-  if (httpCode != 200) {
-    Serial.printf("Pack: no local artwork (HTTP %d)\n", httpCode);
-    http.end();
-    return false;
-  }
-
-  int contentLength = http.getSize();
-  if (contentLength <= 0 || contentLength > MAX_IMAGE_SIZE) {
-    Serial.printf("Pack: unusable content length %d\n", contentLength);
-    http.end();
-    return false;
-  }
-
-  showDownloadProgress(40, "Local artwork...");
-
-  // Stream straight onto the card. Buffering the whole image first capped
-  // artwork at the largest CONTIGUOUS free block rather than at free heap --
-  // ~110 KB against ~158 KB free on a fragmented heap, which rejected a 158 KB
-  // cover the card held perfectly well. That ceiling also moves with whatever
-  // ran before, so it failed intermittently and silently. A fixed window has
-  // no ceiling at all.
-  //
-  // Streaming costs the atomicity the old buffer gave for free: the file used
-  // to appear only once fully validated. Write under a temporary name and
-  // rename on success, so a power cut mid-transfer cannot leave a truncated
-  // JPEG that every later boot would trust as valid cache.
-  String tmpPath = savePath + ".tmp";
-  File file = SD.open(tmpPath, FILE_WRITE);
-  if (!file) {
-    Serial.printf("Pack: cannot create file: %s\n", tmpPath.c_str());
-    http.end();
-    return false;
-  }
-
-  static uint8_t chunk[PACK_STREAM_CHUNK];
-  WiFiClient* stream = http.getStreamPtr();
-  size_t downloaded = 0;
-  bool headerOk  = false;
-  bool failed    = false;
-  unsigned long downloadStart = millis();
-
-  while (downloaded < (size_t)contentLength) {
-    if (millis() - downloadStart > DOWNLOAD_TIMEOUT) {
-      Serial.println("Pack: timeout waiting for stream data");
-      break;
-    }
-    size_t available = stream->available();
-    if (available > 0) {
-      size_t toRead = min(available, (size_t)PACK_STREAM_CHUNK);
-      toRead = min(toRead, (size_t)contentLength - downloaded);
-      size_t read = stream->readBytes(chunk, toRead);
-      if (read > 0) {
-        // Validate the signature on the first bytes that arrive, so a wrong
-        // body is dropped before it costs a full transfer.
-        if (downloaded == 0) {
-          headerOk = (read >= 2 && chunk[0] == 0xFF && chunk[1] == 0xD8);
-          if (!headerOk) {
-            Serial.println("Pack: response is not a JPEG");
-            failed = true;
-            break;
-          }
-        }
-        if (file.write(chunk, read) != read) {
-          Serial.println("Pack: SD write error");
-          failed = true;
-          break;
-        }
-        downloaded += read;
-        showDownloadProgress(40 + (int)(downloaded * 50 / contentLength),
-                             "Local artwork...");
-      }
-    }
-    screenshotServer.handleClient();
-    delay(1);
-  }
-
-  file.close();
-  String etag = http.header("ETag");
-  etag.replace("\"", "");
-  http.end();
-
-  if (failed || !headerOk || downloaded != (size_t)contentLength) {
-    Serial.printf("Pack: incomplete download %d/%d bytes\n",
-                  (int)downloaded, contentLength);
-    SD.remove(tmpPath);
-    return false;
-  }
-
-  // f_rename refuses an existing destination, so clear it first. Only now does
-  // the artwork become visible under the name the cache looks up.
-  if (SD.exists(savePath)) SD.remove(savePath);
-  if (!SD.rename(tmpPath, savePath)) {
-    Serial.printf("Pack: cannot rename %s -> %s\n",
-                  tmpPath.c_str(), savePath.c_str());
-    SD.remove(tmpPath);
-    return false;
-  }
-
-  Serial.printf("Pack: local artwork saved: %s (%d bytes)\n",
-                savePath.c_str(), (int)downloaded);
-  recordGameImage(base, "box", "pack", "-", "-", etag, "jpg");
-  showDownloadProgress(100, "Complete!");
-  return true;
-}
-
 bool downloadImageFromScreenScraper(String imageUrl, String savePath) {
   // Add resizing parameters to ScreenScraper URL
   String resizedUrl = imageUrl;
@@ -11063,6 +11065,18 @@ void showGameImageScreenCorrected(String coreName, String gameName) {
   bool shouldDownload = false;
   String staleImage = "";
   String staleKey = coreName + "|" + gameName;
+  // Cached and current: once per game per session, ask the packs whether
+  // something better or newer is there (a pack installed or updated since).
+  // Short timeout: an unreachable server must not stall the screen.
+  static String localCheckedFor = "";
+  if (imageExists && !stale && !FORCE_GAME_REDOWNLOAD && localCheckedFor != staleKey &&
+      WiFi.status() == WL_CONNECTED && !downloadInProgress) {
+    localCheckedFor = staleKey;
+    if (gameLocalPass(gameCacheBase(coreName, gameName), isArcadeCore(coreName), 1500)) {
+      findGameImage(coreName, gameName, imagePath, nullptr);
+      Serial.printf("Local packs updated the image: %s\n", imagePath.c_str());
+    }
+  }
   if (imageExists && stale && !FORCE_GAME_REDOWNLOAD && staleTriedFor != staleKey) {
     Serial.printf("Media order changed since %s was chosen - searching again\n",
                   imagePath.c_str());
@@ -11855,18 +11869,20 @@ bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
   Serial.printf("Game: '%s' | Core: '%s'\n", gameName.c_str(), coreName.c_str());
   Serial.printf("Free heap at start: %d bytes\n", ESP.getFreeHeap());
   
-  // Local-first: try the pack installed on the MiSTer before any network
-  // traffic. Deliberately ABOVE the systemId guard below: the pack is keyed by
-  // the game's own identity, not by a ScreenScraper system id, so it can cover
-  // cores this firmware has no mapping for. On a miss nothing is consumed and
-  // the ScreenScraper path below runs untouched.
+  // Local-first: the packs installed on the MiSTer, in media order, before
+  // any network traffic. Deliberately ABOVE the systemId guard below: the
+  // packs are keyed by the game's own identity, not by a ScreenScraper system
+  // id, so they can cover cores this firmware has no mapping for. On a miss
+  // nothing is consumed and the ScreenScraper path below runs untouched.
   {
     String packExactName = getExactFileName(gameName);
     String packCore = coreName;
     packCore.toLowerCase();
-    String packSavePath = getSavePath(packExactName, packCore);
-    if (downloadArtworkFromPack(packSavePath)) {
-      Serial.println("Artwork served from the local pack - no ScreenScraper call");
+    String packSavePath = getSavePath(packExactName, packCore);   // creates the folder
+    String packBase = packSavePath.substring(0, packSavePath.lastIndexOf('.'));
+    showDownloadProgress(40, "Local images...");
+    if (gameLocalPass(packBase, isArcadeCore(coreName), DOWNLOAD_TIMEOUT)) {
+      Serial.println("Image served from the local packs - no ScreenScraper call");
       return true;
     }
   }
