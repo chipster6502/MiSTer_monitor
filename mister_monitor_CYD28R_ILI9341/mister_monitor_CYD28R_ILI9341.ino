@@ -738,6 +738,7 @@ String mapCoreToScreenScraperId(String coreName);
 String getExactFileName(String gameName);
 String sanitizeCoreFilename(String name);
 String getSavePath(String exactFileName, String searchCore);
+String gameCacheDir(const String& exactFileName, String searchCore);
 
 // Media and image functions
 bool downloadArtworkFromPack(String savePath);
@@ -756,6 +757,7 @@ String getScrolledText(ScrollTextState* state);
 
 // --- GAME INFO panel (metadata) ---
 String getMetaPathFromImagePath(const String &imagePath);
+String gameMetaPath(const String& coreName, const String& gameName, bool forWrite);
 bool saveGameMeta(const String &metaPath, const GameMeta &m);
 bool loadGameMeta(const String &metaPath, GameMeta &m);
 String jsonUnescapeAndFold(const String &in);
@@ -1276,9 +1278,8 @@ bool gameInfoAvailable() {
   if (metaProbeFor != currentGame) {
     metaProbeFor = currentGame;
     metaProbeSidecar = false;
-    String imgPath;
-    if (sdCardAvailable && findGameImageExact(currentCore, currentGame, imgPath)) {
-      metaProbeSidecar = SD.exists(getMetaPathFromImagePath(imgPath));
+    if (sdCardAvailable) {
+      metaProbeSidecar = SD.exists(gameMetaPath(currentCore, currentGame, false));
     }
   }
   if (metaProbeSidecar) return true;
@@ -1325,9 +1326,8 @@ bool gameInfoRotationReady() {
   if (rotProbeFor != currentGame) {
     rotProbeFor = currentGame;
     rotProbeHit = false;
-    String imgPath;
-    if (sdCardAvailable && findGameImageExact(currentCore, currentGame, imgPath)) {
-      rotProbeHit = SD.exists(getMetaPathFromImagePath(imgPath));
+    if (sdCardAvailable) {
+      rotProbeHit = SD.exists(gameMetaPath(currentCore, currentGame, false));
     }
   }
   return rotProbeHit;
@@ -7789,6 +7789,29 @@ String getMetaPathFromImagePath(const String &imagePath) {
   return imagePath.substring(0, dot) + ".meta";
 }
 
+// The GAME INFO sidecar of a game: in its cache directory, named after the
+// game, whether or not an image is cached there. Reading also accepts the
+// sidecar next to an image found in the other folder layout, so a cache made
+// under a different alphabetical_folders setting keeps its metadata. Writing
+// creates the directory when missing.
+String gameMetaPath(const String& coreName, const String& gameName, bool forWrite) {
+  String exact = getExactFileName(gameName);
+  String core = coreName;
+  core.toLowerCase();
+  if (forWrite) {
+    String imagePath = getSavePath(exact, core);
+    return getMetaPathFromImagePath(imagePath);
+  }
+  String path = gameCacheDir(exact, core) + "/" + exact + ".meta";
+  if (SD.exists(path)) return path;
+  String imagePath;
+  if (findGameImageExact(coreName, gameName, imagePath)) {
+    String beside = getMetaPathFromImagePath(imagePath);
+    if (SD.exists(beside)) return beside;
+  }
+  return path;
+}
+
 bool saveGameMeta(const String &metaPath, const GameMeta &m) {
   File f = SD.open(metaPath, FILE_WRITE);
   if (!f) {
@@ -8591,9 +8614,8 @@ void displayGameInfo() {
   if (haveGame && currentMeta.forGame != currentGame) {
     currentMeta = GameMeta();
     currentMeta.forGame = currentGame;
-    String imgPath;
-    if (findGameImageExact(currentCore, currentGame, imgPath)) {
-      loadGameMeta(getMetaPathFromImagePath(imgPath), currentMeta);
+    if (sdCardAvailable) {
+      loadGameMeta(gameMetaPath(currentCore, currentGame, false), currentMeta);
     }
 
     // Language mismatch: the sidecar was fetched in a different language than
@@ -8640,9 +8662,8 @@ void displayGameInfo() {
                                       // mismatch and re-fetches in a loop
         currentMeta = m;
         g_metaLangFallbackValid = false;   // fresh copy in the right language wins
-        String imgPath2;
-        if (findGameImageExact(currentCore, currentGame, imgPath2)) {
-          saveGameMeta(getMetaPathFromImagePath(imgPath2), m);
+        if (sdCardAvailable) {
+          saveGameMeta(gameMetaPath(currentCore, currentGame, true), m);
         }
       }
       Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);            // redraw clean
@@ -10559,100 +10580,40 @@ bool applyMediaOrderAndDownload(String baseUrl, String savePath, String orderStr
   return false;
 }
 
-String getSavePath(String exactFileName, String searchCore) {
-  String savePath;
-  
-  // Detect arcade FIRST
+// Directory where a game's cached files live, without creating anything:
+//   arcade    -> /cores/<letter of the game>
+//   alphabet  -> /cores/<letter of the core>/<core>
+//   direct    -> /cores/<core>
+// searchCore is the lowercased core name; it is sanitised here.
+String gameCacheDir(const String& exactFileName, String searchCore) {
   bool isArcade = isArcadeCore(searchCore);
-  // Now sanitize for path construction
   searchCore = sanitizeCoreFilename(searchCore);
-  
-  Serial.printf("Building save path for: core='%s', file='%s', arcade=%s\n", 
-                searchCore.c_str(), exactFileName.c_str(), isArcade ? "YES" : "NO");
-  
+
   if (isArcade && ENABLE_ALPHABETICAL_FOLDERS) {
-    // SPECIAL ARCADE CASE: Save directly to /cores/A/game.jpg
-    // Detect first letter of game name for alphabetical folder
-    String alphabetPath;
-    if (exactFileName.length() > 0) {
-      char firstChar = exactFileName.charAt(0);
-      
-      // If it starts with a number (0-9), use the "#" folder.
-      if (firstChar >= '0' && firstChar <= '9') {
-        alphabetPath = String(CORE_IMAGES_PATH) + "/#";
-      }
-      // If it starts with a letter, use that letter in uppercase.
-      else if (firstChar >= 'a' && firstChar <= 'z') {
-        alphabetPath = String(CORE_IMAGES_PATH) + "/" + String((char)(firstChar - 32));
-      }
-      else if (firstChar >= 'A' && firstChar <= 'Z') {
-        alphabetPath = String(CORE_IMAGES_PATH) + "/" + String(firstChar);
-      }
-      // For other characters, use "#"
-      else {
-        alphabetPath = String(CORE_IMAGES_PATH) + "/#";
-      }
-    } else {
-      alphabetPath = String(CORE_IMAGES_PATH) + "/A"; // Fallback
-    }
-    
-    Serial.printf("ARCADE: Using alphabet path: %s\n", alphabetPath.c_str());
-    
-    // Ensure that the alphabetical directory exists
-    if (!SD.exists(alphabetPath)) {
-      if (SD.mkdir(alphabetPath)) {
-        Serial.printf("Created arcade alphabet dir: %s\n", alphabetPath.c_str());
-      } else {
-        Serial.printf("Failed to create arcade alphabet dir: %s\n", alphabetPath.c_str());
-      }
-    }
-    
-    // Save directly to /cores/A/game.jpg (NOT /cores/A/arcade/game.jpg)
-    savePath = alphabetPath + "/" + exactFileName + ".jpg";
-  } else {
-    // STANDARD CASE: Use original logic
-    if (ENABLE_ALPHABETICAL_FOLDERS) {
-      String alphabetPath = getAlphabeticalPath(searchCore);
-      String coreDir = alphabetPath + "/" + searchCore;
-      
-      Serial.printf("Standard structure: %s\n", coreDir.c_str());
-      
-      // Create directories if they do not exist
-      if (!SD.exists(alphabetPath)) {
-        if (SD.mkdir(alphabetPath)) {
-          Serial.printf("Created alphabet dir: %s\n", alphabetPath.c_str());
-        } else {
-          Serial.printf("Failed to create: %s\n", alphabetPath.c_str());
-        }
-      }
-      
-      if (!SD.exists(coreDir)) {
-        if (SD.mkdir(coreDir)) {
-          Serial.printf("Created core dir: %s\n", coreDir.c_str());
-        } else {
-          Serial.printf("Failed to create: %s\n", coreDir.c_str());
-        }
-      }
-      
-      savePath = coreDir + "/" + exactFileName + ".jpg";
-    } else {
-      // Direct structure: /cores/corename/
-      String coreDir = String(CORE_IMAGES_PATH) + "/" + searchCore;
-      
-      Serial.printf("Direct structure: %s\n", coreDir.c_str());
-      
-      if (!SD.exists(coreDir)) {
-        if (SD.mkdir(coreDir)) {
-          Serial.printf("Created core dir: %s\n", coreDir.c_str());
-        } else {
-          Serial.printf("Failed to create: %s\n", coreDir.c_str());
-        }
-      }
-      
-      savePath = coreDir + "/" + exactFileName + ".jpg";
-    }
+    if (exactFileName.length() == 0) return String(CORE_IMAGES_PATH) + "/A";
+    char c = exactFileName.charAt(0);
+    if (c >= 'a' && c <= 'z') return String(CORE_IMAGES_PATH) + "/" + String((char)(c - 32));
+    if (c >= 'A' && c <= 'Z') return String(CORE_IMAGES_PATH) + "/" + String(c);
+    return String(CORE_IMAGES_PATH) + "/#";
   }
-  
+  if (ENABLE_ALPHABETICAL_FOLDERS) return getAlphabeticalPath(searchCore) + "/" + searchCore;
+  return String(CORE_IMAGES_PATH) + "/" + searchCore;
+}
+
+// Path a downloaded game image is saved to, creating its directory (and that
+// directory's parent) when missing.
+String getSavePath(String exactFileName, String searchCore) {
+  String dir = gameCacheDir(exactFileName, searchCore);
+  String parent = dir.substring(0, dir.lastIndexOf('/'));
+  if (parent.length() > 0 && !SD.exists(parent)) {
+    if (SD.mkdir(parent)) Serial.printf("Created dir: %s\n", parent.c_str());
+    else Serial.printf("Failed to create: %s\n", parent.c_str());
+  }
+  if (!SD.exists(dir)) {
+    if (SD.mkdir(dir)) Serial.printf("Created dir: %s\n", dir.c_str());
+    else Serial.printf("Failed to create: %s\n", dir.c_str());
+  }
+  String savePath = dir + "/" + exactFileName + ".jpg";
   Serial.printf("Final save path: %s\n", savePath.c_str());
   return savePath;
 }
