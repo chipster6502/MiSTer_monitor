@@ -3371,6 +3371,97 @@ static bool drawStandbyLogoRaw(const char* path, int yTop) {
   return ok;
 }
 
+// Game image from a .565 (see PngImage.h), centred in a boxW x boxH box at
+// boxX, boxY and grown by the largest integer factor that fits, so pixel art
+// keeps square pixels. image_upscale does not apply: it governs fractional
+// growth of JPEG artwork. Read row by row: measured no slower than larger
+// blocks on the card, and it needs no heap.
+// Returns false for a missing or malformed file, or for one larger than the
+// box, i.e. stored for another box size; the caller then regenerates it.
+// scaleOut, when not null, receives the factor used.
+static bool drawRaw565InBox(const char* path, int boxX, int boxY, int boxW, int boxH,
+                            int* scaleOut) {
+  static uint16_t row[TARGET_WIDTH];
+  static uint16_t grown[TARGET_WIDTH];
+  if (boxW > TARGET_WIDTH) boxW = TARGET_WIDTH;
+  if (!sdCardAvailable) return false;
+  File f = SD.open(path);
+  if (!f) return false;
+  uint8_t head[4];
+  bool ok = (f.read(head, 4) == 4);
+  int w = head[0] | (head[1] << 8);
+  int h = head[2] | (head[3] << 8);
+  ok = ok && w > 0 && h > 0 && w <= boxW && h <= boxH &&
+       f.size() == (size_t)(4 + w * h * 2);
+  if (!ok) { f.close(); return false; }
+
+  int k = min(boxW / w, boxH / h);
+  if (scaleOut) *scaleOut = k;
+  int x0 = boxX + (boxW - w * k) / 2;
+  int y0 = boxY + (boxH - h * k) / 2;
+
+  display.startWrite();
+  for (int y = 0; y < h && ok; y++) {
+    ok = (f.read((uint8_t*)row, w * 2) == (size_t)w * 2);
+    if (!ok) break;
+    if (k == 1) {
+      display.pushImage(x0, y0 + y, w, 1, row);
+      continue;
+    }
+    for (int x = 0; x < w; x++)
+      for (int j = 0; j < k; j++) grown[x * k + j] = row[x];
+    for (int j = 0; j < k; j++) display.pushImage(x0, y0 + y * k + j, w * k, 1, grown);
+  }
+  display.endWrite();
+  f.close();
+  return ok;
+}
+
+// Panel sink for decodePngScaled(): centres the image in its box and grows it
+// by the largest integer factor that fits, like drawRaw565InBox().
+struct PngPanelSink {
+  int boxX, boxY, boxW, boxH;
+  int k, x0, y0;
+};
+
+static bool pngPanelSize(void* user, int w, int h) {
+  PngPanelSink* s = (PngPanelSink*)user;
+  if (w > s->boxW || h > s->boxH) return false;
+  s->k = min(s->boxW / w, s->boxH / h);
+  s->x0 = s->boxX + (s->boxW - w * s->k) / 2;
+  s->y0 = s->boxY + (s->boxH - h * s->k) / 2;
+  return true;
+}
+
+static bool pngPanelRow(void* user, int y, const uint16_t* row, int w) {
+  static uint16_t grown[TARGET_WIDTH];
+  PngPanelSink* s = (PngPanelSink*)user;
+  if (s->k == 1) {
+    display.pushImage(s->x0, s->y0 + y, w, 1, row);
+    return true;
+  }
+  for (int x = 0; x < w; x++)
+    for (int j = 0; j < s->k; j++) grown[x * s->k + j] = row[x];
+  for (int j = 0; j < s->k; j++)
+    display.pushImage(s->x0, s->y0 + y * s->k + j, w * s->k, 1, grown);
+  return true;
+}
+
+// Decodes a PNG straight to the panel, scaled for the box (see PngImage.h).
+// scaleOut and info, when not null, receive the integer factor used and the
+// decode details.
+static bool drawPngInBox(const char* path, int boxX, int boxY, int boxW, int boxH,
+                         int* scaleOut, PngConvInfo* info) {
+  if (!sdCardAvailable) return false;
+  if (boxW > TARGET_WIDTH) boxW = TARGET_WIDTH;
+  PngPanelSink s = { boxX, boxY, boxW, boxH, 1, 0, 0 };
+  display.startWrite();
+  bool ok = decodePngScaled(SD, path, boxW, boxH, pngPanelSize, pngPanelRow, &s, info);
+  display.endWrite();
+  if (scaleOut) *scaleOut = s.k;
+  return ok;
+}
+
 // Decodes a logo file to the panel, centred horizontally. yTop < 0 centres it
 // vertically too. halfScale decodes at half size, which is how one file
 // serves both screens.

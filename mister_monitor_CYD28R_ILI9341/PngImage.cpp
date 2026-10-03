@@ -2,7 +2,7 @@
 // Copyright (C) 2025-2026 chipster6502
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// PNG to raw RGB565 conversion. See PngImage.h for the format and size rule.
+// PNG decoding scaled to a box. See PngImage.h for the size rule.
 
 #include <Arduino.h>
 #include <new>
@@ -12,7 +12,7 @@
 
 // --- decoder glue -------------------------------------------------------------
 // PNGdec takes plain function pointers, so the open file lives here. One
-// conversion at a time, from the main loop.
+// decode at a time, from the main loop.
 static fs::FS* g_pngFs = nullptr;
 static File    g_pngIn;
 
@@ -30,18 +30,13 @@ static int32_t pngConvSeek(PNGFILE*, int32_t pos) {
   return (g_pngIn && g_pngIn.seek(pos)) ? pos : -1;
 }
 
-// Output is written in blocks of this size: row-sized writes that do not
-// line up with the card's sectors are several times slower.
-static const size_t PNGC_WRITE_BLOCK = 4096;
-
 struct PngConvCtx {
   PNG* png;
-  File out;
-  uint8_t* wbuf;        // output block being filled
-  size_t wlen;          // bytes in it
-  uint32_t writeUs;     // time spent in File::write
+  PngRowSink sink;
+  void* user;
+  uint32_t sinkUs;      // time spent in the sink
   int srcW, srcH, outW, outH;
-  bool direct;          // stored at native size: rows go straight to the file
+  bool direct;          // native size: decoded rows go straight to the sink
   uint16_t* line;       // one source row as RGB565
   uint16_t* colOf;      // source column -> output column
   uint16_t* colCnt;     // source columns per output column
@@ -50,7 +45,6 @@ struct PngConvCtx {
   int accRow;           // output row being accumulated, -1 when none
   int accRows;          // source rows accumulated into it
   int rowsOut;
-  size_t written;       // bytes after the header
   bool ok;
 };
 
@@ -60,25 +54,12 @@ static inline int pngConvMap(int i, int src, int out) {
   return (int)(((int64_t)(2 * i + 1) * out) / (2 * src));
 }
 
-static bool pngConvFlushBlock(PngConvCtx* c) {
-  if (!c->wlen) return true;
+static bool pngConvEmit(PngConvCtx* c, const uint16_t* row) {
   uint32_t t0 = micros();
-  bool ok = (c->out.write(c->wbuf, c->wlen) == c->wlen);
-  c->writeUs += micros() - t0;
-  c->written += c->wlen;
-  c->wlen = 0;
+  bool ok = c->sink(c->user, c->rowsOut, row, c->outW);
+  c->sinkUs += micros() - t0;
+  if (ok) c->rowsOut++;
   return ok;
-}
-
-static bool pngConvPut(PngConvCtx* c, const uint8_t* data, size_t len) {
-  while (len) {
-    size_t n = PNGC_WRITE_BLOCK - c->wlen;
-    if (n > len) n = len;
-    memcpy(c->wbuf + c->wlen, data, n);
-    c->wlen += n; data += n; len -= n;
-    if (c->wlen == PNGC_WRITE_BLOCK && !pngConvFlushBlock(c)) return false;
-  }
-  return true;
 }
 
 static bool pngConvFlushRow(PngConvCtx* c) {
@@ -92,9 +73,7 @@ static bool pngConvFlushRow(PngConvCtx* c) {
     c->outRow[ox] = (uint16_t)((v >> 8) | (v << 8));
     a[0] = a[1] = a[2] = 0;
   }
-  if (!pngConvPut(c, (const uint8_t*)c->outRow, (size_t)c->outW * 2)) return false;
-  c->rowsOut++;
-  return true;
+  return pngConvEmit(c, c->outRow);
 }
 
 static int pngConvDraw(PNGDRAW* d) {
@@ -102,10 +81,9 @@ static int pngConvDraw(PNGDRAW* d) {
   if (!c->ok) return 0;
 
   if (c->direct) {
-    // Alpha, if any, is blended onto black: the slot background.
+    // Alpha, if any, is blended onto black: the box background.
     c->png->getLineAsRGB565(d, c->line, PNG_RGB565_BIG_ENDIAN, 0x000000);
-    if (!pngConvPut(c, (const uint8_t*)c->line, (size_t)c->srcW * 2)) { c->ok = false; return 0; }
-    c->rowsOut++;
+    if (!pngConvEmit(c, c->line)) { c->ok = false; return 0; }
     return 1;
   }
 
@@ -127,60 +105,73 @@ static int pngConvDraw(PNGDRAW* d) {
   return 1;
 }
 
-// Stored size for a source of w x h in a slot of slotW x slotH (see the rule
-// at the top of this file).
-static void pngPlanSize(int w, int h, int slotW, int slotH, int& outW, int& outH) {
-  if (w <= slotW && h <= slotH) { outW = w; outH = h; return; }
-  if ((int64_t)w * slotH > (int64_t)h * slotW) {
-    outW = slotW;
-    outH = (int)(((int64_t)h * slotW + w / 2) / w);
+// Output size for a source of w x h in a box of boxW x boxH (see the rule in
+// PngImage.h).
+static void pngPlanSize(int w, int h, int boxW, int boxH, int& outW, int& outH) {
+  if (w <= boxW && h <= boxH) { outW = w; outH = h; return; }
+  if ((int64_t)w * boxH > (int64_t)h * boxW) {
+    outW = boxW;
+    outH = (int)(((int64_t)h * boxW + w / 2) / w);
   } else {
-    outH = slotH;
-    outW = (int)(((int64_t)w * slotH + h / 2) / h);
+    outH = boxH;
+    outW = (int)(((int64_t)w * boxH + h / 2) / h);
   }
   if (outW < 1) outW = 1;
   if (outH < 1) outH = 1;
 }
 
-bool convertPngTo565(fs::FS& fs, const char* pngPath, const char* rawPath,
-                     int slotW, int slotH, PngConvInfo* info) {
+bool pngReadHeader(fs::FS& fs, const char* pngPath, int* w, int* h, int* colorType) {
+  // Signature, then the IHDR chunk: width at 16, height at 20, bit depth at
+  // 24 and colour type at 25, all big-endian.
+  File f = fs.open(pngPath, FILE_READ);
+  if (!f) return false;
+  uint8_t hd[26];
+  bool ok = f.read(hd, 26) == 26 && hd[0] == 0x89 && hd[1] == 'P' && hd[2] == 'N' &&
+            hd[3] == 'G' && hd[12] == 'I' && hd[13] == 'H' && hd[14] == 'D' && hd[15] == 'R';
+  f.close();
+  if (!ok) return false;
+  if (w) *w = (int)((uint32_t)hd[16] << 24 | (uint32_t)hd[17] << 16 | hd[18] << 8 | hd[19]);
+  if (h) *h = (int)((uint32_t)hd[20] << 24 | (uint32_t)hd[21] << 16 | hd[22] << 8 | hd[23]);
+  if (colorType) *colorType = hd[25];
+  return true;
+}
+
+bool decodePngScaled(fs::FS& fs, const char* pngPath, int boxW, int boxH,
+                     PngSizeSink sizeSink, PngRowSink rowSink, void* user,
+                     PngConvInfo* info) {
   // Not 'local': zutil.h, pulled in by PNGdec.h, defines it as a macro.
   PngConvInfo scratch;
   PngConvInfo& in = info ? *info : scratch;
+  uint32_t keepSinkMs = in.sinkMs;     // convertPngTo565 adds its own share
   in = PngConvInfo();
+  in.sinkMs = keepSinkMs;
   uint32_t t0 = millis();
   in.largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
 
   if (!fs.exists(pngPath)) { in.error = "no such file"; return false; }
 
-  // The header gives the size, and the size decides every other buffer. Its
-  // first 24 bytes are the signature and IHDR: width and height at 16 and 20.
+  // The header gives the size, and the size decides every other buffer.
   int w = 0, h = 0;
-  {
-    File f = fs.open(pngPath, FILE_READ);
-    uint8_t hd[24];
-    if (f && f.read(hd, 24) == 24 && hd[0] == 0x89 && hd[1] == 'P' &&
-        hd[12] == 'I' && hd[13] == 'H' && hd[14] == 'D' && hd[15] == 'R') {
-      w = (int)((uint32_t)hd[16] << 24 | (uint32_t)hd[17] << 16 | hd[18] << 8 | hd[19]);
-      h = (int)((uint32_t)hd[20] << 24 | (uint32_t)hd[21] << 16 | hd[22] << 8 | hd[23]);
-    }
-    if (f) f.close();
+  if (!pngReadHeader(fs, pngPath, &w, &h, nullptr) ||
+      w <= 0 || h <= 0 || w > 8192 || h > 8192) {
+    in.error = "unsupported or damaged PNG";
+    return false;
   }
-  if (w <= 0 || h <= 0 || w > 8192 || h > 8192) { in.error = "unsupported or damaged PNG"; return false; }
 
   PngConvCtx c = {};
+  c.sink = rowSink;
+  c.user = user;
   c.srcW = in.srcW = w;
   c.srcH = in.srcH = h;
   c.accRow = -1;
-  pngPlanSize(w, h, slotW, slotH, c.outW, c.outH);
+  pngPlanSize(w, h, boxW, boxH, c.outW, c.outH);
   in.outW = c.outW;
   in.outH = c.outH;
   c.direct = (c.outW == c.srcW && c.outH == c.srcH);
+  if (sizeSink && !sizeSink(user, c.outW, c.outH)) { in.error = "refused by the sink"; return false; }
 
-  // Everything except the decoder first, output file included.
-  String tmpPath = String(rawPath) + ".tmp";
+  // Everything except the decoder first.
   bool ok = false;
-  c.wbuf = (uint8_t*)malloc(PNGC_WRITE_BLOCK);
   c.line = (uint16_t*)malloc((size_t)c.srcW * 2);
   if (!c.direct) {
     c.colOf  = (uint16_t*)malloc((size_t)c.srcW * 2);
@@ -188,8 +179,12 @@ bool convertPngTo565(fs::FS& fs, const char* pngPath, const char* rawPath,
     c.acc    = (uint32_t*)calloc((size_t)c.outW * 3, 4);
     c.outRow = (uint16_t*)malloc((size_t)c.outW * 2);
   }
-  if (!c.wbuf || !c.line || (!c.direct && (!c.colOf || !c.colCnt || !c.acc || !c.outRow))) {
+  if (!c.line || (!c.direct && (!c.colOf || !c.colCnt || !c.acc || !c.outRow))) {
     in.error = "row buffer allocation failed";
+  } else if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < sizeof(PNG) + 4096) {
+    in.error = "not enough contiguous heap";
+  } else if (!(c.png = new (std::nothrow) PNG())) {
+    in.error = "PNG allocation failed";
   } else {
     if (!c.direct) {
       for (int x = 0; x < c.srcW; x++) {
@@ -197,42 +192,102 @@ bool convertPngTo565(fs::FS& fs, const char* pngPath, const char* rawPath,
         c.colCnt[c.colOf[x]]++;
       }
     }
-    if (fs.exists(tmpPath)) fs.remove(tmpPath);
-    c.out = fs.open(tmpPath, FILE_WRITE);
-    uint8_t head[4] = { (uint8_t)(c.outW & 0xFF), (uint8_t)(c.outW >> 8),
-                        (uint8_t)(c.outH & 0xFF), (uint8_t)(c.outH >> 8) };
-    if (!c.out || c.out.write(head, 4) != 4) {
-      in.error = "cannot write output";
-    } else if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < sizeof(PNG) + 4096) {
-      in.error = "not enough contiguous heap";
-    } else if (!(c.png = new (std::nothrow) PNG())) {
-      in.error = "PNG allocation failed";
+    g_pngFs = &fs;
+    if (c.png->open(pngPath, pngConvOpen, pngConvClose, pngConvRead, pngConvSeek,
+                    pngConvDraw) != PNG_SUCCESS ||
+        c.png->getWidth() != w || c.png->getHeight() != h) {
+      in.error = "unsupported or damaged PNG";
     } else {
-      g_pngFs = &fs;
-      if (c.png->open(pngPath, pngConvOpen, pngConvClose, pngConvRead, pngConvSeek,
-                      pngConvDraw) != PNG_SUCCESS ||
-          c.png->getWidth() != w || c.png->getHeight() != h) {
-        in.error = "unsupported or damaged PNG";
-      } else {
-        in.pixelType = c.png->getPixelType();
-        in.bpp = c.png->getBpp();
-        c.ok = true;
-        int rc = c.png->decode(&c, 0);
-        if (c.ok && !c.direct && c.accRow >= 0 && !pngConvFlushRow(&c)) c.ok = false;
-        if (c.ok && !pngConvFlushBlock(&c)) c.ok = false;
-        if (rc != PNG_SUCCESS) in.error = "decode failed";
-        else if (!c.ok) in.error = "write failed";
-        else if (c.rowsOut != c.outH ||
-                 c.written != (size_t)c.outW * c.outH * 2) in.error = "incomplete output";
-        else ok = true;
-      }
-      c.png->close();
-      // Freed first, while nothing else has been released yet.
-      delete c.png;
-      c.png = nullptr;
+      in.pixelType = c.png->getPixelType();
+      in.bpp = c.png->getBpp();
+      c.ok = true;
+      int rc = c.png->decode(&c, 0);
+      if (c.ok && !c.direct && c.accRow >= 0 && !pngConvFlushRow(&c)) c.ok = false;
+      if (rc != PNG_SUCCESS && c.ok) in.error = "decode failed";
+      else if (!c.ok) in.error = "aborted by the sink";
+      else if (c.rowsOut != c.outH) in.error = "incomplete output";
+      else ok = true;
     }
-    if (c.out) c.out.close();
+    c.png->close();
+    // Freed first, while nothing else has been released yet.
+    delete c.png;
+    c.png = nullptr;
   }
+
+  free(c.outRow); free(c.acc); free(c.colCnt); free(c.colOf); free(c.line);
+  in.sinkMs += c.sinkUs / 1000;
+  in.ms = millis() - t0;
+  return ok;
+}
+
+// --- file sink ----------------------------------------------------------------
+// Output is written in blocks of this size: row-sized writes that do not line
+// up with the card's sectors are several times slower.
+static const size_t PNGC_WRITE_BLOCK = 4096;
+
+struct PngFileSink {
+  File out;
+  uint8_t* buf;
+  size_t len;
+  size_t written;
+};
+
+static bool pngFileFlush(PngFileSink* s) {
+  if (!s->len) return true;
+  bool ok = (s->out.write(s->buf, s->len) == s->len);
+  s->written += s->len;
+  s->len = 0;
+  return ok;
+}
+
+static bool pngFileSize(void* user, int outW, int outH) {
+  PngFileSink* s = (PngFileSink*)user;
+  uint8_t head[4] = { (uint8_t)(outW & 0xFF), (uint8_t)(outW >> 8),
+                      (uint8_t)(outH & 0xFF), (uint8_t)(outH >> 8) };
+  return s->out.write(head, 4) == 4;
+}
+
+static bool pngFileRow(void* user, int, const uint16_t* row, int w) {
+  PngFileSink* s = (PngFileSink*)user;
+  const uint8_t* data = (const uint8_t*)row;
+  size_t len = (size_t)w * 2;
+  while (len) {
+    size_t n = PNGC_WRITE_BLOCK - s->len;
+    if (n > len) n = len;
+    memcpy(s->buf + s->len, data, n);
+    s->len += n; data += n; len -= n;
+    if (s->len == PNGC_WRITE_BLOCK && !pngFileFlush(s)) return false;
+  }
+  return true;
+}
+
+bool convertPngTo565(fs::FS& fs, const char* pngPath, const char* rawPath,
+                     int boxW, int boxH, PngConvInfo* info) {
+  PngConvInfo scratch;
+  PngConvInfo& in = info ? *info : scratch;
+  in = PngConvInfo();
+  uint32_t t0 = millis();
+
+  // File and block buffer before the decoder: see the allocation note in
+  // PngImage.h.
+  String tmpPath = String(rawPath) + ".tmp";
+  PngFileSink s = {};
+  s.buf = (uint8_t*)malloc(PNGC_WRITE_BLOCK);
+  if (!s.buf) { in.error = "write buffer allocation failed"; return false; }
+  if (fs.exists(tmpPath)) fs.remove(tmpPath);
+  s.out = fs.open(tmpPath, FILE_WRITE);
+  bool ok = false;
+  if (!s.out) {
+    in.error = "cannot write output";
+  } else {
+    ok = decodePngScaled(fs, pngPath, boxW, boxH, pngFileSize, pngFileRow, &s, &in);
+    uint32_t tw = millis();
+    if (ok && !pngFileFlush(&s)) { ok = false; in.error = "write failed"; }
+    if (ok && s.written != (size_t)in.outW * in.outH * 2) { ok = false; in.error = "incomplete output"; }
+    s.out.close();
+    in.sinkMs += millis() - tw;
+  }
+  free(s.buf);
 
   if (ok) {
     if (fs.exists(rawPath)) fs.remove(rawPath);
@@ -240,9 +295,6 @@ bool convertPngTo565(fs::FS& fs, const char* pngPath, const char* rawPath,
     if (!ok) in.error = "rename failed";
   }
   if (!ok && fs.exists(tmpPath)) fs.remove(tmpPath);
-
-  free(c.outRow); free(c.acc); free(c.colCnt); free(c.colOf); free(c.line); free(c.wbuf);
-  in.writeMs = c.writeUs / 1000;
   in.ms = millis() - t0;
   return ok;
 }
