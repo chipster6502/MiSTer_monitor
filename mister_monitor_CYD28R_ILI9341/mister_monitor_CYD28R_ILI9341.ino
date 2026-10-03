@@ -851,6 +851,12 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
 bool tryMediaTypeWithRegions(String baseUrl, String savePath, const char* mediaBase, const char* mediaLabel, bool includeGeneric = true);
 bool tryMediaTypesForToken(String baseUrl, String savePath, String token);
 bool applyMediaOrderAndDownload(String baseUrl, String savePath, String orderStr);
+bool applyGameMediaOrder(String baseUrl, String savePath, String orderStr, bool arcade);
+bool findGameImage(const String& coreName, const String& gameName, String& imagePath, bool* stale);
+void recordGameImage(const String& base, const String& cat, const String& source,
+                     const String& token, const String& order, const String& etag,
+                     const String& ext);
+String mediaOrderStamp(bool arcade);
 static bool showingGameImage = true;  // true = game image, false = system image
 // The slide clock is coreImageStartTime: every draw site restamps it, so the
 // rotation always measures "time since the slide on screen was drawn". Any
@@ -6301,7 +6307,7 @@ void processCrcRecurrent() {
   
   // Check if it already has an image (avoids unnecessary searches)
   String imagePath;
-  if (findGameImageExact(currentCoreForCrc, currentGameForCrc, imagePath)) {
+  if (findGameImage(currentCoreForCrc, currentGameForCrc, imagePath, nullptr)) {
     Serial.printf("Image found for '%s', stopping CRC recurrent\n", currentGameForCrc.c_str());
     stopCrcRecurrent();
     return;
@@ -7810,6 +7816,187 @@ String gameMetaPath(const String& coreName, const String& gameName, bool forWrit
     if (SD.exists(beside)) return beside;
   }
   return path;
+}
+
+// =============================================================================
+// Game image cache: one file per category, described by a manifest
+// =============================================================================
+// <base> is gameCacheDir()/<game>. A game keeps at most one image per category:
+//   box   <base>.box.jpg      box3d, box2d, mix, mix1, mix2
+//   snap  <base>.snap.<ext>   screenshot
+//   title <base>.title.<ext>  titlescreen
+//   art   <base>.art.jpg      every other token
+// <base>.img says which one is shown and where each came from:
+//   mmimg 1
+//   main <category>
+//   <category> <source> <token> <order> <etag> <ext>
+// source is pack, ss or legacy. order stamps the media order an image was
+// chosen under ("game:<hash>" or "arcade:<hash>"), "-" when no order was
+// involved. etag is the server's tag for pack images, "-" otherwise.
+// A cache written by older firmware (<base>.jpg, no manifest) is adopted as
+// category "legacy", with no network traffic.
+// =============================================================================
+
+// GameImageEntry / GameImageManifest live in mister_types.h.
+
+static const char* gameImageCategory(const String& token) {
+  if (token == "box3d" || token == "box2d" || token == "mix" ||
+      token == "mix1" || token == "mix2") return "box";
+  if (token == "screenshot")  return "snap";
+  if (token == "titlescreen") return "title";
+  return "art";
+}
+
+static String gameCacheBase(const String& coreName, const String& gameName) {
+  String exact = getExactFileName(gameName);
+  String core = coreName;
+  core.toLowerCase();
+  return gameCacheDir(exact, core) + "/" + exact;
+}
+
+static String gameImagePath(const String& base, const GameImageEntry& e) {
+  if (e.cat == "legacy") return base + "." + e.ext;
+  return base + "." + e.cat + "." + e.ext;
+}
+
+// Which media order an image was chosen under, and its FNV-1a hash. Spaces are
+// ignored so reformatting the list in config.ini does not count as a change.
+String mediaOrderStamp(bool arcade) {
+  const String& order = arcade ? ARCADE_MEDIA_ORDER_STR : GAME_MEDIA_ORDER_STR;
+  uint32_t h = 2166136261u;
+  for (unsigned i = 0; i < order.length(); i++) {
+    char c = order.charAt(i);
+    if (c == ' ') continue;
+    h ^= (uint8_t)c;
+    h *= 16777619u;
+  }
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%s:%08lx", arcade ? "arcade" : "game", (unsigned long)h);
+  return String(buf);
+}
+
+static bool orderStampCurrent(const String& stamp) {
+  if (stamp == "-") return true;
+  return stamp == mediaOrderStamp(stamp.startsWith("arcade:"));
+}
+
+static bool loadGameImageManifest(const String& base, GameImageManifest& m) {
+  File f = SD.open(base + ".img");
+  if (!f) return false;
+  String head = f.readStringUntil('\n');
+  head.trim();
+  bool ok = (head == "mmimg 1");
+  while (ok && f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) continue;
+    if (line.startsWith("main ")) { m.main = line.substring(5); continue; }
+    String field[6];
+    int count = 0, from = 0;
+    while (count < 6 && from <= (int)line.length()) {
+      int sp = line.indexOf(' ', from);
+      if (sp < 0) sp = line.length();
+      field[count++] = line.substring(from, sp);
+      from = sp + 1;
+    }
+    if (count != 6 || from <= (int)line.length() || m.n >= 6) { ok = false; break; }
+    GameImageEntry& e = m.e[m.n++];
+    e.cat = field[0]; e.source = field[1]; e.token = field[2];
+    e.order = field[3]; e.etag = field[4]; e.ext = field[5];
+  }
+  f.close();
+  return ok && m.main.length() > 0 && m.find(m.main) != nullptr;
+}
+
+static bool saveGameImageManifest(const String& base, const GameImageManifest& m) {
+  File f = SD.open(base + ".img", FILE_WRITE);
+  if (!f) return false;
+  f.print("mmimg 1\nmain ");
+  f.print(m.main);
+  f.print("\n");
+  for (int i = 0; i < m.n; i++) {
+    const GameImageEntry& e = m.e[i];
+    f.printf("%s %s %s %s %s %s\n", e.cat.c_str(), e.source.c_str(), e.token.c_str(),
+             e.order.c_str(), e.etag.c_str(), e.ext.c_str());
+  }
+  f.close();
+  return true;
+}
+
+// Registers a freshly written image and makes it the one shown.
+void recordGameImage(const String& base, const String& cat, const String& source,
+                     const String& token, const String& order, const String& etag,
+                     const String& ext) {
+  GameImageManifest m;
+  if (!loadGameImageManifest(base, m)) m = GameImageManifest();
+
+  // An adopted image from older firmware is only ever the stand-in for a
+  // proper category; once one arrives the old file goes.
+  if (cat != "legacy") {
+    for (int i = 0; i < m.n; i++) {
+      if (m.e[i].cat != "legacy") continue;
+      String old = gameImagePath(base, m.e[i]);
+      if (SD.exists(old)) SD.remove(old);
+      m.e[i] = m.e[--m.n];
+      break;
+    }
+  }
+
+  GameImageEntry* e = m.find(cat);
+  if (!e) {
+    if (m.n >= 6) m.n = 0;      // cannot happen: five categories at most
+    e = &m.e[m.n++];
+  }
+  e->cat = cat;
+  e->source = source;
+  e->token = token.length() ? token : String("-");
+  e->order = order.length() ? order : String("-");
+  e->etag = etag.length() ? etag : String("-");
+  e->ext = ext;
+  m.main = cat;
+  if (!saveGameImageManifest(base, m))
+    Serial.printf("IMG: cannot write manifest for %s\n", base.c_str());
+}
+
+// The image to show for a game. stale, when not null, is set when that image
+// was chosen under a media order that has since changed.
+bool findGameImage(const String& coreName, const String& gameName, String& imagePath,
+                   bool* stale) {
+  if (stale) *stale = false;
+  if (!sdCardAvailable) return false;
+  String base = gameCacheBase(coreName, gameName);
+
+  GameImageManifest m;
+  if (loadGameImageManifest(base, m)) {
+    GameImageEntry* e = m.find(m.main);
+    String p = gameImagePath(base, *e);
+    if (SD.exists(p)) {
+      imagePath = p;
+      if (stale) *stale = !orderStampCurrent(e->order);
+      return true;
+    }
+  }
+
+  // Manifest missing or unreadable: any image of the current layout will do.
+  static const char* cats[] = { "box", "art", "snap", "title" };
+  for (const char* c : cats) {
+    String p = base + "." + c + ".jpg";
+    if (SD.exists(p)) { imagePath = p; return true; }
+  }
+
+  // Cache from older firmware: adopt it under the order now configured, so
+  // only a later change to the list sends it back to ScreenScraper.
+  String legacy;
+  if (findGameImageExact(coreName, gameName, legacy)) {
+    imagePath = legacy;
+    String prefix = base + ".";
+    if (legacy.startsWith(prefix) && legacy.indexOf('.', prefix.length()) < 0) {
+      recordGameImage(base, "legacy", "legacy", "-", mediaOrderStamp(isArcadeCore(coreName)),
+                      "-", legacy.substring(prefix.length()));
+    }
+    return true;
+  }
+  return false;
 }
 
 bool saveGameMeta(const String &metaPath, const GameMeta &m) {
@@ -9558,11 +9745,17 @@ String mapCoreToScreenScraperId(String coreName) {
 bool downloadArtworkFromPack(String savePath) {
   if (strlen(misterIP) == 0) return false;
 
+  // savePath names the game (<base>.jpg); the pack's box goes to <base>.box.jpg.
+  String base = savePath.substring(0, savePath.lastIndexOf('.'));
+  savePath = base + ".box.jpg";
+
   String url = String("http://") + misterIP + ":8081/media/artwork";
 
   HTTPClient http;
   http.begin(url);
   http.setTimeout(DOWNLOAD_TIMEOUT);
+  const char* wanted[] = { "ETag" };
+  http.collectHeaders(wanted, 1);
   int httpCode = http.GET();
 
   if (httpCode != 200) {
@@ -9642,6 +9835,8 @@ bool downloadArtworkFromPack(String savePath) {
   }
 
   file.close();
+  String etag = http.header("ETag");
+  etag.replace("\"", "");
   http.end();
 
   if (failed || !headerOk || downloaded != (size_t)contentLength) {
@@ -9663,6 +9858,7 @@ bool downloadArtworkFromPack(String savePath) {
 
   Serial.printf("Pack: local artwork saved: %s (%d bytes)\n",
                 savePath.c_str(), (int)downloaded);
+  recordGameImage(base, "box", "pack", "-", "-", etag, "jpg");
   showDownloadProgress(100, "Complete!");
   return true;
 }
@@ -10322,7 +10518,7 @@ bool downloadImageFromMediaJeu(String mediaUrl, String savePath) {
   
   // CONFIGURABLE DOWNLOAD ORDER — driven by config.ini [images] section
   String& orderStr = isArcade ? ARCADE_MEDIA_ORDER_STR : GAME_MEDIA_ORDER_STR;
-  bool result = applyMediaOrderAndDownload(baseUrl, savePath, orderStr);
+  bool result = applyGameMediaOrder(baseUrl, savePath, orderStr, isArcade);
 
   if (!result) {
     Serial.printf("[MEDIA] All types failed for %s\n", isArcade ? "ARCADE" : "OTHER SYSTEM");
@@ -10561,6 +10757,39 @@ bool tryMediaTypesForToken(String baseUrl, String savePath, String token) {
 // =============================================================================
 // applyMediaOrderAndDownload() -- iterates order string, tries token by token
 // =============================================================================
+// Game variant: each token saves into its category's file (<base>.<cat>.jpg,
+// where savePath is <base>.jpg) through a temporary name, so a failed attempt
+// never destroys an image the category already had, and the winner is
+// recorded in the game's manifest.
+bool applyGameMediaOrder(String baseUrl, String savePath, String orderStr, bool arcade) {
+  Serial.printf("[MEDIA] Order: %s\n", orderStr.c_str());
+  String base = savePath.substring(0, savePath.lastIndexOf('.'));
+  int start = 0;
+  while (start < (int)orderStr.length()) {
+    int comma = orderStr.indexOf(',', start);
+    String token = (comma == -1) ? orderStr.substring(start)
+                                 : orderStr.substring(start, comma);
+    token.trim();
+    if (token.length() > 0) {
+      String cat = gameImageCategory(token);
+      String finalPath = base + "." + cat + ".jpg";
+      String tmpPath = finalPath + ".tmp";
+      if (SD.exists(tmpPath)) SD.remove(tmpPath);
+      if (tryMediaTypesForToken(baseUrl, tmpPath, token)) {
+        if (SD.exists(finalPath)) SD.remove(finalPath);
+        if (SD.rename(tmpPath, finalPath)) {
+          recordGameImage(base, cat, "ss", token, mediaOrderStamp(arcade), "-", "jpg");
+          return true;
+        }
+        SD.remove(tmpPath);
+      }
+    }
+    if (comma == -1) break;
+    start = comma + 1;
+  }
+  return false;
+}
+
 bool applyMediaOrderAndDownload(String baseUrl, String savePath, String orderStr) {
   Serial.printf("[MEDIA] Order: %s\n", orderStr.c_str());
   int start = 0;
@@ -10645,9 +10874,22 @@ void showGameImageScreenCorrected(String coreName, String gameName) {
     return;
   }
   
-  // Check existing image and force download setting
-  bool imageExists = findGameImageExact(coreName, gameName, imagePath);
+  // Check existing image and force download setting. A stale image (chosen
+  // under a media order that has since changed) is searched again once per
+  // game per session, and stays on screen if that search finds nothing.
+  static String staleTriedFor = "";
+  bool stale = false;
+  bool imageExists = findGameImage(coreName, gameName, imagePath, &stale);
   bool shouldDownload = false;
+  String staleImage = "";
+  String staleKey = coreName + "|" + gameName;
+  if (imageExists && stale && !FORCE_GAME_REDOWNLOAD && staleTriedFor != staleKey) {
+    Serial.printf("Media order changed since %s was chosen - searching again\n",
+                  imagePath.c_str());
+    staleTriedFor = staleKey;
+    staleImage = imagePath;
+    imageExists = false;
+  }
   
   if (FORCE_GAME_REDOWNLOAD) {
     Serial.println("FORCE_GAME_REDOWNLOAD enabled - will download regardless of existing image");
@@ -10704,6 +10946,11 @@ void showGameImageScreenCorrected(String coreName, String gameName) {
       // Final memory check before download
       if (ESP.getFreeHeap() < 120000) {
         Serial.printf("Insufficient memory for download (%d bytes)\n", ESP.getFreeHeap());
+        if (staleImage.length() > 0 && displayCoreImageCentered(staleImage)) {
+          lastGameImageOK = true;
+          addGameImageFooter(gameName);
+          return;
+        }
         Serial.println("Falling back to core image");
         lastGameImageOK = false;
         showCoreImageScreen(coreName);
@@ -10716,7 +10963,7 @@ void showGameImageScreenCorrected(String coreName, String gameName) {
       if (downloadGameBoxartStreamingSafeJSON(coreName, gameName)) {
         Serial.println("STREAMING-SAFE download successful! Displaying...");
         
-        if (findGameImageExact(coreName, gameName, imagePath) && displayCoreImageCentered(imagePath)) {
+        if (findGameImage(coreName, gameName, imagePath, nullptr) && displayCoreImageCentered(imagePath)) {
           Serial.println("Downloaded streaming-safe image displayed successfully");
           
           // Only update cache on successful download AND display
@@ -10755,6 +11002,14 @@ void showGameImageScreenCorrected(String coreName, String gameName) {
     }
   }
   
+  // A stale image that could not be replaced is still better than the core.
+  if (staleImage.length() > 0 && displayCoreImageCentered(staleImage)) {
+    Serial.println("Search found nothing new - keeping the cached image");
+    lastGameImageOK = true;
+    addGameImageFooter(gameName);
+    return;
+  }
+
   // FALLBACK: show core image
   Serial.println("Streaming-safe fallback to core image");
   lastGameImageOK = false;
