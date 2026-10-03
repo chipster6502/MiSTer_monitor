@@ -40,6 +40,7 @@
 #include <HTTPClient.h>
 #include <SD.h>
 #include <JPEGDEC.h>
+#include "PngImage.h"      // PNG -> raw RGB565 for pack screenshots and title screens
 #include <WebServer.h>
 #include "mister_types.h"
 #include "AppConfig.h"
