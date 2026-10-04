@@ -10254,7 +10254,7 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
     int r = downloadMediaOriginal(baseUrl + "&media=" + String(mediaType), savePath, mediaName);
     if (r > 0) return true;
     if (r == 0) {
-      pumpedDelay(1000);
+      delay(1000);
       return false;
     }
   }
