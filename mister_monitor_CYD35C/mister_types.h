@@ -70,6 +70,22 @@ struct GameMeta {
 // RETROACHIEVEMENTS panel — flat mirror of /status/retroachievements.
 // Every field is a scalar; the endpoint JSON is deliberately flat so the
 // firmware's extract*Value() helpers can parse it without ArduinoJson.
+// Game image cache manifest (<base>.img): one entry per cached category. See
+// the "Game image cache" section of the sketch for the format.
+struct GameImageEntry {
+  String cat, source, token, order, etag, ext;
+};
+
+struct GameImageManifest {
+  String main;
+  GameImageEntry e[6];
+  int n = 0;
+  GameImageEntry* find(const String& cat) {
+    for (int i = 0; i < n; i++) if (e[i].cat == cat) return &e[i];
+    return nullptr;
+  }
+};
+
 struct RAStatus {
   bool    enabled;             // server has ra_credentials.ini
   bool    supported;           // active core maps to an RA console
