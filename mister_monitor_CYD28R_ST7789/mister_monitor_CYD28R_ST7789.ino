@@ -41,6 +41,7 @@
 #include <SD.h>
 #include <JPEGDEC.h>
 #include "PngImage.h"      // PNG -> raw RGB565 for pack screenshots and title screens
+#include "JpegImage.h"     // JPEG screenshots and title screens, scaled like the PNG ones
 #include <WebServer.h>
 #include "mister_types.h"
 #include "AppConfig.h"
@@ -3554,9 +3555,45 @@ static bool displayGamePngCentered(const String& pngPath) {
   return ok;
 }
 
-// Shows a cached game image whatever its format.
+// Decodes a JPEG screenshot straight to the panel, scaled for the box like
+// drawPngInBox() (see JpegImage.h).
+static bool drawJpegInBox(const char* path, int boxX, int boxY, int boxW, int boxH, bool fill,
+                          int* scaleOut, PngConvInfo* info) {
+  if (!sdCardAvailable) return false;
+  if (boxW > TARGET_WIDTH) boxW = TARGET_WIDTH;
+  PngPanelSink s = { boxX, boxY, boxW, boxH, 1, 0, 0 };
+  display.startWrite();
+  bool ok = decodeJpegScaled(jpeg, SD, path, boxW, boxH, fill, pngPanelSize, pngPanelRow, &s, info);
+  display.endWrite();
+  if (scaleOut) *scaleOut = s.k;
+  return ok;
+}
+
+// Screenshot or title screen stored as JPEG, in the same box and with the same
+// screenshot_scaling as the PNG ones. False for a JPEG the decoder refuses
+// (progressive): the caller then falls back to the box-art path.
+static bool displayGameJpegCentered(const String& jpgPath) {
+  if (!sdCardAvailable) return false;
+  g_artBoxW = TARGET_WIDTH;
+  g_artBoxH = KIOSK_MODE ? TARGET_HEIGHT : IMAGE_AREA_HEIGHT;
+  Lcd.fillScreen(THEME_BLACK);
+  PngConvInfo info;
+  int k = 1;
+  bool ok = drawJpegInBox(jpgPath.c_str(), 0, 0, g_artBoxW, g_artBoxH, SCREENSHOT_FILL, &k, &info);
+  Serial.printf("[JPG] %s %dx%d -> %dx%d x%d, %u ms (panel %u ms), largest block %u%s%s\n",
+                jpgPath.c_str(), info.srcW, info.srcH, info.outW, info.outH, k,
+                (unsigned)info.ms, (unsigned)info.sinkMs, (unsigned)info.largestBlock,
+                ok ? "" : ", failed: ", ok ? "" : info.error);
+  return ok;
+}
+
+// Shows a cached game image whatever its format. Screenshots and title screens
+// follow screenshot_scaling, PNG or JPEG; box art and the rest keep the JPEG
+// artwork path and image_upscale.
 bool displayGameImage(const String& imagePath) {
   if (imagePath.endsWith(".png")) return displayGamePngCentered(imagePath);
+  if ((imagePath.endsWith(".snap.jpg") || imagePath.endsWith(".title.jpg")) &&
+      displayGameJpegCentered(imagePath)) return true;
   return displayCoreImageCentered(imagePath);
 }
 
@@ -10616,10 +10653,13 @@ static bool fileIsPng(const String& path) {
 // file's signature.
 // Returns 1 when savePath holds a usable PNG or JPEG, 0 when there is nothing
 // to fetch for this media type, and -1 when the original exists but cannot be
-// used here (too large, or a PNG the decoder does not support): the caller
-// then asks for the reduced JPEG instead.
+// used here (too large, or a PNG the decoder does not support even once
+// re-encoded): the caller then asks for the reduced JPEG instead.
+// Some originals are interlaced PNGs, which PNGdec cannot read. Given a size
+// limit ScreenScraper re-encodes the image, and the result is the same pixels
+// as a plain PNG; reencoded marks that second request.
 static int downloadMediaOriginal(const String& url, const String& savePath,
-                                 const char* mediaName) {
+                                 const char* mediaName, bool reencoded) {
   g_mediaAttemptCount++;
   int mediaProgress = 50 + g_mediaAttemptCount;
   if (mediaProgress > 90) mediaProgress = 90;
@@ -10672,11 +10712,18 @@ static int downloadMediaOriginal(const String& url, const String& savePath,
   if (n >= 4 && head[0] == 0x89 && head[1] == 'P' && head[2] == 'N' && head[3] == 'G') {
     if (pngIsSupported(SD, savePath.c_str())) {
       g_mediaSawValidJpeg = true;     // "a usable image arrived"; predates PNG
-      Serial.printf("[MEDIA] %s original: PNG, %d bytes\n", mediaName, written);
+      Serial.printf("[MEDIA] %s %s: PNG, %d bytes\n", mediaName,
+                  reencoded ? "re-encoded" : "original", written);
       return 1;
     }
-    Serial.printf("[MEDIA] %s original: PNG the decoder cannot read\n", mediaName);
     SD.remove(savePath);
+    if (!reencoded) {
+      Serial.printf("[MEDIA] %s original: PNG the decoder cannot read, asking for it re-encoded\n",
+                    mediaName);
+      return downloadMediaOriginal(url + "&outputformat=png&maxwidth=1280&maxheight=720",
+                                   savePath, mediaName, true);
+    }
+    Serial.printf("[MEDIA] %s re-encoded PNG still unreadable\n", mediaName);
     return -1;
   }
 
@@ -10699,7 +10746,8 @@ bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* me
   // Screenshots and title screens for games: the original first; the reduced
   // JPEG below remains for originals the panel cannot use.
   if (g_gameOriginalShots && isShotMedia(mediaType)) {
-    int r = downloadMediaOriginal(baseUrl + "&media=" + String(mediaType), savePath, mediaName);
+    int r = downloadMediaOriginal(baseUrl + "&media=" + String(mediaType), savePath, mediaName,
+                                  false);
     if (r > 0) return true;
     if (r == 0) {
       pumpedDelay(1000);

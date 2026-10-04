@@ -82,6 +82,21 @@ bool decodePngScaled(fs::FS& fs, const char* pngPath, int boxW, int boxH, bool f
                      PngSizeSink sizeSink, PngRowSink rowSink, void* user,
                      PngConvInfo* info = nullptr);
 
+// Row-by-row scaler behind decodePngScaled(), for other decoders (JpegImage).
+// Feed it every source row, top to bottom, as RGB565 (bigEndian says which
+// byte order), then call imgScalerEnd(), which also frees it. Rows reach the
+// sink as decodePngScaled() delivers them. imgScalerDirect() is true when the
+// output is the source unchanged, so a decoder can hand over rows already in
+// the sink's big-endian order.
+struct ImgScaler;
+ImgScaler* imgScalerBegin(int srcW, int srcH, int boxW, int boxH, bool fill,
+                          PngSizeSink sizeSink, PngRowSink rowSink, void* user,
+                          int* outW, int* outH, const char** error);
+bool imgScalerDirect(const ImgScaler* s);
+bool imgScalerRow(ImgScaler* s, const uint16_t* row, bool bigEndian);
+// True when every row went through; adds the time spent in the sink to *sinkMs.
+bool imgScalerEnd(ImgScaler* s, uint32_t* sinkMs);
+
 // Converts pngPath into rawPath (written as rawPath + ".tmp", then renamed).
 // Returns false, with info->error set, on any failure; rawPath is then left
 // untouched.
