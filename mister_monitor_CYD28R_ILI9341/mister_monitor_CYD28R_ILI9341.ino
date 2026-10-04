@@ -9912,22 +9912,6 @@ String mapCoreToScreenScraperId(String coreName) {
 
 // ========== IMAGE DOWNLOAD WITH AUTOMATIC RESIZING ==========
 
-// ========== LOCAL-FIRST: THE INSTALLED ARTWORK PACK ==========
-
-// Fetches the pack image the MiSTer holds for the game that is loaded right
-// now, saving it to the usual cache path so everything downstream (display,
-// metadata sidecar, redraws) is unchanged.
-//
-// The server resolves WHICH image during rom-details -- exact filename, then
-// index.tsv by variant name, then by CRC+size -- so this endpoint needs no
-// parameters: it serves whatever the current game resolved to, or 404.
-//
-// A 404 is the normal answer for a game the pack does not cover, and for any
-// server older than the pack support, which falls through to its own
-// endpoint-not-found. It is NOT a failure: no error screen, no retry budget
-// spent, no g_lastSSHttpCode written (that global is the ScreenScraper
-// diagnostic and must keep whatever the SS path put there). The caller simply
-// carries on to ScreenScraper exactly as it always has.
 bool downloadImageFromScreenScraper(String imageUrl, String savePath) {
   // Add resizing parameters to ScreenScraper URL
   String resizedUrl = imageUrl;

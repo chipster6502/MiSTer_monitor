@@ -23,7 +23,8 @@
 // window, inflate state, palette, two row buffers). It is allocated per call,
 // after everything else, and freed first, so nothing allocated meanwhile can
 // end up splitting the block it leaves behind. A call that cannot get it fails
-// cleanly. PNG_MAX_BUFFERED_PIXELS comes from build_opt.h so that the library
+// cleanly. All buffers come from internal RAM; see PngImage.cpp for the PSRAM
+// fallback a board can opt into. PNG_MAX_BUFFERED_PIXELS comes from build_opt.h so that the library
 // and the sketch agree on the object layout.
 //
 // Interlaced and 16-bit-per-channel PNGs are not supported by the decoder;
@@ -45,7 +46,7 @@ struct PngConvInfo {
   int bpp = 0;                // bits per sample
   uint32_t ms = 0;            // whole call
   uint32_t sinkMs = 0;        // part of it spent in the sink
-  uint32_t largestBlock = 0;  // largest free heap block on entry
+  uint32_t largestBlock = 0;  // largest free internal heap block on entry
   const char* error = "";     // empty on success
 };
 

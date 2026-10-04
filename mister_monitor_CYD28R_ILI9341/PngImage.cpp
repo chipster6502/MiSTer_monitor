@@ -10,6 +10,42 @@
 #include "esp_heap_caps.h"
 #include "PngImage.h"
 
+// build_opt.h must reach this file and the library alike. Without it the
+// decoder's row buffers only hold 320 RGBA pixels and wider RGB images are
+// rejected at open.
+#if PNG_MAX_BUFFERED_PIXELS < ((640 * 4 + 1) * 2)
+#error "PNG_MAX_BUFFERED_PIXELS is too small: build_opt.h was not applied"
+#endif
+
+// Internal RAM, asked for explicitly: on boards with PSRAM the default
+// allocator may hand out PSRAM, which is slower everywhere and not usable at
+// all on some. A board whose PSRAM is usable, and whose internal RAM may lack
+// a contiguous block for the decoder, opts into it as a second choice with
+// -DPNGIMAGE_SPIRAM_FALLBACK in its build_opt.h.
+static const uint32_t PNGC_CAPS = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+
+static void* pngAlloc(size_t bytes) {
+  void* p = heap_caps_malloc(bytes, PNGC_CAPS);
+#ifdef PNGIMAGE_SPIRAM_FALLBACK
+  if (!p) p = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+  return p;
+}
+
+static void* pngCalloc(size_t n, size_t size) {
+  void* p = pngAlloc(n * size);
+  if (p) memset(p, 0, n * size);
+  return p;
+}
+
+static bool pngHasBlock(size_t bytes) {
+  if (heap_caps_get_largest_free_block(PNGC_CAPS) >= bytes) return true;
+#ifdef PNGIMAGE_SPIRAM_FALLBACK
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) >= bytes) return true;
+#endif
+  return false;
+}
+
 // --- decoder glue -------------------------------------------------------------
 // PNGdec takes plain function pointers, so the open file lives here. One
 // decode at a time, from the main loop.
@@ -164,7 +200,7 @@ bool decodePngScaled(fs::FS& fs, const char* pngPath, int boxW, int boxH,
   in = PngConvInfo();
   in.sinkMs = keepSinkMs;
   uint32_t t0 = millis();
-  in.largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  in.largestBlock = heap_caps_get_largest_free_block(PNGC_CAPS);
 
   if (!fs.exists(pngPath)) { in.error = "no such file"; return false; }
 
@@ -190,20 +226,22 @@ bool decodePngScaled(fs::FS& fs, const char* pngPath, int boxW, int boxH,
 
   // Everything except the decoder first.
   bool ok = false;
-  c.line = (uint16_t*)malloc((size_t)c.srcW * 2);
+  void* pngMem = nullptr;
+  c.line = (uint16_t*)pngAlloc((size_t)c.srcW * 2);
   if (!c.direct) {
-    c.colOf  = (uint16_t*)malloc((size_t)c.srcW * 2);
-    c.colCnt = (uint16_t*)calloc(c.outW, 2);
-    c.acc    = (uint32_t*)calloc((size_t)c.outW * 3, 4);
-    c.outRow = (uint16_t*)malloc((size_t)c.outW * 2);
+    c.colOf  = (uint16_t*)pngAlloc((size_t)c.srcW * 2);
+    c.colCnt = (uint16_t*)pngCalloc(c.outW, 2);
+    c.acc    = (uint32_t*)pngCalloc((size_t)c.outW * 3, 4);
+    c.outRow = (uint16_t*)pngAlloc((size_t)c.outW * 2);
   }
   if (!c.line || (!c.direct && (!c.colOf || !c.colCnt || !c.acc || !c.outRow))) {
     in.error = "row buffer allocation failed";
-  } else if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < sizeof(PNG) + 4096) {
+  } else if (!pngHasBlock(sizeof(PNG) + 4096)) {
     in.error = "not enough contiguous heap";
-  } else if (!(c.png = new (std::nothrow) PNG())) {
+  } else if (!(pngMem = pngAlloc(sizeof(PNG)))) {
     in.error = "PNG allocation failed";
   } else {
+    c.png = new (pngMem) PNG();
     if (!c.direct) {
       for (int x = 0; x < c.srcW; x++) {
         c.colOf[x] = (uint16_t)pngConvMap(x, c.srcW, c.outW);
@@ -228,11 +266,13 @@ bool decodePngScaled(fs::FS& fs, const char* pngPath, int boxW, int boxH,
     }
     c.png->close();
     // Freed first, while nothing else has been released yet.
-    delete c.png;
+    c.png->~PNG();
+    heap_caps_free(pngMem);
     c.png = nullptr;
   }
 
-  free(c.outRow); free(c.acc); free(c.colCnt); free(c.colOf); free(c.line);
+  heap_caps_free(c.outRow); heap_caps_free(c.acc); heap_caps_free(c.colCnt);
+  heap_caps_free(c.colOf); heap_caps_free(c.line);
   in.sinkMs += c.sinkUs / 1000;
   in.ms = millis() - t0;
   return ok;
@@ -290,7 +330,7 @@ bool convertPngTo565(fs::FS& fs, const char* pngPath, const char* rawPath,
   // PngImage.h.
   String tmpPath = String(rawPath) + ".tmp";
   PngFileSink s = {};
-  s.buf = (uint8_t*)malloc(PNGC_WRITE_BLOCK);
+  s.buf = (uint8_t*)pngAlloc(PNGC_WRITE_BLOCK);
   if (!s.buf) { in.error = "write buffer allocation failed"; return false; }
   if (fs.exists(tmpPath)) fs.remove(tmpPath);
   s.out = fs.open(tmpPath, FILE_WRITE);
@@ -305,7 +345,7 @@ bool convertPngTo565(fs::FS& fs, const char* pngPath, const char* rawPath,
     s.out.close();
     in.sinkMs += millis() - tw;
   }
-  free(s.buf);
+  heap_caps_free(s.buf);
 
   if (ok) {
     if (fs.exists(rawPath)) fs.remove(rawPath);
