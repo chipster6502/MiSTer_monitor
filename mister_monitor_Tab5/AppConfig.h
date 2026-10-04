@@ -60,6 +60,7 @@ struct AppConfig {
   int    coreImageTimeout      = 30000;
   int    systemImageTimeout    = 0;      // 0 = same as coreImageTimeout
   String imageMode             = "rotate"; // rotate | game | system
+  String screenshotScaling = "fill";  // fill | integer
   bool   imageUpscale          = false;  // grow artwork smaller than the box
   float  imageUpscaleMax       = 2.5f;   // hard ceiling on that growth
   bool   alphabeticalFolders   = true;
@@ -242,6 +243,7 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "core_image_timeout")     { cfg.coreImageTimeout = val.toInt(); }
     else if (key == "system_image_timeout")   { cfg.systemImageTimeout = val.toInt(); }
     else if (key == "image_mode")             { cfg.imageMode = val; }
+    else if (key == "screenshot_scaling")     { cfg.screenshotScaling = val; }
     else if (key == "image_upscale")          { cfg.imageUpscale = parseBool(val); }
     else if (key == "image_upscale_max")      { cfg.imageUpscaleMax = val.toFloat(); }
     else if (key == "alphabetical_folders")   { cfg.alphabeticalFolders = parseBool(val); }

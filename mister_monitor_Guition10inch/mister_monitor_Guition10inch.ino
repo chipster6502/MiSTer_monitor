@@ -147,6 +147,14 @@ static void standbyStartClock();            // defined with the standby block
 // [images] image_mode - what the fullscreen image mode shows for a game.
 enum ImageMode : uint8_t { IMAGE_MODE_ROTATE, IMAGE_MODE_GAME, IMAGE_MODE_SYSTEM };
 ImageMode IMAGE_MODE                    = IMAGE_MODE_ROTATE;
+// [images] screenshot_scaling - how screenshots and title screens fill the
+// image box: fill (default, sharp bilinear) or integer (whole factors only).
+bool SCREENSHOT_FILL = true;
+// RGB PNGs are drawn from a .565 beside them only where reading that file
+// beats decoding the PNG again. On this board it does not: the CPU decodes a
+// 640x480 PNG (610-750 ms) faster than the SD card reads its .565 (830-980
+// ms), and skipping the .565 also skips its slow first conversion.
+static const bool PNG_RGB_VIA_565 = false;
 
 String CORE_MEDIA_ORDER_STR             = "wheel-steel,wheel-carbon,wheel,screenmarquee,illustration,photo";
 
@@ -3296,6 +3304,15 @@ void setup() {
         Serial.printf("[CONFIG] Unknown image_mode '%s' - using rotate\n", mode.c_str());
     }
   }
+  {
+    String scaling = appConfig.screenshotScaling;
+    scaling.toLowerCase();
+    scaling.trim();
+    SCREENSHOT_FILL = (scaling != "integer");
+    if (scaling != "integer" && scaling != "fill")
+      Serial.printf("[CONFIG] Unknown screenshot_scaling '%s' - using fill\n", scaling.c_str());
+    Serial.printf("[CONFIG] Screenshot scale : %s\n", SCREENSHOT_FILL ? "fill" : "integer");
+  }
 
   CORE_IMAGE_TIMEOUT          = appConfig.coreImageTimeout;
   SYSTEM_IMAGE_TIMEOUT        = (appConfig.systemImageTimeout > 0)
@@ -3744,20 +3761,28 @@ static bool drawRaw565InBox(const char* path, int boxX, int boxY, int boxW, int 
   int x0 = boxX + (boxW - w * k) / 2;
   int y0 = boxY + (boxH - h * k) / 2;
 
+  uint32_t t0 = millis(), readUs = 0, pushUs = 0;
   display.startWrite();
   for (int y = 0; y < h && ok; y++) {
+    uint32_t tr = micros();
     ok = (f.read((uint8_t*)row, w * 2) == (size_t)w * 2);
+    readUs += micros() - tr;
     if (!ok) break;
+    uint32_t tp = micros();
     if (k == 1) {
       display.pushImage(x0, y0 + y, w, 1, row);
-      continue;
+    } else {
+      for (int x = 0; x < w; x++)
+        for (int j = 0; j < k; j++) grown[x * k + j] = row[x];
+      for (int j = 0; j < k; j++) display.pushImage(x0, y0 + y * k + j, w * k, 1, grown);
     }
-    for (int x = 0; x < w; x++)
-      for (int j = 0; j < k; j++) grown[x * k + j] = row[x];
-    for (int j = 0; j < k; j++) display.pushImage(x0, y0 + y * k + j, w * k, 1, grown);
+    pushUs += micros() - tp;
   }
   display.endWrite();
   f.close();
+  Serial.printf("[PNG] drew .565 %dx%d x%d in %u ms (read %u KB in %u ms, panel %u ms)\n",
+                w, h, k, (unsigned)(millis() - t0), (unsigned)((size_t)w * h * 2 / 1024),
+                (unsigned)(readUs / 1000), (unsigned)(pushUs / 1000));
   return ok;
 }
 
@@ -3791,16 +3816,16 @@ static bool pngPanelRow(void* user, int y, const uint16_t* row, int w) {
   return true;
 }
 
-// Decodes a PNG straight to the panel, scaled for the box (see PngImage.h).
-// scaleOut and info, when not null, receive the integer factor used and the
-// decode details.
-static bool drawPngInBox(const char* path, int boxX, int boxY, int boxW, int boxH,
+// Decodes a PNG straight to the panel, scaled for the box (see PngImage.h;
+// fill selects the screenshot_scaling mode). scaleOut and info, when not
+// null, receive the integer factor used and the decode details.
+static bool drawPngInBox(const char* path, int boxX, int boxY, int boxW, int boxH, bool fill,
                          int* scaleOut, PngConvInfo* info) {
   if (!sdCardAvailable) return false;
   if (boxW > TARGET_WIDTH) boxW = TARGET_WIDTH;
   PngPanelSink s = { boxX, boxY, boxW, boxH, 1, 0, 0 };
   display.startWrite();
-  bool ok = decodePngScaled(SD, path, boxW, boxH, pngPanelSize, pngPanelRow, &s, info);
+  bool ok = decodePngScaled(SD, path, boxW, boxH, fill, pngPanelSize, pngPanelRow, &s, info);
   display.endWrite();
   if (scaleOut) *scaleOut = s.k;
   return ok;
@@ -3820,11 +3845,11 @@ static bool raw565Size(const String& path, int* w, int* h) {
 }
 
 // Game image from a PNG, in the same box as displayCoreImageCentered().
-// Palette and grayscale PNGs are decoded straight to the panel; RGB ones are
-// drawn from a .565 beside the PNG, made on first use and remade whenever it
-// is not the size the current box calls for (kiosk mode changes the box).
-// Measured on this board: a palette PNG decodes faster than its .565 reads,
-// while a 640x480 RGB one takes 480 ms to decode against 140 ms to read.
+// Palette and grayscale PNGs are decoded straight to the panel. RGB ones are
+// too, unless PNG_RGB_VIA_565 says this board reads a .565 faster: then they
+// are drawn from a .565 beside the PNG, made on first use and remade whenever
+// it is not the size the current box calls for (kiosk mode and
+// screenshot_scaling both change that).
 static bool displayGamePngCentered(const String& pngPath) {
   int w = 0, h = 0, type = -1;
   if (!sdCardAvailable || !pngReadHeader(SD, pngPath.c_str(), &w, &h, &type)) return false;
@@ -3833,27 +3858,36 @@ static bool displayGamePngCentered(const String& pngPath) {
   Lcd.fillScreen(THEME_BLACK);
 
   PngConvInfo info;
-  if (type == 2 || type == 6) {
+  if (PNG_RGB_VIA_565 && (type == 2 || type == 6)) {
     String raw = pngPath.substring(0, pngPath.lastIndexOf('.')) + ".565";
     int wantW = 0, wantH = 0, haveW = -1, haveH = -1;
-    pngFitSize(w, h, g_artBoxW, g_artBoxH, &wantW, &wantH);
+    pngFitSize(w, h, g_artBoxW, g_artBoxH, SCREENSHOT_FILL, &wantW, &wantH);
     if (!raw565Size(raw, &haveW, &haveH) || haveW != wantW || haveH != wantH) {
-      if (!convertPngTo565(SD, pngPath.c_str(), raw.c_str(), g_artBoxW, g_artBoxH, &info)) {
+      if (!convertPngTo565(SD, pngPath.c_str(), raw.c_str(), g_artBoxW, g_artBoxH,
+                           SCREENSHOT_FILL, &info)) {
         Serial.printf("[PNG] %s: no .565 (%s), decoding directly\n",
                       pngPath.c_str(), info.error);
       } else {
-        Serial.printf("[PNG] .565 made in %u ms (largest block %u)\n",
-                      (unsigned)info.ms, (unsigned)info.largestBlock);
+        Serial.printf("[PNG] .565 %dx%d made in %u ms (writing %u ms), largest block %u\n",
+                      info.outW, info.outH, (unsigned)info.ms, (unsigned)info.sinkMs,
+                      (unsigned)info.largestBlock);
       }
     }
     if (drawRaw565InBox(raw.c_str(), 0, 0, g_artBoxW, g_artBoxH, nullptr)) return true;
   }
 
+  // A .565 left by an earlier firmware is dead weight where this board decodes
+  // RGB directly; it can be over 1 MB.
+  if (!PNG_RGB_VIA_565 && (type == 2 || type == 6)) {
+    String raw = pngPath.substring(0, pngPath.lastIndexOf('.')) + ".565";
+    if (SD.exists(raw)) SD.remove(raw);
+  }
+
   int k = 1;
-  bool ok = drawPngInBox(pngPath.c_str(), 0, 0, g_artBoxW, g_artBoxH, &k, &info);
-  Serial.printf("[PNG] %s %dx%d -> %dx%d x%d, %u ms, largest block %u%s%s\n",
+  bool ok = drawPngInBox(pngPath.c_str(), 0, 0, g_artBoxW, g_artBoxH, SCREENSHOT_FILL, &k, &info);
+  Serial.printf("[PNG] %s %dx%d -> %dx%d x%d, %u ms (panel %u ms), largest block %u%s%s\n",
                 pngPath.c_str(), info.srcW, info.srcH, info.outW, info.outH, k,
-                (unsigned)info.ms, (unsigned)info.largestBlock,
+                (unsigned)info.ms, (unsigned)info.sinkMs, (unsigned)info.largestBlock,
                 ok ? "" : ", failed: ", ok ? "" : info.error);
   return ok;
 }

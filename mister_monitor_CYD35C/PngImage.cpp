@@ -72,14 +72,15 @@ struct PngConvCtx {
   void* user;
   uint32_t sinkUs;      // time spent in the sink
   int srcW, srcH, outW, outH;
+  int k;                // each source pixel stands for k x k before averaging
   bool direct;          // native size: decoded rows go straight to the sink
   uint16_t* line;       // one source row as RGB565
-  uint16_t* colOf;      // source column -> output column
-  uint16_t* colCnt;     // source columns per output column
+  uint16_t* colOf;      // repeated source column (k per pixel) -> output column
+  uint16_t* colCnt;     // repeated source columns per output column
   uint32_t* acc;        // per output column: R5, G6, B5 sums
   uint16_t* outRow;     // one output row, high byte first
   int accRow;           // output row being accumulated, -1 when none
-  int accRows;          // source rows accumulated into it
+  int accRows;          // repeated source rows accumulated into it
   int rowsOut;
   bool ok;
 };
@@ -123,28 +124,34 @@ static int pngConvDraw(PNGDRAW* d) {
     return 1;
   }
 
-  int oy = pngConvMap(d->y, c->srcH, c->outH);
-  if (oy != c->accRow) {
-    if (c->accRow >= 0 && !pngConvFlushRow(c)) { c->ok = false; return 0; }
-    c->accRow = oy;
-    c->accRows = 0;
-  }
   c->png->getLineAsRGB565(d, c->line, PNG_RGB565_LITTLE_ENDIAN, 0x000000);
-  for (int x = 0; x < c->srcW; x++) {
-    uint16_t p = c->line[x];
-    uint32_t* a = &c->acc[c->colOf[x] * 3];
-    a[0] += p >> 11;
-    a[1] += (p >> 5) & 0x3F;
-    a[2] += p & 0x1F;
+  const int k = c->k;
+  const int vw = c->srcW * k, vh = c->srcH * k;
+  for (int r = 0; r < k; r++) {
+    int oy = pngConvMap(d->y * k + r, vh, c->outH);
+    if (oy != c->accRow) {
+      if (c->accRow >= 0 && !pngConvFlushRow(c)) { c->ok = false; return 0; }
+      c->accRow = oy;
+      c->accRows = 0;
+    }
+    for (int xv = 0; xv < vw; xv++) {
+      uint16_t p = c->line[xv / k];
+      uint32_t* a = &c->acc[c->colOf[xv] * 3];
+      a[0] += p >> 11;
+      a[1] += (p >> 5) & 0x3F;
+      a[2] += p & 0x1F;
+    }
+    c->accRows++;
   }
-  c->accRows++;
   return 1;
 }
 
 // Output size for a source of w x h in a box of boxW x boxH (see the rule in
-// PngImage.h).
-static void pngPlanSize(int w, int h, int boxW, int boxH, int& outW, int& outH) {
-  if (w <= boxW && h <= boxH) { outW = w; outH = h; return; }
+// PngImage.h), and the repeat factor k that a sharp bilinear upscale needs.
+static void pngPlanSize(int w, int h, int boxW, int boxH, bool fill,
+                        int& outW, int& outH, int& k) {
+  k = 1;
+  if (w <= boxW && h <= boxH && !fill) { outW = w; outH = h; return; }
   if ((int64_t)w * boxH > (int64_t)h * boxW) {
     outW = boxW;
     outH = (int)(((int64_t)h * boxW + w / 2) / w);
@@ -154,11 +161,15 @@ static void pngPlanSize(int w, int h, int boxW, int boxH, int& outW, int& outH) 
   }
   if (outW < 1) outW = 1;
   if (outH < 1) outH = 1;
+  if (outW > w || outH > h) {
+    int kw = (outW + w - 1) / w, kh = (outH + h - 1) / h;
+    k = kw > kh ? kw : kh;
+  }
 }
 
-void pngFitSize(int w, int h, int boxW, int boxH, int* outW, int* outH) {
-  int ow = 0, oh = 0;
-  pngPlanSize(w, h, boxW, boxH, ow, oh);
+void pngFitSize(int w, int h, int boxW, int boxH, bool fill, int* outW, int* outH) {
+  int ow = 0, oh = 0, k = 1;
+  pngPlanSize(w, h, boxW, boxH, fill, ow, oh, k);
   if (outW) *outW = ow;
   if (outH) *outH = oh;
 }
@@ -190,7 +201,7 @@ bool pngReadHeader(fs::FS& fs, const char* pngPath, int* w, int* h, int* colorTy
   return true;
 }
 
-bool decodePngScaled(fs::FS& fs, const char* pngPath, int boxW, int boxH,
+bool decodePngScaled(fs::FS& fs, const char* pngPath, int boxW, int boxH, bool fill,
                      PngSizeSink sizeSink, PngRowSink rowSink, void* user,
                      PngConvInfo* info) {
   // Not 'local': zutil.h, pulled in by PNGdec.h, defines it as a macro.
@@ -218,7 +229,7 @@ bool decodePngScaled(fs::FS& fs, const char* pngPath, int boxW, int boxH,
   c.srcW = in.srcW = w;
   c.srcH = in.srcH = h;
   c.accRow = -1;
-  pngPlanSize(w, h, boxW, boxH, c.outW, c.outH);
+  pngPlanSize(w, h, boxW, boxH, fill, c.outW, c.outH, c.k);
   in.outW = c.outW;
   in.outH = c.outH;
   c.direct = (c.outW == c.srcW && c.outH == c.srcH);
@@ -229,7 +240,7 @@ bool decodePngScaled(fs::FS& fs, const char* pngPath, int boxW, int boxH,
   void* pngMem = nullptr;
   c.line = (uint16_t*)pngAlloc((size_t)c.srcW * 2);
   if (!c.direct) {
-    c.colOf  = (uint16_t*)pngAlloc((size_t)c.srcW * 2);
+    c.colOf  = (uint16_t*)pngAlloc((size_t)c.srcW * c.k * 2);
     c.colCnt = (uint16_t*)pngCalloc(c.outW, 2);
     c.acc    = (uint32_t*)pngCalloc((size_t)c.outW * 3, 4);
     c.outRow = (uint16_t*)pngAlloc((size_t)c.outW * 2);
@@ -243,9 +254,10 @@ bool decodePngScaled(fs::FS& fs, const char* pngPath, int boxW, int boxH,
   } else {
     c.png = new (pngMem) PNG();
     if (!c.direct) {
-      for (int x = 0; x < c.srcW; x++) {
-        c.colOf[x] = (uint16_t)pngConvMap(x, c.srcW, c.outW);
-        c.colCnt[c.colOf[x]]++;
+      const int vw = c.srcW * c.k;
+      for (int xv = 0; xv < vw; xv++) {
+        c.colOf[xv] = (uint16_t)pngConvMap(xv, vw, c.outW);
+        c.colCnt[c.colOf[xv]]++;
       }
     }
     g_pngFs = &fs;
@@ -320,7 +332,7 @@ static bool pngFileRow(void* user, int, const uint16_t* row, int w) {
 }
 
 bool convertPngTo565(fs::FS& fs, const char* pngPath, const char* rawPath,
-                     int boxW, int boxH, PngConvInfo* info) {
+                     int boxW, int boxH, bool fill, PngConvInfo* info) {
   PngConvInfo scratch;
   PngConvInfo& in = info ? *info : scratch;
   in = PngConvInfo();
@@ -338,7 +350,7 @@ bool convertPngTo565(fs::FS& fs, const char* pngPath, const char* rawPath,
   if (!s.out) {
     in.error = "cannot write output";
   } else {
-    ok = decodePngScaled(fs, pngPath, boxW, boxH, pngFileSize, pngFileRow, &s, &in);
+    ok = decodePngScaled(fs, pngPath, boxW, boxH, fill, pngFileSize, pngFileRow, &s, &in);
     uint32_t tw = millis();
     if (ok && !pngFileFlush(&s)) { ok = false; in.error = "write failed"; }
     if (ok && s.written != (size_t)in.outW * in.outH * 2) { ok = false; in.error = "incomplete output"; }

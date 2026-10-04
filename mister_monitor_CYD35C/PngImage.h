@@ -11,13 +11,19 @@
 // sink: a 4-byte header (width, height, little-endian) followed by the rows,
 // the raw format drawStandbyLogoRaw() reads.
 //
-// Size rule for a box of boxW x boxH:
-//   * fits at 1x  -> rows at native size; any integer upscaling is left to
-//                    the sink, so output never exceeds the source;
-//   * otherwise   -> area average down to the largest size that fits, keeping
-//                    the aspect ratio. An exact 1/2 comes out as a 2x2 average.
-// Downscaling never drops pixels (no nearest neighbour), so text and sprites
-// keep their shape at the cost of slight softening.
+// Size rule for a box of boxW x boxH (fill chooses between the two modes of
+// the screenshot_scaling setting):
+//   * larger than the box -> area average down to the largest size that fits,
+//                            keeping the aspect ratio. An exact 1/2 comes out
+//                            as a 2x2 average. Both modes.
+//   * fits, fill          -> grown to the largest size that fits with a sharp
+//                            bilinear scale: every pixel repeated k times (k the
+//                            next whole factor up), then area averaged down.
+//                            Pixels stay crisp; only some edges soften by one.
+//   * fits, integer       -> rows at native size; integer upscaling, if any, is
+//                            left to the sink, so output never exceeds the source.
+// Never nearest neighbour at a fractional factor: it would draw some rows and
+// columns twice as thick as others.
 //
 // The decoder needs one contiguous block of sizeof(PNG) bytes (~48 KB: zlib
 // window, inflate state, palette, two row buffers). It is allocated per call,
@@ -56,7 +62,7 @@ struct PngConvInfo {
 bool pngReadHeader(fs::FS& fs, const char* pngPath, int* w, int* h, int* colorType);
 
 // Size decodePngScaled() produces for a w x h source in a boxW x boxH box.
-void pngFitSize(int w, int h, int boxW, int boxH, int* outW, int* outH);
+void pngFitSize(int w, int h, int boxW, int boxH, bool fill, int* outW, int* outH);
 
 // False for a PNG this decoder cannot read: interlaced, or more than 8 bits
 // per sample. Checks the header only.
@@ -72,7 +78,7 @@ typedef bool (*PngSizeSink)(void* user, int outW, int outH);
 
 // Decodes pngPath scaled for a boxW x boxH box. Returns false, with
 // info->error set, on any failure, including a sink that refuses or aborts.
-bool decodePngScaled(fs::FS& fs, const char* pngPath, int boxW, int boxH,
+bool decodePngScaled(fs::FS& fs, const char* pngPath, int boxW, int boxH, bool fill,
                      PngSizeSink sizeSink, PngRowSink rowSink, void* user,
                      PngConvInfo* info = nullptr);
 
@@ -80,4 +86,4 @@ bool decodePngScaled(fs::FS& fs, const char* pngPath, int boxW, int boxH,
 // Returns false, with info->error set, on any failure; rawPath is then left
 // untouched.
 bool convertPngTo565(fs::FS& fs, const char* pngPath, const char* rawPath,
-                     int boxW, int boxH, PngConvInfo* info = nullptr);
+                     int boxW, int boxH, bool fill, PngConvInfo* info = nullptr);

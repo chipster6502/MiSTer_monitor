@@ -183,6 +183,7 @@ what it shows and how:
 | `info_in_rotation` | `false` | Adds the GAME INFO panel to the rotation as a third slide: game image → game info → system image. No effect with `image_mode=game` or `system`. |
 | `image_upscale` | `false` | Grows artwork that is smaller than the display area until it fills it, aspect preserved. |
 | `image_upscale_max` | `2.5` | Ceiling on that growth, as a multiplier (1.0–2.875). |
+| `screenshot_scaling` | `fill` | How screenshots and title screens fill the display area. `fill` always fills it: smaller images grow with a sharp bilinear scale (crisp pixels, slight softening on some edges), larger ones shrink by averaging. `integer` grows only by whole multiples, every pixel square, so images can stay small where the area is not quite twice their size. Box art is not affected. |
 | `kiosk_mode` | `false` | Gives the whole panel to the artwork and hides the footer strip. |
 | `kiosk_hide_delay_ms` | `5000` | How long the footer stays up after a tap in kiosk mode (500–600000). |
 
@@ -399,6 +400,7 @@ six boards unless noted.
 | | `core_image_timeout`, `system_image_timeout` | `30000`, `0` | Slide dwell times — see [The image screen](#the-image-screen). |
 | | `image_mode` | `rotate` | `rotate`, `game` or `system`. |
 | | `image_upscale`, `image_upscale_max` | `false`, `2.5` | Grow small artwork to fill the display area. |
+| | `screenshot_scaling` | `fill` | `fill` or `integer` — see [The image screen](#the-image-screen). |
 | | `alphabetical_folders` | `true` | Organise images in lettered subfolders (`/cores/A/`, `/cores/B/`, …). |
 | | `auto_download` | `true` | Download missing artwork from ScreenScraper. |
 | | `max_image_size` | `500000` | Largest image (bytes) the display will download. |
