@@ -63,31 +63,34 @@ jobs:
             --output-dir build/guition10inch_v3 \
             mister_monitor_Guition10inch
 
+      # min_spiffs gives the 4 MB boards two 1.875 MB app slots, which the
+      # over-the-air updater needs. huge_app (one 3 MB slot) cannot take an
+      # update; a board still on it is told to reflash once by cable.
       - name: Compile CYD 2.8" ILI9341
         run: |
           arduino-cli compile \
-            --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app,FlashSize=4M,PSRAM=disabled" \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs,FlashSize=4M,PSRAM=disabled" \
             --output-dir build/cyd_ili9341 \
             mister_monitor_CYD28R_ILI9341
 
       - name: Compile CYD 2.8" ST7789
         run: |
           arduino-cli compile \
-            --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app,FlashSize=4M,PSRAM=disabled" \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs,FlashSize=4M,PSRAM=disabled" \
             --output-dir build/cyd_st7789 \
             mister_monitor_CYD28R_ST7789
 
       - name: Compile CYD35C
         run: |
           arduino-cli compile \
-            --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app,FlashSize=4M,PSRAM=disabled" \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs,FlashSize=4M,PSRAM=disabled" \
             --output-dir build/cyd35c \
             mister_monitor_CYD35C
 
       - name: Compile CYD35R
         run: |
           arduino-cli compile \
-            --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app,FlashSize=4M,PSRAM=disabled" \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs,FlashSize=4M,PSRAM=disabled" \
             --output-dir build/cyd35r \
             mister_monitor_CYD35R
 
@@ -101,6 +104,67 @@ jobs:
           cp build/cyd_st7789/mister_monitor_CYD28R_ST7789.ino.merged.bin dist/mister_monitor_cyd_st7789.bin
           cp build/cyd35c/mister_monitor_CYD35C.ino.merged.bin dist/mister_monitor_cyd35c.bin
           cp build/cyd35r/mister_monitor_CYD35R.ino.merged.bin dist/mister_monitor_cyd35r.bin
+
+      # The app-only images are what the displays fetch over the air. They go
+      # to the Downloader DB next to the server, with a manifest the display
+      # uses to pick its build and verify the download.
+      - name: Collect OTA images and write the manifest
+        run: |
+          mkdir -p dist/ota
+          cp build/tab5/mister_monitor_Tab5.ino.bin                      dist/ota/tab5.bin
+          cp build/guition10inch/mister_monitor_Guition10inch.ino.bin    dist/ota/guition10inch.bin
+          cp build/guition10inch_v3/mister_monitor_Guition10inch.ino.bin dist/ota/guition10inch_v3.bin
+          cp build/cyd_ili9341/mister_monitor_CYD28R_ILI9341.ino.bin     dist/ota/cyd_ili9341.bin
+          cp build/cyd_st7789/mister_monitor_CYD28R_ST7789.ino.bin       dist/ota/cyd_st7789.bin
+          cp build/cyd35c/mister_monitor_CYD35C.ino.bin                  dist/ota/cyd35c.bin
+          cp build/cyd35r/mister_monitor_CYD35R.ino.bin                  dist/ota/cyd35r.bin
+          python3 - <<'EOF'
+          import hashlib, json, os
+          version = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          boards = {}
+          for name in sorted(os.listdir("dist/ota")):
+              if not name.endswith(".bin"):
+                  continue
+              data = open(os.path.join("dist/ota", name), "rb").read()
+              # An ESP app image starts with 0xE9; the merged flasher image
+              # does not. Never let the wrong one reach the displays.
+              assert data[:1] == b"\xe9", f"{name} is not an app image"
+              boards[name[:-4]] = {"file": name, "size": len(data),
+                                   "md5": hashlib.md5(data).hexdigest()}
+          with open("dist/ota/manifest.json", "w") as f:
+              json.dump({"version": version, "boards": boards}, f, indent=2)
+          print(open("dist/ota/manifest.json").read())
+          EOF
+
+      - name: Checkout the DB repo
+        uses: actions/checkout@v4
+        with:
+          repository: chipster6502/MiSTer_monitor_DB
+          ref: main
+          token: ${{ secrets.DB_PUSH_TOKEN }}
+          path: db
+
+      - name: Publish the OTA images to the DB repo
+        working-directory: db
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          FW=Scripts/.config/mister_monitor/firmware
+          rm -rf "$FW" && mkdir -p "$FW"
+          cp ../dist/ota/* "$FW/"
+          git add -A "$FW"
+          if git diff --cached --quiet; then
+            echo "DB repo already carries these images — nothing to publish."
+            exit 0
+          fi
+          git commit -m "firmware: OTA images from ${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}"
+          # sync-to-db.yml pushes the server files to the same branch on the
+          # same tag; whichever lands second rebases onto the other.
+          for attempt in 1 2 3 4 5; do
+            git push origin HEAD:main && exit 0
+            git pull --rebase origin main
+          done
+          exit 1
 
       - name: Create release
         uses: softprops/action-gh-release@v2

@@ -27,7 +27,9 @@ jobs:
 
       - name: Mirror MiSTer/Scripts/ into the DB repo's Scripts/
         run: |
-          rsync -a --delete \
+          # firmware/ is written by release.yml from the compiled images and
+          # has no counterpart in this repo, so --delete must leave it alone.
+          rsync -a --delete --exclude 'firmware/' \
             source/MiSTer/Scripts/ \
             db/Scripts/
 
@@ -42,4 +44,10 @@ jobs:
             exit 0
           fi
           git commit -m "sync: MiSTer server files from ${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}"
-          git push origin HEAD:main
+          # release.yml pushes the OTA images to the same branch on the same
+          # tag; whichever lands second rebases onto the other.
+          for attempt in 1 2 3 4 5; do
+            git push origin HEAD:main && exit 0
+            git pull --rebase origin main
+          done
+          exit 1
