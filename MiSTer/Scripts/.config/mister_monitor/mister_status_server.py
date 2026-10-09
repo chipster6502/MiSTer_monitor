@@ -313,6 +313,12 @@ CORE_NAME_MAPPING = {
     'ABC80': 'Luxor ABC 80',
     'Amstrad PCW': 'Amstrad PCW',
     'Tamagotchi': 'Tamagotchi',
+
+    # --- Proposed automatically from each core's CONF_STR.
+    # The KEY is verbatim from the core's Verilog and is correct.
+    # The VALUE is a placeholder: replace it with a display name
+    # before merging ('C16' -> 'Commodore 16').
+    'MACSE30': 'MACSE30',  # MacSE30.rbf, MacSE30_MiSTer
 }
 
 # names.txt only names cores the curated table does not know. Lookups are
