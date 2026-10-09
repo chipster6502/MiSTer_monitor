@@ -334,6 +334,16 @@ CORE_NAME_MAPPING_LOWER = {k.lower(): v for k, v in CORE_NAME_MAPPING.items()}
 # ---------------------------------------------------------------------------
 # Unknown cores
 # ---------------------------------------------------------------------------
+# Display firmware images for the over-the-air updater. The release workflow
+# ships one app image per board plus manifest.json through the Downloader
+# database, into firmware/ next to this file, so a display can fetch exactly
+# the build that matches the server it is already talking to. Nothing here
+# runs until a display asks for it.
+FIRMWARE_DIR      = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'firmware')
+FIRMWARE_MANIFEST = os.path.join(FIRMWARE_DIR, 'manifest.json')
+_FIRMWARE_CHUNK   = 64 * 1024
+
+# ---------------------------------------------------------------------------
 # Records the CORENAMEs this server cannot name, so the exact key a mapping
 # needs is known without guessing. Local only: the file never leaves the MiSTer.
 # threading is re-imported here because the real import lands further down,
@@ -2749,6 +2759,7 @@ PUBLIC_ENDPOINTS = [
     ('/media/artwork',            'Artwork for the loaded game, from the installed pack'),
     ('/media/snap',               'Screenshot for the loaded game, from the installed pack'),
     ('/media/title',              'Title screen for the loaded game, from the installed pack'),
+    ('/firmware/manifest',        'Display firmware shipped with this server (version and per-board images)'),
 ]
 
 class MiSTerStatusHandler(BaseHTTPRequestHandler):
@@ -2841,6 +2852,10 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
             # the MiSTer's SD, so the bytes have to travel. 404 means "no local
             # image" and the firmware falls back to ScreenScraper.
             self.send_pack_media_response(path[len('/media/'):])
+        elif path == '/firmware/manifest':
+            self.send_firmware_manifest()
+        elif path.startswith('/firmware/'):
+            self.send_firmware_file(path[len('/firmware/'):])
         elif path == '/status/error_state':
             # NEW ENDPOINT: Return current error state
             global server_error_state, last_valid_core, last_valid_core_timestamp
@@ -4436,6 +4451,66 @@ class MiSTerStatusHandler(BaseHTTPRequestHandler):
         except Exception as e:
             print("\u26a0\ufe0f local artwork hash lookup failed: %s" % e)
             return ''
+
+    def _firmware_manifest(self):
+        """firmware/manifest.json parsed, or None when absent or unreadable.
+        Read on every request on purpose: the Downloader replaces the file
+        underneath a running server, and the display must see the new one."""
+        try:
+            with open(FIRMWARE_MANIFEST, 'r', encoding='utf-8') as f:
+                manifest = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(manifest, dict) or not isinstance(manifest.get('boards'), dict):
+            return None
+        return manifest
+
+    def send_firmware_manifest(self):
+        manifest = self._firmware_manifest()
+        if manifest is None:
+            self.send_error_response(404, 'No firmware images installed next to this server')
+            return
+        self.send_json_response(manifest)
+
+    def send_firmware_file(self, name):
+        """Streams one firmware image. The name must appear in the manifest:
+        that is the whole access rule, so a request cannot reach anything the
+        release did not ship, and there is no path to climb."""
+        manifest = self._firmware_manifest()
+        allowed = set()
+        if manifest:
+            allowed = {b.get('file') for b in manifest['boards'].values()
+                       if isinstance(b, dict)}
+        if not name or name not in allowed:
+            self.send_error_response(404, 'Unknown firmware image')
+            return
+        path = os.path.join(FIRMWARE_DIR, name)
+        try:
+            size = os.path.getsize(path)
+            f = open(path, 'rb')
+        except OSError:
+            self.send_error_response(404, 'Firmware image missing on disk')
+            return
+        with f:
+            self.send_response(200)
+            self.send_header('Content-type', 'application/octet-stream')
+            self.send_header('Content-Length', str(size))
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            sent = 0
+            try:
+                while True:
+                    chunk = f.read(_FIRMWARE_CHUNK)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    sent += len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                print("\u26a0\ufe0f firmware download aborted by the client: %s (%d of %d bytes)"
+                      % (name, sent, size))
+                return
+        print("\U0001f4e6 Served firmware image %s (%d bytes)" % (name, size))
 
     def send_pack_media_response(self, media):
         """Sends the pack image of one kind for the loaded game, or 404.
