@@ -18,7 +18,8 @@
 // ============================================================================
 //  Build settings (Arduino IDE -> Tools menu):
 //    Board:           ESP32 Dev Module
-//    Partition:       Huge APP (3MB No OTA/1MB SPIFFS)
+//    Partition:       Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)
+//                     (two app slots: required by the over-the-air updater)
 //    Flash Size:      4MB (32Mb)
 //    PSRAM:           Disabled
 //    Upload Speed:    921600
@@ -467,6 +468,8 @@ bool discoverMister(uint8_t attempts = 5, uint16_t replyWaitMs = 600) {
 
 #include "WebConfig.h"   // /config editor + /reboot on the device web server
 #include "WebFiles.h"    // /files SD card browser (list, download, upload, delete)
+#define FIRMWARE_BOARD_ID "cyd_st7789"   // key of this build in firmware/manifest.json
+#include "FirmwareUpdate.h"   // /update page + install a newer release from the MiSTer
 
 // ========== SCREENSHOT SERVER ==========
 WebServer screenshotServer(8080);
@@ -679,6 +682,9 @@ void testMiSTerConnectivity(bool discovered);
 void showReconnectBanner();
 void showRAReadyBanner();
 void showVersionMismatchBanner();
+void showUpdateOfferBanner();
+void drawFirmwareProgress(const char* phase, size_t done, size_t total);
+void runFirmwareUpdate(const char* trigger);
 void updateMiSTerData();
 void getCurrentCore();
 void getCurrentGame();
@@ -2477,6 +2483,21 @@ void handleTouch() {
     // Step 5: Check each button in sequence
     // Using if-else ensures only one button can be activated per touch
     
+    // Firmware update offer: while the MiSTer holds a newer image for this
+    // board, the HUD version panel is orange (see drawVersionPanel). The
+    // panel sits next to the nav buttons and kept losing taps to them, so the
+    // target is the whole HUD body, above the PRV/SCAN/NXT footer.
+    // The tap only reopens the offer banner: installing takes a second tap,
+    // and a stray touch on the HUD cannot start a reflash. Main HUD only.
+    if (currentPage == 0 && !showingCoreImage &&
+        firmwareOffer.available && firmwareOtaCapable() &&
+        physicalY < 205) {
+      Serial.println("  -> UPDATE offer tapped");
+      showUpdateOfferBanner();   // confirm step: a second tap installs
+      needsRedraw = true;
+      lastButtonPress = millis();
+    }
+    else
     // GAME INFO subpage toggle (page 5 only).
     // The "1/2>>" indicator at 238..298 x 40..56 is the visual affordance, but
     // the hit target is EVERYTHING above the footer: y 0..204, full width. That
@@ -2999,6 +3020,7 @@ void setup() {
   if (WiFi.status() == WL_CONNECTED) {
     registerWebConfigRoutes();   // /config editor + /reboot on the same server
     registerWebFilesRoutes();    // /files SD card browser on the same server
+    registerFirmwareUpdateRoutes(drawFirmwareProgress);   // /update on the same server
     setupScreenshotServer();
   }
 }
@@ -3892,6 +3914,18 @@ void loop() {
   Board.update();
   screenshotServer.handleClient();  // Non-blocking screenshot server poll
 
+  // Update requested from the /update page. Runs here, not in the handler:
+  // handleClient() is pumped from inside drawing and download code, and a
+  // reflash started there would re-enter all of it. Sits above the standby
+  // block on purpose: the request came from a browser, so the panel may be
+  // dark, and the update must not wait for a wake tap.
+  if (firmwareWebRequested) {
+    firmwareWebRequested = false;
+    runFirmwareUpdate("web");
+    needsRedraw = true;
+    if (standbyActive) drawStandbyScreen(true);
+  }
+
   // --- Periodic MiSTer re-discovery while offline ---------------------------
   // Discovery runs once at boot. If the MiSTer wasn't on the network yet
   // (e.g. its IP delayed by a CIFS mount), boot-time discovery fails and the
@@ -3961,7 +3995,12 @@ void loop() {
   // banner because it explains why anything else may be misbehaving.
   if (versionMismatchPending) {
     versionMismatchPending = false;
-    showVersionMismatchBanner();
+    // A mismatch the MiSTer can fix is offered as an update; any other kind
+    // (server older than us, no image for this board, or a board still on
+    // the single-slot layout that must be reflashed by cable) is only
+    // reported, and /update explains why.
+    if (firmwareOffer.available && firmwareOtaCapable()) showUpdateOfferBanner();
+    else                                                 showVersionMismatchBanner();
     needsRedraw = true;
   }
 
@@ -5982,6 +6021,159 @@ void showVersionMismatchBanner() {
   }
 }
 
+// Update offer banner. Same footer band and two-line geometry as the mismatch
+// banner it replaces, but green and a button: it polls the touch for a few
+// seconds and a tap anywhere starts the update. With [update] ota_auto=true it
+// holds just long enough to be read, then starts by itself. Declining costs
+// nothing: the HUD version panel turns into an orange UPDATE button that
+// stays until tapped, the /update page keeps its button, and the next boot
+// offers again.
+void showUpdateOfferBanner() {
+  char line1[40];
+  snprintf(line1, sizeof(line1), "UPDATE TO %s", firmwareOffer.version.c_str());
+  const char* l2 = appConfig.updateAuto ? "INSTALLING..." : "TAP TO INSTALL";
+  int w1 = (int)strlen(line1) * 12;
+  int w2 = (int)strlen(l2)    * 12;
+
+  Lcd.fillRect(0, 200, 320, 40, THEME_GREEN);
+  Lcd.setTextWrap(false);
+  Lcd.setTextSize(2);
+  Lcd.setTextColor(THEME_BLACK, THEME_GREEN);
+  Lcd.setCursor((320 - w1) / 2, 204);
+  Lcd.print(line1);
+  Lcd.setCursor((320 - w2) / 2, 222);
+  Lcd.print(l2);
+
+  bool start = false;
+  if (appConfig.updateAuto) {
+    delay(1500);
+    start = true;
+  } else {
+    const unsigned long OFFER_HOLD_MS   = 12000;
+    const unsigned long OFFER_SETTLE_MS = 400;   // ignore the bounce of the tap that opened it
+    unsigned long t0 = millis();
+    while (millis() - t0 < OFFER_HOLD_MS) {
+      Board.update();
+      if (Board.Touch.getDetail().wasPressed() && millis() - t0 > OFFER_SETTLE_MS) { start = true; break; }
+      screenshotServer.handleClient();
+      delay(20);
+    }
+  }
+
+  if (start) {
+    runFirmwareUpdate(appConfig.updateAuto ? "auto" : "tap");
+    return;                                  // runFirmwareUpdate restored the screen
+  }
+  firmwareOffer.declined = true;
+  Serial.println("[OTA] Offer not taken; still available at /update");
+  if (showingCoreImage) {
+    repaintImageFooterBand();
+  }
+}
+
+// Full-screen progress for the updater: a title, the version jump, a bar
+// and the current phase. Called from FirmwareUpdate.h on every flash write,
+// so it only repaints when the percentage changes (or every 500 ms when the
+// total is unknown, i.e. a browser upload). "Connecting" is the first call
+// of a run and clears the screen.
+void drawFirmwareProgress(const char* phase, size_t done, size_t total) {
+  static int           lastPct  = -1;
+  static unsigned long lastDraw = 0;
+  bool first  = (strcmp(phase, "Connecting") == 0) ||
+                (strcmp(phase, "Receiving") == 0 && done == 0);
+  // Only the two streaming phases arrive in bursts; everything else is a
+  // one-off that must always land (Verifying, Done, FAILED).
+  bool stream = (strcmp(phase, "Writing") == 0) || (strcmp(phase, "Receiving") == 0);
+  int pct = (total > 0) ? (int)((uint64_t)done * 100 / total) : -1;
+
+  if (stream && !first) {
+    if (pct >= 0 && pct == lastPct) return;
+    if (pct <  0 && millis() - lastDraw < 500) return;
+  }
+  lastPct  = pct;
+  lastDraw = millis();
+  if (strcmp(phase, "Failed") == 0) needsRedraw = true;   // browser upload failed: back to normal UI
+
+  if (first) {
+    Lcd.fillScreen(THEME_BLACK);
+    Lcd.setTextWrap(false);
+    Lcd.setTextSize(2);
+    Lcd.setTextColor(THEME_CYAN, THEME_BLACK);
+    const char* title = "FIRMWARE UPDATE";
+    Lcd.setCursor((320 - (int)strlen(title) * 12) / 2, 36);
+    Lcd.print(title);
+    char line[40];
+    if (firmwareOffer.version.length() > 0 && strcmp(phase, "Receiving") != 0) {
+      snprintf(line, sizeof(line), "%s -> %s", FIRMWARE_VERSION, firmwareOffer.version.c_str());
+    } else {
+      snprintf(line, sizeof(line), "from browser upload");
+    }
+    Lcd.setTextSize(2);
+    Lcd.setTextColor(THEME_WHITE, THEME_BLACK);
+    Lcd.setCursor((320 - (int)strlen(line) * 12) / 2, 64);
+    Lcd.print(line);
+    Lcd.drawRect(40, 118, 240, 22, THEME_CYAN);
+    Lcd.setTextSize(1);
+    Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+    const char* warn = "Keep the display powered until it restarts";
+    Lcd.setCursor((320 - (int)strlen(warn) * 6) / 2, 210);
+    Lcd.print(warn);
+  }
+
+  // Bar + percentage (or a byte count when the total is unknown).
+  if (pct >= 0) {
+    Lcd.fillRect(42, 120, (236 * pct) / 100, 18, THEME_GREEN);
+  }
+  if (pct >= 0 || stream) {
+    char stat[48];
+    if (pct >= 0) snprintf(stat, sizeof(stat), "%3d%%", pct);
+    else          snprintf(stat, sizeof(stat), "%u KB", (unsigned)(done / 1024));
+    Lcd.setTextSize(2);
+    Lcd.setTextColor(THEME_WHITE, THEME_BLACK);
+    Lcd.fillRect(0, 150, 320, 18, THEME_BLACK);
+    Lcd.setCursor((320 - (int)strlen(stat) * 12) / 2, 150);
+    Lcd.print(stat);
+  }
+
+  // Phase line, always rewritten: it is short and changes rarely.
+  Lcd.setTextSize(1);
+  Lcd.setTextColor(THEME_CYAN, THEME_BLACK);
+  Lcd.fillRect(0, 180, 320, 10, THEME_BLACK);
+  Lcd.setCursor((320 - (int)strlen(phase) * 6) / 2, 180);
+  Lcd.print(phase);
+}
+
+// Runs the update from the MiSTer, blocking, with the progress screen. On
+// success the new image is already the boot target and the display restarts
+// from here. On failure the reason stays on screen for a while and the
+// running firmware carries on untouched; the attempt is not repeated this
+// boot (the cause will not change by itself) but /update can retry on demand.
+void runFirmwareUpdate(const char* trigger) {
+  Serial.printf("[OTA] Starting update (%s): %s -> %s\n",
+                trigger, FIRMWARE_VERSION, firmwareOffer.version.c_str());
+  display.setBrightness(DISPLAY_BRIGHTNESS_NORMAL);   // may be coming from standby
+  drawFirmwareProgress("Connecting", 0, firmwareOffer.size);
+
+  bool ok = firmwareApplyOffer(drawFirmwareProgress);
+
+  if (ok) {
+    drawFirmwareProgress("Done - restarting", firmwareOffer.size, firmwareOffer.size);
+    delay(1500);
+    ESP.restart();
+  }
+
+  Serial.printf("[OTA] Update failed: %s\n", firmwareOffer.reason.c_str());
+  drawFirmwareProgress("FAILED", 0, 0);
+  Lcd.setTextWrap(true);
+  Lcd.setTextSize(1);
+  Lcd.setTextColor(THEME_RED, THEME_BLACK);
+  Lcd.setCursor(10, 190);
+  Lcd.print(firmwareOffer.reason);
+  Lcd.setTextWrap(false);
+  delay(6000);
+  needsRedraw = true;
+}
+
 void updateMiSTerData() {
   Serial.println("=== Updating MiSTer data ===");
   if (!getStateSnapshot()) {   // atomic path (server >= 2.6)
@@ -6034,12 +6226,25 @@ bool getStateSnapshot() {
   String newServerVersion = extractStringValue(response, "server_version");
   newServerVersion.trim();
   if (newServerVersion.length() > 0) {
+    // A server that changes version under a running display (Update All, then
+    // a server restart) is a new situation: judge it afresh, so an update that
+    // arrives mid-session is offered rather than left to the next boot.
+    if (serverVersion.length() > 0 && newServerVersion != serverVersion) {
+      versionMismatchReported = false;
+    }
     serverVersion = newServerVersion;
     if (serverVersion != FIRMWARE_VERSION && !versionMismatchReported) {
       versionMismatchReported = true;
       versionMismatchPending  = true;
       Serial.printf("[VERSION] MISMATCH  server=%s  firmware=%s\n",
                     serverVersion.c_str(), FIRMWARE_VERSION);
+      // A newer server arrived with the Downloader, and so did its firmware
+      // images. Ask for the manifest here, where we are already talking to
+      // it, so the banner in loop() can offer the update instead of just
+      // reporting the mismatch. One small GET, once per boot.
+      if (fwCompareVersions(serverVersion, FIRMWARE_VERSION) > 0) {
+        firmwareCheckOffer();
+      }
     } else if (serverVersion == FIRMWARE_VERSION && !versionMismatchReported) {
       versionMismatchReported = true;   // matched: never warn this boot
       Serial.printf("[VERSION] OK  server=%s  firmware=%s\n",
@@ -7751,9 +7956,18 @@ void drawPanel(int x, int y, int w, int h, uint16_t color) {
 // from drawMiniPanel because that one always fills black, and every other
 // caller depends on that.
 void drawVersionPanel(int x, int y, int w, int h, String sLine, String fLine, bool mismatch) {
-  uint16_t border = mismatch ? THEME_RED   : THEME_CYAN;
-  uint16_t fill   = mismatch ? THEME_RED   : THEME_BLACK;
-  uint16_t fg     = mismatch ? THEME_WHITE : THEME_CYAN;
+  // Three states. Orange: the MiSTer holds a newer image for this board, and
+  // a tap on the HUD reopens the offer banner (see handleTouch). Red:
+  // a mismatch the MiSTer cannot fix (server older than us, no image for this
+  // board, single-slot layout). Cyan: versions match.
+  const bool offer = mismatch && firmwareOffer.available && firmwareOtaCapable();
+  uint16_t border = offer ? THEME_ORANGE : mismatch ? THEME_RED   : THEME_CYAN;
+  uint16_t fill   = offer ? THEME_ORANGE : mismatch ? THEME_RED   : THEME_BLACK;
+  uint16_t fg     = offer ? THEME_BLACK  : mismatch ? THEME_WHITE : THEME_CYAN;
+  if (offer) {
+    sLine = "UPDATE";
+    fLine = "TAP:" + firmwareOffer.version;
+  }
 
   Lcd.drawRect(x, y, w, h, border);
   Lcd.fillRect(x + 1, y + 1, w - 2, h - 2, fill);

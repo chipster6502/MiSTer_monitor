@@ -169,6 +169,9 @@ struct AppConfig {
   bool   webConfig   = true;   // [ui] web_config   - false disables /config + /reboot
   String webPassword = "";     // [ui] web_password - non-empty enables Basic Auth
 
+  // --- Firmware updates ------------------------------------------------------
+  bool   updateAuto  = false;  // [update] auto - install an offered update without a tap
+
   // --- Debug -----------------------------------------------------------------
   bool   debugMode      = false;
 };
@@ -277,6 +280,8 @@ inline void loadConfig(AppConfig& cfg) {
     // [ui] web config editor
     else if (key == "web_config")             { cfg.webConfig = parseBool(val); }
     else if (key == "web_password")           { cfg.webPassword = val; }
+    // [update]
+    else if (key == "auto")                   { cfg.updateAuto = parseBool(val); }
     // [debug]
     else if (key == "debug")                  { cfg.debugMode = parseBool(val); }
     else {
