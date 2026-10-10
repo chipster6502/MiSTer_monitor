@@ -852,7 +852,20 @@ def _sam_is_current():
     if not os.path.exists(sam_log_path):
         return False
 
+    # _ensure_watched_files() creates an empty SAM_Games.log so that inotifywait
+    # can start. An empty log means SAM never wrote to it: without this check a
+    # MiSTer booted straight into a core that then loads a game from the OSD
+    # looked like SAM was running, the ROM was never hashed and the display
+    # kept the default image.
+    if os.path.getsize(sam_log_path) == 0:
+        return False
+
     sam_ts = os.path.getmtime(sam_log_path)
+    # A log older than this is a leftover from an earlier session, the same
+    # limit _sam_get_current() applies.
+    if time.time() - sam_ts > 300:
+        return False
+
     # Max expected lag between SAM's log write and CORENAME/ACTIVEGAME landing
     # (2-5 s observed). A longer window misattributes a later manual load to SAM.
     grace  = 10  # seconds
