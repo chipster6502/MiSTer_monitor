@@ -1,0 +1,12592 @@
+// MiSTer Monitor — display firmware
+// Copyright (C) 2025-2026 chipster6502
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+// ============================================================================
+//  Build settings (Arduino IDE -> Tools menu):
+//    Board:           ESP32S3 Dev Module
+//    USB CDC On Boot: Enabled (the board only has the native USB port)
+//    Partition:       16M Flash (3MB APP/9.9MB FATFS)
+//                     (two app slots: required by the over-the-air updater)
+//    Flash Size:      16MB (128Mb)
+//    PSRAM:           OPI PSRAM
+// ============================================================================
+
+// =============================================================================
+//  FIRMWARE_VERSION — single source of truth for this sketch's release.
+//  Shown on the boot screen and in the main HUD, and compared against the
+//  server's SERVER_VERSION (carried in /status/snapshot). A mismatch means one
+//  half was updated and the other was not — the display warns instead of
+//  failing silently. Bump on every release, with SERVER_VERSION in the server.
+// =============================================================================
+#define FIRMWARE_VERSION "2.11.1"
+
+#include <LovyanGFX.hpp>
+#include "board_hal.h"
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <SD.h>
+#include <JPEGDEC.h>
+#include "PngImage.h"      // PNG -> raw RGB565 for pack screenshots and title screens
+#include "JpegImage.h"     // JPEG screenshots and title screens, scaled like the PNG ones
+#include <WebServer.h>
+#include "mister_types.h"
+#include "AppConfig.h"
+#include <WiFiUdp.h>
+#include "ss_credentials.h"
+
+// ===== ANTI-CRASH: Reset diagnostics, memory safety =====
+#include "esp_system.h"       // esp_reset_reason()
+
+// Waveshare 2.8: dedicated HSPI bus for the SD card (TFT owns FSPI).
+//   SD pinout:  SCK=14  MISO(D0)=16  MOSI(CMD)=17  CS(D3)=21  (SDMMC pins, used in SPI mode)
+SPIClass sdSPI(HSPI);
+
+// ========== CONFIGURATION ==========
+// All user settings are loaded at boot from /config.ini on the ESP32 SD card.
+// Edit config.ini — do NOT hardcode credentials here.
+// Defaults below apply when the file is missing or a key is absent.
+
+AppConfig appConfig;          // Populated from /config.ini in setup()
+
+// Network — pointers are reassigned from appConfig after SD init
+const char* ssid     = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+const char* misterIP = "";   // set in setup() from appConfig.misterIP (single source of truth: AppConfig.h)
+
+// ScreenScraper runtime strings.
+String _ss_dev_user_str;
+String _ss_dev_pass_str;
+String _ss_user_str;
+String _ss_pass_str;
+String _boxart_region_str       = "wor";
+String _info_lang_str           = "en";   // [gameinfo] info_lang
+GameMeta g_metaLangFallback;              // cached meta kept when a language re-fetch fails
+bool     g_metaLangFallbackValid = false;
+int    _info_synopsis_max       = 2000;   // [gameinfo] info_synopsis_max (memory cap)
+String _core_images_path_str    = "/cores";
+String _default_core_image_str  = "/cores/menu.jpg";
+// Last HTTP status code returned by any ScreenScraper endpoint. Written by
+// every ScreenScraper HTTP call and read afterwards to surface the failure
+// reason on screen once a download attempt has given up.
+int g_lastSSHttpCode = 0;
+
+// The romnom to send to ScreenScraper for this ROM.
+//
+// The server may override the on-disk filename with a romset id it confirmed
+// against the core's own data files (NeoGeo: 'Metal Slug 2 (mslug2).neo' ->
+// 'mslug2.zip'). ScreenScraper indexes NeoGeo as MAME romsets, so the romset
+// matches exactly, whereas the filename only matches through SS's internal
+// fuzzy fallback — which misses whenever the pack's title differs from SS's.
+//
+// An empty override means the server could not confirm a romset, and the
+// filename is used exactly as before: unknown systems, older servers and
+// unconfirmed names all keep today's behaviour.
+static inline String ssRomnomFor(const RomDetails& d) {
+  return d.ssRomnom.length() > 0 ? d.ssRomnom : d.filename;
+}
+
+// Media type search order — updated from appConfig in setup()
+// Defaults match AppConfig struct defaults (overridden by config.ini).
+String GAME_MEDIA_ORDER_STR              = "box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot";
+String ARCADE_MEDIA_ORDER_STR           = "fanart,marquee,wheel-carbon,wheel-steel,wheel,box3d,box2d,screenshot";
+String ARCADE_SUBSYSTEM_MEDIA_ORDER_STR = "wheel-steel,wheel-carbon,wheel,screenmarquee";
+bool    IMAGE_UPSCALE                   = false;    // [images] image_upscale
+int32_t IMAGE_UPSCALE_MAX_Q16           = 2 << 16;  // [images] image_upscale_max, 16.16
+
+bool KIOSK_MODE                         = false;  // [ui] kiosk_mode
+int  KIOSK_HIDE_DELAY_MS                = 5000;   // [ui] kiosk_hide_delay_ms
+// [ui] standby - dimmed idle screen shown while the MiSTer is off or idle.
+#define DISPLAY_BRIGHTNESS_NORMAL   128     // backlight level outside standby
+bool STANDBY_WHEN_OFFLINE         = true;   // [ui] standby_when_offline
+int  STANDBY_OFFLINE_MIN          = 3;      // [ui] standby_offline_min
+int  STANDBY_IDLE_MIN             = 0;      // [ui] standby_idle_min (0 = never)
+int  STANDBY_BRIGHTNESS           = 10;     // [ui] standby_brightness (0-255)
+int  STANDBY_DIM_PCT              = 100;    // [ui] standby_dim (percent of full colour)
+bool   STANDBY_SCREEN_CLOCK       = true;   // [ui] standby_screen (clock | minimal)
+bool   CLOCK_24H                  = true;   // [ui] clock_24h
+String TIMEZONE_STR               = "";     // [ui] timezone; empty = no clock at all
+String NTP_SERVER_STR             = "pool.ntp.org";  // [ui] ntp_server
+static void standbyStartClock();            // defined with the standby block
+
+// [images] image_mode - what the fullscreen image mode shows for a game.
+enum ImageMode : uint8_t { IMAGE_MODE_ROTATE, IMAGE_MODE_GAME, IMAGE_MODE_SYSTEM };
+ImageMode IMAGE_MODE                    = IMAGE_MODE_ROTATE;
+// [images] screenshot_scaling - how screenshots and title screens fill the
+// image box: fill (default, sharp bilinear) or integer (whole factors only).
+bool SCREENSHOT_FILL = true;
+// RGB PNGs are drawn from a .565 beside them only where reading that file
+// beats decoding the PNG again, as measured on this board: 140 ms against
+// 480 ms for a 640x480 image.
+static const bool PNG_RGB_VIA_565 = true;
+
+String CORE_MEDIA_ORDER_STR             = "wheel-steel,wheel-carbon,wheel,screenmarquee,illustration,photo";
+
+// Macros preserve all existing call sites without any further changes.
+#define SCREENSCRAPER_DEV_USER   (_ss_dev_user_str.c_str())
+#define SCREENSCRAPER_DEV_PASS   (_ss_dev_pass_str.c_str())
+#define SCREENSCRAPER_USER       (_ss_user_str.c_str())
+#define SCREENSCRAPER_PASS       (_ss_pass_str.c_str())
+#define BOXART_REGION            (_boxart_region_str.c_str())
+#define CORE_IMAGES_PATH         (_core_images_path_str.c_str())
+#define DEFAULT_CORE_IMAGE       (_default_core_image_str.c_str())
+
+// Internal ScreenScraper constants — not exposed in config.ini
+#define SCREENSCRAPER_DEBUG_PASS "uoAfIjh2AMd"
+#define SCREENSCRAPER_SOFTWARE   "MiSTer-Monitor"
+#define SAFE_JSON_BUFFER_SIZE    8192
+#define MAX_RESPONSE_SIZE        50000
+
+// Hardware constants — Waveshare ESP32-S3-Touch-LCD-2.8 V2 (native 320x240)
+#define TFCARD_CS_PIN     21     // SD card on HSPI, CS=GPIO21 (SDMMC D3)
+#define TARGET_WIDTH      320    // physical panel width
+#define TARGET_HEIGHT     240    // physical panel height
+#define IMAGE_AREA_HEIGHT 200    // image area above the 40px footer band (Y=200..239)
+// Height requested from ScreenScraper. Kiosk mode lays artwork out against
+// the whole panel, so it asks for panel height instead of image-area height.
+int  ARTWORK_MAX_HEIGHT = IMAGE_AREA_HEIGHT;
+
+#define ORIGINAL_WIDTH    320    // source design width (logical)
+#define ORIGINAL_HEIGHT   240    // source design height (logical)
+#define DISPLAY_WIDTH     320
+#define DISPLAY_HEIGHT    240
+#define SCALE_X           ((float)DISPLAY_WIDTH  / ORIGINAL_WIDTH)   // = 1.0
+#define SCALE_Y           ((float)DISPLAY_HEIGHT / ORIGINAL_HEIGHT)  // = 1.0
+
+// Theme Colors — compile-time constants
+#define THEME_BLACK     0x0000
+#define THEME_YELLOW    0xFFE0
+#define THEME_GREEN     0x07E0
+#define THEME_CYAN      0x07FF
+#define THEME_ORANGE    0xFD20
+#define THEME_RED       0xF800
+#define THEME_BLUE      0x001F
+#define THEME_GRAY      0x4208
+#define THEME_WHITE     0xFFFF
+
+// Runtime-configurable parameters — formerly #defines, now global variables.
+int  CORE_IMAGE_TIMEOUT           = 30000;  // game image slide dwell (ms)
+int  SYSTEM_IMAGE_TIMEOUT         = 30000;  // system image slide dwell (ms); resolved in setup()
+bool ENABLE_ALPHABETICAL_FOLDERS  = true;
+int  SCREENSCRAPER_TIMEOUT        = 30000;
+int  SCREENSCRAPER_RETRIES        = 2;
+bool USE_HTTPS_SCREENSCRAPER      = false;
+bool ENABLE_DEBUG_MODE            = false;
+bool DEBUG_FORCE_UPDATE           = false;
+int  DEBUG_FORCE_LEVEL            = 0;
+bool ENABLE_AUTO_DOWNLOAD         = true;
+int  MAX_IMAGE_SIZE               = 500000;
+int  DOWNLOAD_TIMEOUT             = 30000;
+int  SCROLL_SPEED_MS              = 300;
+int  SCROLL_PAUSE_START_MS        = 2000;
+int  SCROLL_PAUSE_END_MS          = 3000;
+bool FORCE_CORE_REDOWNLOAD        = false;
+bool FORCE_GAME_REDOWNLOAD        = false;
+// ===================================
+
+// Data variables
+String currentCore = "MENU";
+String previousCore = "";
+String currentGame = "";
+String previousGame = "";
+bool coreChanged = false;
+bool gameChanged = false;
+bool showingCoreImage = false;
+unsigned long coreImageStartTime = 0;  // Time when image was shown
+// Raw CORENAME for the core on screen, as the server read it from
+// /tmp/CORENAME ('AO486', 'neogeo', ...). Supplied by /status/snapshot on
+// servers that know the field; empty otherwise. The ScreenScraper mapping
+// keys on this FIRST (names.txt can relabel the friendly name at will, and a
+// label must never cost a core its artwork); display and SD image paths stay
+// on the friendly name, which is what every existing SD cache is foldered by.
+String currentCoreRaw = "";
+unsigned long lastCoreCheck = 0;  // To check core changes while showing image
+String coreDownloadFailedFor = "";  // Core for which ScreenScraper download failed — prevents screensaver retry loop
+
+float cpuUsage = 0.0;
+float memoryUsage = 0.0;
+String uptimeFormatted = "00:00:00";
+float sdUsedGB = 0.0;
+float sdTotalGB = 0.0;
+float sdUsagePercent = 0.0;
+int usbDeviceCount = 0;
+int serialPortCount = 0;
+String networkIP = "0.0.0.0";
+bool networkConnected = false;
+String sessionDuration = "00:00:00";
+int requestsCount = 0;
+
+// Interface variables
+bool connected = false;
+bool wasConnected = false;
+bool sdCardAvailable = false;
+int currentPage = 0;
+const int totalPages = 7;  // 5 system pages + GAME INFO + RETROACHIEVEMENTS
+unsigned long lastUpdate = 0;
+unsigned long lastPageChange = 0;
+unsigned long animTimer = 0;
+int blinkState = 0;
+bool needsRedraw = true;
+
+// ========== RETROACHIEVEMENTS (page 6) ==========
+// Data mirror of the server endpoint, fetch scheduling, and the live-unlock
+// popup state. The struct lives in mister_types.h.
+RAStatus raStatus = {false, false, false, "", "", "",
+                     0, 0, 0, 0, 0, 0, "", 0, "", 0, false, false};
+
+unsigned long lastRAFetch = 0;
+const unsigned long RA_FETCH_INTERVAL_ACTIVE = 30000;  // RA page visible
+const unsigned long RA_FETCH_INTERVAL_IDLE   = 60000;  // any other page/image
+
+int  raLastSeenEventCounter = -1;    // -1 = absorb the first value silently
+unsigned long raPopupUntil  = 0;     // millis() deadline while popup shows
+bool raPopupDrawn = false;
+
+ScrollTextState raUnlockScroll = {"", 0, 0, 0, 0, false, false, false};
+
+// --- Instant-unlock tier: /event micro-poll ---------------------------------
+// The server's odelot-log tailer bumps event_counter <1 s after a real unlock
+// (fork with debug=1 in retroachievements.cfg); this 5 s micro-poll of a
+// ~60-byte payload turns that into a popup without waiting for the 30/60 s
+// full fetch. Without the log the server's OSD trigger still shortens the
+// cloud poll, so the tier is useful in every configuration.
+unsigned long lastRAEventPoll = 0;
+const unsigned long RA_EVENT_POLL_INTERVAL = 5000;
+
+String raLastUnlockDesc = "";   // last_unlock_description (log tailer fills it)
+int    raGameId = 0;            // resolved RA game id — subpage reset key
+int    raBannerShownFor = 0;   // game id the READY banner has already fired for,
+                               // so arming can wait for the fork heartbeat to go
+                               // live in a later fetch without ever repeating
+
+// --- Trophy-list subpages (page 6) -------------------------------------------
+// raSubPage 0 = progress panel; 1..N = paginated list, cycled by tapping the
+// content band (same gesture as the GAME INFO 1/2 toggle). The row buffer
+// holds exactly one server page, fetched on demand from the touch handler.
+const int RA_LIST_PER_PAGE = 4;
+
+// Trophy-row touch calibration — TOUCH space, BOARD SPECIFIC.
+// The CST3530 is capacitive and board_hal.h maps its coordinates 1:1 onto
+// draw space, so these follow straight from the draw geometry:
+// displayRAList() draws the rows at y = 81 + i*30, centres at 85 + i*30.
+// Derived, not yet verified on hardware: to check, use the serial line the
+// page-6 handler prints on every tap — on a FULL (4-row) list page, tap the
+// centre of the top and bottom row, then
+//   RA_ROW_TOUCH_TOP   = <top reading>
+//   RA_ROW_TOUCH_PITCH = (<bottom reading> - <top reading>) / 3
+int RA_ROW_TOUCH_TOP   = 85;   // touch Y at centre of the FIRST row (1:1 draw space)
+int RA_ROW_TOUCH_PITCH = 30;   // touch Y between consecutive row centres
+int  raSubPage   = 0;
+int  raListPage  = 0;                    // which page the buffer holds
+int  raListPages = 0;                    // total pages reported by the server
+int  raListCount = 0;                    // rows currently buffered
+bool raListValid = false;
+String raListTitle[RA_LIST_PER_PAGE];
+String raListDesc[RA_LIST_PER_PAGE];
+int    raListPoints[RA_LIST_PER_PAGE];
+bool   raListUnlocked[RA_LIST_PER_PAGE];
+bool   raListHardcore[RA_LIST_PER_PAGE];
+
+// Description overlay: tapping a list row opens a full detail card for that
+// achievement; tapping again closes it back to the list.
+bool raDetailShown = false;
+
+// Armed by getRAStatus() when a game WITH achievements is newly matched;
+// consumed by loop(), which shows the footer banner once per game.
+// --- Version tracking -------------------------------------------------------
+// serverVersion is filled from /status/snapshot. Empty means either an older
+// server that does not report it, or no successful snapshot yet.
+String serverVersion            = "";
+bool   versionMismatchPending   = false;   // armed on detection, consumed by loop()
+bool   versionMismatchReported  = false;   // one warning per boot, not per poll
+
+bool raBannerPending = false;
+int  raDetailRow   = 0;                  // index into the raList* buffers
+
+// Screensaver variables
+unsigned long lastButtonPress = 0;
+const unsigned long SCREENSAVER_TIMEOUT = 30000;  // 30 seconds of inactivity
+
+// GAME INFO panel timing:
+//  - subpage 1/2 (fields) is shown for 30 s, then flips to the synopsis
+//  - subpage 2/2 (synopsis) lasts exactly as long as its scroll needs, plus a
+//    short tail, and then the panel exits back to the game/core image
+//  - a panel with no synopsis falls back to a plain 1-min timeout
+int  gameInfoSubPage = 0;                 // 0 = fields (1/2), 1 = synopsis (2/2)
+unsigned long gameInfoSubPageChange = 0;  // last subpage change (auto-flip timer)
+bool gameInfoForceExit = false;           // synopsis finished -> leave the panel
+// True while page 5 is being shown as a rotation slide rather than opened by
+// the user. It changes the panel's lifecycle, not its looks: no auto-advance to
+// the synopsis, and the hand-back goes to the core image instead of the generic
+// return-to-image path. Cleared the moment the user touches the panel, which
+// promotes the slide into an ordinary on-demand panel.
+bool gameInfoFromRotation = false;
+const unsigned long GAMEINFO_SCREEN_TIMEOUT  = 60000;   // 1 min fallback
+const unsigned long GAMEINFO_SUBPAGE_TIMEOUT = 30000;   // 30 s on the fields page
+
+// Synopsis vertical scroll (subpage 2/2)
+int  gameInfoSynScroll   = 0;             // index of the top visible line
+unsigned long gameInfoSynScrollTime = 0;  // last scroll step / pause start
+unsigned long gameInfoSynCycledTime = 0;  // when the text finished scrolling
+bool gameInfoSynPaused   = true;          // pausing at top or bottom
+bool gameInfoSynCycled   = false;         // a full scroll cycle has completed
+// Synopsis auto-scroll cadence and mode. Both come from [gameinfo] in
+// config.ini (info_scroll_step_ms / info_scroll_auto) and are applied in
+// loadConfig(). STEP is no longer a compile-time constant so the user can slow
+// the synopsis down; AUTO=false freezes it and the panel then dwells for
+// GAMEINFO_SYN_FIT_MS (the existing "fits without scrolling" path) before
+// returning to the image.
+unsigned long GAMEINFO_SYN_STEP_MS = 2000;  // ms per line (configurable, default 2s)
+bool          gameInfoSynAuto      = true;  // false = hold still, no auto-scroll
+const unsigned long GAMEINFO_SYN_PAUSE_MS = 4000;  // hold at top and bottom
+// Tail spent frozen on the LAST lines before leaving the panel. Added to the
+// 2.5 s bottom hold, that is ~7.5 s of reading time on the final screenful.
+const unsigned long GAMEINFO_SYN_EXIT_MS  = 5000;  // tail after the last line
+const unsigned long GAMEINFO_SYN_FIT_MS   = 15000; // dwell when it needs no scroll
+
+// Variables for automatic download
+bool downloadInProgress = false;
+
+// Scope guard: guarantees downloadInProgress is cleared on EVERY exit path
+// (present and future) of a download function. Eliminates the "flag leak"
+// class of bug where one failed download permanently blocked all later
+// downloads until a power cycle.
+struct DownloadFlagGuard {
+  DownloadFlagGuard()  { downloadInProgress = true; }
+  ~DownloadFlagGuard() { downloadInProgress = false; }
+};
+String lastSearchedGame = "";      // Cache to avoid repeated searches
+
+// JPEG decoder object
+JPEGDEC jpeg;
+
+// --- MiSTer Monitor UDP discovery ---
+static const uint16_t MMON_DISCOVERY_PORT = 51234;
+static const char*    MMON_DISCOVER_REQ   = "MMON_DISCOVER_V1";
+static const char*    MMON_REPLY_PREFIX   = "MMON_SERVER_V1";
+
+// A non-empty ip= in config.ini pins the display to that server: discovery
+// only accepts replies from it and never adopts a different one.
+static bool      misterPinned        = false;
+static bool      misterPinnedHasAddr = false;  // false when ip= holds a hostname
+static IPAddress misterPinnedAddr;
+
+// Call once, after loadConfig() and before the first discovery.
+void pinMisterFromConfig() {
+  misterPinned        = appConfig.misterIP.length() > 0;
+  misterPinnedHasAddr = misterPinned && misterPinnedAddr.fromString(appConfig.misterIP);
+}
+
+// Locate the server by UDP broadcast. On success sets the global misterIP
+// (the same one used to build the http://misterIP:8081 URLs) and returns true.
+// When pinned, returns true only if the pinned server itself replied.
+bool discoverMister(uint8_t attempts = 5, uint16_t replyWaitMs = 600) {
+  // Pinned to a hostname: there is no address to match replies against.
+  if (misterPinned && !misterPinnedHasAddr) return false;
+
+  WiFiUDP udp;
+  udp.begin(0);                          // ephemeral local port
+  IPAddress broadcast(255, 255, 255, 255);
+
+  for (uint8_t i = 0; i < attempts; i++) {
+    udp.beginPacket(broadcast, MMON_DISCOVERY_PORT);
+    udp.write((const uint8_t*)MMON_DISCOVER_REQ, strlen(MMON_DISCOVER_REQ));
+    udp.endPacket();
+    Serial.printf("Discovery: broadcast %d/%d\n", i + 1, attempts);
+
+    uint32_t deadline = millis() + replyWaitMs;
+    while (millis() < deadline) {
+      if (udp.parsePacket() > 0) {
+        char buf[64] = {0};
+        int len = udp.read(buf, sizeof(buf) - 1);
+        if (len > 0 && strncmp(buf, MMON_REPLY_PREFIX, strlen(MMON_REPLY_PREFIX)) == 0) {
+          IPAddress from = udp.remoteIP();
+          if (misterPinned && !(from == misterPinnedAddr)) {
+            Serial.printf("Discovery: ignoring %s (pinned to %s)\n",
+                          from.toString().c_str(), misterIP);
+            continue;                                     // keep draining replies
+          }
+          appConfig.misterIP = from.toString();            // persistent String backing store
+          misterIP = appConfig.misterIP.c_str();           // repoint const char* (same idiom as setup)
+          Serial.printf("Discovery: server at %s\n", misterIP);
+          udp.stop();
+          return true;
+        }
+      }
+      delay(10);
+    }
+  }
+  udp.stop();
+  Serial.println("Discovery: no server found");
+  return false;
+}
+
+#include "WebConfig.h"   // /config editor + /reboot on the device web server
+#include "WebFiles.h"    // /files SD card browser (list, download, upload, delete)
+#define FIRMWARE_BOARD_ID "waveshare28"   // key of this build in firmware/manifest.json
+#include "FirmwareUpdate.h"   // /update page + install a newer release from the MiSTer
+
+// ========== SCREENSHOT SERVER ==========
+WebServer screenshotServer(8080);
+
+void handleScreenshotRoot() {
+  String ip = WiFi.localIP().toString();
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset='UTF-8'>";
+  html += "<meta http-equiv='refresh' content='5'>"; // Auto-refresh every 5s
+  html += "<title>MiSTer Monitor - Screenshot</title>";
+  html += "<style>";
+  html += "body { background:#000; color:#0FF; font-family:monospace; text-align:center; margin:0; padding:20px; }";
+  html += "h1 { color:#FF0; letter-spacing:4px; font-size:1.2em; }";
+  html += "img { max-width:100%; border:2px solid #0FF; display:block; margin:20px auto; }";
+  html += ".btn { display:inline-block; margin:10px; padding:10px 24px; background:#0FF; color:#000; ";
+  html += "       font-weight:bold; text-decoration:none; border-radius:4px; font-family:monospace; }";
+  html += ".info { color:#888; font-size:0.85em; margin-top:10px; }";
+  html += "</style></head><body>";
+  html += "<h1>[ MiSTer Monitor - Live Screen ]</h1>";
+  html += "<img src='/screenshot.bmp' alt='Screenshot'>";
+  html += "<br>";
+  html += "<a class='btn' href='/screenshot.bmp'>📥 Download BMP</a>";
+  html += "<a class='btn' href='/'>🔄 Refresh</a>";
+  html += "<p class='info'>Auto-refresh every 5 seconds &nbsp;|&nbsp; ";
+  html += "Resolution: " + String(display.width()) + "x" + String(display.height()) + " &nbsp;|&nbsp; ";
+  html += "IP: " + ip + ":8080</p>";
+  html += "</body></html>";
+  screenshotServer.send(200, "text/html", html);
+}
+
+void handleScreenshot() {
+  int w = display.width();   // 320
+  int h = display.height();  // 240
+
+  // Standard 24-bit RGB888 BMP — universally supported by all browsers and viewers
+  // Row stride must be padded to 4-byte boundary
+  const uint32_t HEADER_SIZE = 54;           // 14 file header + 40 DIB header
+  const uint32_t ROW_STRIDE  = ((uint32_t)w * 3 + 3) & ~3;  // padded to 4 bytes
+  const uint32_t IMAGE_SIZE  = ROW_STRIDE * h;
+  const uint32_t FILE_SIZE   = HEADER_SIZE + IMAGE_SIZE;
+
+  uint8_t header[54];
+  memset(header, 0, sizeof(header));
+
+  // -- BMP File Header (14 bytes) --
+  header[0] = 'B'; header[1] = 'M';
+  header[2] = FILE_SIZE & 0xFF;
+  header[3] = (FILE_SIZE >> 8)  & 0xFF;
+  header[4] = (FILE_SIZE >> 16) & 0xFF;
+  header[5] = (FILE_SIZE >> 24) & 0xFF;
+  header[10] = HEADER_SIZE;  // pixel data offset
+
+  // -- DIB Header BITMAPINFOHEADER (40 bytes, offset 14) --
+  header[14] = 40;   // DIB header size
+  header[18] = w & 0xFF;       header[19] = (w >> 8) & 0xFF;
+  // Negative height = top-down row order (avoids flipping the image)
+  int32_t negH = -(int32_t)h;
+  header[22] = negH & 0xFF;        header[23] = (negH >> 8)  & 0xFF;
+  header[24] = (negH >> 16) & 0xFF; header[25] = (negH >> 24) & 0xFF;
+  header[26] = 1;    // color planes
+  header[28] = 24;   // bits per pixel (RGB888)
+  header[30] = 0;    // BI_RGB — no compression
+  header[34] = IMAGE_SIZE & 0xFF;
+  header[35] = (IMAGE_SIZE >> 8)  & 0xFF;
+  header[36] = (IMAGE_SIZE >> 16) & 0xFF;
+  header[37] = (IMAGE_SIZE >> 24) & 0xFF;
+
+  screenshotServer.setContentLength(FILE_SIZE);
+  screenshotServer.send(200, "image/bmp", "");
+  screenshotServer.sendContent((const char*)header, HEADER_SIZE);
+
+  // Allocate one row of RGB565 source + one row of RGB888 destination
+  uint16_t* rowSrc = (uint16_t*)malloc(w * 2);
+  uint8_t*  rowDst = (uint8_t*) malloc(ROW_STRIDE);
+
+  if (!rowSrc || !rowDst) {
+    Serial.println("[SCREENSHOT] ERROR: Not enough memory for row buffers");
+    if (rowSrc) free(rowSrc);
+    if (rowDst) free(rowDst);
+    return;
+  }
+
+  memset(rowDst, 0, ROW_STRIDE);  // Zero padding bytes at end of row
+
+  Serial.printf("[SCREENSHOT] Capturing %dx%d RGB888...\n", w, h);
+  unsigned long t0 = millis();
+
+  for (int y = 0; y < h; y++) {
+    // Read one row of RGB565 pixels from display
+    display.readRect(0, y, w, 1, rowSrc);
+
+    // Convert RGB565 → RGB888 in-place into rowDst
+    // BMP stores pixels as B, G, R (reversed byte order)
+    for (int x = 0; x < w; x++) {
+      uint16_t px_raw = rowSrc[x];
+      uint16_t px = (px_raw << 8) | (px_raw >> 8);  // fix endianness
+
+      // Standard RGB565 extraction after byte-swap
+      uint8_t r = ((px >> 11) & 0x1F) << 3;   // bits [15:11] → Red
+      uint8_t g = ((px >> 5)  & 0x3F) << 2;   // bits [10:5]  → Green
+      uint8_t b =  (px        & 0x1F) << 3;   // bits [4:0]   → Blue
+
+      // BMP standard byte order is BGR
+      rowDst[x * 3 + 0] = b;
+      rowDst[x * 3 + 1] = g;
+      rowDst[x * 3 + 2] = r;
+    }
+
+    screenshotServer.sendContent((const char*)rowDst, ROW_STRIDE);
+  }
+
+  free(rowSrc);
+  free(rowDst);
+  Serial.printf("[SCREENSHOT] Done in %lums\n", millis() - t0);
+}
+
+void setupScreenshotServer() {
+  screenshotServer.on("/", handleScreenshotRoot);
+  screenshotServer.on("/screenshot.bmp", handleScreenshot);
+  screenshotServer.begin();
+  Serial.printf("[SCREENSHOT] Server running at http://%s:8080\n", 
+                WiFi.localIP().toString().c_str());
+  Serial.println("[SCREENSHOT] Open in browser: http://<IP>:8080");
+}
+
+// Drop-in replacement for the long blocking delay()s around the download HUD.
+// WebServer is cooperative: it only answers requests while handleClient() is
+// being called. A plain delay() after showDownloadProgress() left port 8080
+// deaf for the whole pause, so an OBS browser source kept showing the frame
+// captured before the download began. Same idiom as the WDT-safe retry waits.
+static void pumpedDelay(unsigned long ms) {
+  unsigned long start = millis();
+  while (millis() - start < ms) {
+    Board.update();                   // Keep touch state fresh
+    screenshotServer.handleClient();  // Keep HTTP server alive
+    delay(50);                        // Yield to FreeRTOS / feed WDT
+  }
+}
+// ========================================
+
+// Global offset for callback-based image centering
+// JPEGDEC doesn't accept large offsets in decode(), so we apply them in the callback
+static int g_jpegOffsetX = 0;
+static int g_jpegOffsetY = 0;
+
+// ---- Fine scaling state, recomputed once per image ----
+// The destination box is a variable, not a constant: an exactly
+// panel-sized asset (menu.jpg) measures against the whole panel and is
+// allowed to bleed into the footer, while everything else measures
+// against the image area and is centred there.
+static int      g_artBoxW    = TARGET_WIDTH;
+static int      g_artBoxH    = IMAGE_AREA_HEIGHT;
+// When set, the callback reduces each block to the exact destination size.
+// Steps are 16.16 fixed point and every row/column is derived from ABSOLUTE
+// coordinates -- never from a per-block ratio, which is what keeps MCU
+// boundaries seamless.
+static bool     g_fineActive = false;
+static uint32_t g_fineXStep  = 1u << 16;
+static uint32_t g_fineYStep  = 1u << 16;
+static int      g_fineDstW   = 0;
+static int      g_fineDstH   = 0;
+// A block is at most one MCU (16x16). Shrinking keeps its destination inside
+// that, but growing multiplies it, so the buffer is sized for the largest
+// upscale the config is allowed to ask for: 16 * 2.875 + 2 fits in 48.
+// One display transaction per block instead of one per row.
+#define FINE_BLOCK_MAX 48
+static uint16_t g_fineBlock[FINE_BLOCK_MAX * FINE_BLOCK_MAX];
+static uint16_t g_fineCol[FINE_BLOCK_MAX];
+// Kept for the oversized-block fallback only.
+static uint16_t g_fineRow[TARGET_WIDTH];
+
+// ========== TOUCH BUTTON STRUCTURE ==========
+ScrollTextState gameFooterScroll  = {"", 8, 0, 0, 0, false, false, false};
+ScrollTextState imageFooterScroll = {"", 25, 0, 0, 0, false, false, false};
+ScrollTextState mainHUDCoreScroll = {"", 14, 0, 0, 0, false, false, false};
+// GAME INFO panel title: size 2 = 12 px/char. The "1/2 >>" indicator now
+// occupies the right end of that row, leaving 216 px -> 18 visible chars.
+ScrollTextState gameInfoTitleScroll = {"", 18, 0, 0, 0, false, false, false};
+
+// GAME INFO grid (subpage 1/2): every value gets its own horizontal scroll, so
+// a long genre / developer / publisher is read in full instead of clipped.
+// The row's y is decided at draw time by the vertical centring, and recorded
+// here so the loop's scroll refresher can repaint that exact row.
+const int GI_VAL_X     = 80;   // value column origin
+const int GI_VAL_CHARS = 25;   // 225 px at 9 px/char (size 1.5)
+ScrollTextState gameInfoRowScroll[6] = {};
+int  gameInfoRowY[6]     = {0};
+bool gameInfoRowShown[6] = {false};
+
+// Function declarations
+void initSDCard();
+bool findCoreImage(String coreName, String &imagePath);
+String getAlphabeticalPath(String coreName);
+bool displayCoreImage(String imagePath);
+void showCoreImageScreen(String coreName);
+void showGameImageScreen(String coreName, String gameName);
+void showGameImageScreenCorrected(String coreName, String gameName);
+int jpegDrawCallback(JPEGDRAW *pDraw);
+void showSDCardError();
+void showImageNotFound(String coreName);
+bool loadFullScreenFrame(const char* framePath);
+bool loadMisterLogo(int x, int y);
+void drawCyberpunkFrame();
+void drawProgressSquares(int completedCount);
+void showBootSequence();
+void drawWiFiProgressCircles(int currentAttempt, bool connected, int maxAttempts);
+void connectWithAnimation();
+void buttonPressFeedback(TouchButton* btn, void (*soundFn)());
+void testMiSTerConnectivity(bool discovered);
+void showReconnectBanner();
+void showRAReadyBanner();
+void showVersionMismatchBanner();
+void showUpdateOfferBanner();
+void drawFirmwareProgress(const char* phase, size_t done, size_t total);
+void runFirmwareUpdate(const char* trigger);
+void updateMiSTerData();
+void getCurrentCore();
+void getCurrentGame();
+bool getStateSnapshot();
+void getSystemData();
+void getStorageData();
+void getUSBData();
+void getNetworkAndSession();
+void updateDisplay();
+void displayMainHUD();
+void displaySystemMonitor();
+void displayStorageArray();
+void displayNetworkTerminal();
+void displayDeviceScanner();
+void drawHeader(String title, String subtitle);
+void drawPageIndicators();
+void drawFooter();
+void drawMiSTerLogo(int x, int y);
+void drawPanel(int x, int y, int w, int h, uint16_t color);
+void drawMiniPanel(int x, int y, int w, int h, String label, String value, uint16_t color);
+void drawVersionPanel(int x, int y, int w, int h, String sLine, String fLine, bool mismatch);
+void drawProgressBar(int x, int y, int w, int h, float percent);
+void drawStorageBar(int x, int y, int w, int h, float percent);
+void drawDigitalClock(int x, int y, String time, String label);
+void drawStatusIndicator(int x, int y, uint16_t color, bool active);
+void drawRadarScan(int centerX, int centerY, int radius, int angle);
+void drawPortArray(int x, int y, int usbCount, int serialCount);
+void drawDataTransmission();
+void drawMisterLogoRightPanel();
+String getPageTitle();
+String getPageSubtitle();
+float extractFloatValue(String json, String key);
+int extractIntValue(String json, String key);
+String extractStringValue(String json, String key);
+
+// Function declarations for ScreenScraper
+bool findGameImageExact(String coreName, String gameName, String &imagePath);
+bool displayCoreImageCentered(String imagePath);
+void showDownloadingScreen(String coreName, String gameName);
+void showDownloadProgress(int progress, String text);
+void showDownloadProgressColored(int progress, String text, uint16_t barColor);
+
+void addGameImageFooter(String gameName);
+void drawCoreImageFooter();
+
+GameInfo extractGameInfoFromJeuInfos(String& response, String originalFilename);
+
+// Utility functions
+bool isValidHash(String hash, String type);
+String urlEncode(String str);
+void handleScreenScraperError(int httpCode, String response);
+
+// ROM details function
+RomDetails getCurrentRomDetails();
+RomDetails getCurrentRomDetailsForced();
+
+bool extractBoolValue(String json, String key);
+
+// ScreenScraper helper functions
+String getScreenScraperSystemId(String coreName);
+String mapCoreToScreenScraperId(String coreName);
+String getExactFileName(String gameName);
+String sanitizeCoreFilename(String name);
+String getSavePath(String exactFileName, String searchCore);
+String gameCacheDir(const String& exactFileName, String searchCore);
+
+// Media and image functions
+bool downloadImageFromScreenScraper(String imageUrl, String savePath);
+bool downloadImageFromMediaJeu(String mediaUrl, String savePath);
+bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload = FORCE_CORE_REDOWNLOAD);
+String getCoreSavePath(String searchCore);
+void showCoreImageScreenWithAutoDownload(String coreName);
+void showCoreDownloadingScreen(String coreName);
+String extractMediaUrl(String response, String mediaKey);
+void showMenuImageWithCoreOverlay(String coreName);
+void forceMemoryCleanup();
+String buildCorrectMediaJeuUrl(String gameId, String systemId, String mediaType, String specificSystemeId = "");
+void initScrollText(ScrollTextState* state, String text, int maxDisplayChars);
+String getScrolledText(ScrollTextState* state);
+
+// --- GAME INFO panel (metadata) ---
+String getMetaPathFromImagePath(const String &imagePath);
+String gameMetaPath(const String& coreName, const String& gameName, bool forWrite);
+bool saveGameMeta(const String &metaPath, const GameMeta &m);
+bool loadGameMeta(const String &metaPath, GameMeta &m);
+String jsonUnescapeAndFold(const String &in);
+String foldForDisplay(const String &in);   // UTF-8 -> ASCII fold for the GLCD font (core/game display)
+bool fetchGameMetadataJSON(String gameId, String coreName, RomDetails romDetails, GameMeta &out);
+int  wrapTextToLines(const String &text, int maxChars, String *out, int maxOut);
+void drawWrappedText(int x, int y, int w, int lineH, int maxLines, const String &text);
+void displayGameInfo();
+void drawGameInfoIcon(bool pressed = false);
+
+// --- RETROACHIEVEMENTS panel (page 6) ---
+void getRAStatus();
+bool raCoreRecordsUnlocks();
+void pollRAEvent();
+void serviceRAPopup();
+void pollRA();
+void getRAList(int listPage);
+void displayRAList();
+void displayRADetail();
+void drawRAPageIndicator(bool pressed);
+int  drawWrappedText(const String& text, int x, int y, int charsPerLine,
+                     int maxLines, uint16_t color, float size, int pitch);
+void displayRetroAchievements();
+void drawRAMessage(const String &title, const String &subtitle, uint16_t color);
+void showAchievementUnlock();
+bool gameInfoAvailable();
+void drawGameInfoSynopsis();
+bool gameInfoRotationReady();
+bool gameInfoSynNeedsScroll();
+void resetGameInfoSynScroll();
+void tickGameInfoSynScroll();
+
+// ========== SCREEN RENDERING OPTIMIZATION ==========
+bool backgroundLoaded = false;  // For frame02.jpg (interface screens)
+bool bootFrameLoaded = false;   // For frame01.jpg (boot/connection screens)
+
+GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails,
+                                       String systemIdOverride = "");
+String ssSystemForRom(const String& coreName, const RomDetails& rd,
+                      String* altOut = nullptr);
+bool isNameSearchSystem(const String& systemId);
+GameInfo searchWithJeuRechercheJSON(String coreName, String cleanName);
+bool tryRomnomLookup(String coreName, String gameName, RomDetails romDetails);
+bool tryNameSearchFallback(String coreName, String gameName, RomDetails romDetails);
+bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName);
+
+String currentGameForCrc = "";         // Current game that needs a CRC
+String currentCoreForCrc = "";         // Core of the current game  
+unsigned long lastCrcRecurrentTime = 0; // Last recurrent CRC attempt
+bool crcRecurrentActive = false;       // Whether the recurrent search is active
+int crcRecurrentAttempts = 0;          // Recurring attempt counter
+
+// ========== GAME METADATA (GAME INFO panel) ==========
+GameMeta currentMeta;                  // metadata for the game on screen
+String   metaFetchAttemptedFor = "";   // one lazy fetch attempt per game
+bool     metaFetchInProgress   = false; // guard: cleared on EVERY return path
+                                        // (same discipline as downloadInProgress)
+bool lastRomHasCrc           = false;  // true when current game's ROM has a valid CRC
+bool lastRomCrcChecked       = false;  // true once something actually asked the server
+                                       // for ROM details; until then lastRomHasCrc is
+                                       // merely "not known yet", not "no CRC"
+bool lastGameImageOK         = false;  // true when a game-specific image is displayed
+bool lastGameFoundNoMedia    = false;  // game IS catalogued in SS, but has zero artwork
+// Evidence from the last downloadImageFromMediaJeu run, to tell a definitive
+// "no artwork exists" (clean NOMEDIA answers) from transient transport hiccups:
+bool g_mediaSawNoMedia       = false;
+bool g_mediaSawValidJpeg     = false;
+// Set while downloading a game's images: screenshots and title screens are
+// then fetched as stored on ScreenScraper (see downloadMediaOriginal()).
+bool g_gameOriginalShots     = false;
+int  g_mediaAttemptCount     = 0;      // attempts in the current media run (drives the HUD)
+                                        // (either cached or freshly downloaded)
+bool lastGameSearchExhausted = false;  // true when ScreenScraper search with valid
+                                        // CRC completed without finding an image
+                                        // (system in DB, but game not).
+bool g_currentGameIsContainer = false; // rom details said container_image: the
+                                        // loaded file is a whole-environment or
+                                        // compilation image (boot.vhd, msdos622.vhd),
+                                        // not a game. Present core-only: footers
+                                        // name the core, and no NOT-IN-SS banner —
+                                        // nothing is "missing" for a non-game.
+bool scanInProgress          = false;  // true while SCAN button operation is running
+                                        // (used to lock further SCAN presses and to
+                                        //  show "SCANNING" label on the button)
+String lastValidCore = "";
+bool serverHasError = false; 
+String serverErrorType = "";
+
+void showCoreNotFoundScreen(String coreName);
+bool isErrorCore(String core);
+bool isBootRomName(const String& gameName);
+bool isArcadeCore(String coreName);
+bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* mediaType, const char* mediaName);
+bool tryMediaTypeWithRegions(String baseUrl, String savePath, const char* mediaBase, const char* mediaLabel, bool includeGeneric = true);
+bool tryMediaTypesForToken(String baseUrl, String savePath, String token);
+bool applyMediaOrderAndDownload(String baseUrl, String savePath, String orderStr);
+bool applyGameMediaOrder(String baseUrl, String savePath, String orderStr, bool arcade);
+bool findGameImage(const String& coreName, const String& gameName, String& imagePath, bool* stale);
+bool displayGameImage(const String& imagePath);
+bool gameLocalPass(const String& base, bool arcade, uint32_t timeoutMs);
+void recordGameImage(const String& base, const String& cat, const String& source,
+                     const String& token, const String& order, const String& etag,
+                     const String& ext);
+String mediaOrderStamp(bool arcade);
+static bool showingGameImage = true;  // true = game image, false = system image
+// The slide clock is coreImageStartTime: every draw site restamps it, so the
+// rotation always measures "time since the slide on screen was drawn". Any
+// entry into image mode that draws the game image sets showingGameImage
+// back to true, so the dwell in force is always the one for that slide.
+static unsigned long currentSlideTimeout() {
+  return (unsigned long) (showingGameImage ? CORE_IMAGE_TIMEOUT : SYSTEM_IMAGE_TIMEOUT);
+}
+String lastArcadeSystemeId = "";  // Store last arcade subsystem ID
+
+// Draw the game slide for the current game. Honours [images] image_mode:
+// with 'system' the system image stands in, so every path that would open
+// image mode on the game image opens on the system image instead, and the
+// static modes never toggle away from it.
+static void showGameSlide() {
+  if (IMAGE_MODE == IMAGE_MODE_SYSTEM) {
+    showingGameImage = false;
+    showCoreImageScreenWithAutoDownload(currentCore);
+  } else {
+    showingGameImage = true;
+    showGameImageScreen(currentCore, currentGame);
+  }
+}
+
+void checkMisterDebugState();
+void checkServerErrorState();
+
+void processCrcRecurrent();
+void startCrcRecurrentForGame(String gameName, String coreName);
+void stopCrcRecurrent();
+void updateArcadeSubsystemForCurrentGame(String coreName, String gameName);
+void updateArcadeSubsystemForCurrentGameEnhanced(String coreName, String gameName, bool forceUpdate);
+
+void playPrevButtonSound();
+void playScanButtonSound();
+void playNextButtonSound();
+
+String lastProcessedGame = "";           // Last game we processed for subsystem
+bool forceSubsystemUpdate = false;       // Flag to force subsystem update
+unsigned long gameChangeTime = 0;        // When the game changed
+
+class ScaledDisplay {
+private:
+  // CYD: native 320x240 panel — no scaling, no offset needed.
+  // The wrapper is kept for API compatibility with the Tab5 codebase.
+  static constexpr float SCALE_FACTOR = 1.0f;
+  static constexpr int   OFFSET_X     = 0;
+  static constexpr int   OFFSET_Y     = 0;
+  
+  // Internal scaling helper functions
+  // These convert logical coordinates to physical coordinates
+  inline int scaleX(int x) { return (int)(x * SCALE_FACTOR) + OFFSET_X; }
+  inline int scaleY(int y) { return (int)(y * SCALE_FACTOR) + OFFSET_Y; }
+  inline int scaleW(int w) { return (int)(w * SCALE_FACTOR); }
+  inline int scaleH(int h) { return (int)(h * SCALE_FACTOR); }
+  
+public:
+  // ========== DRAWING PRIMITIVES WITH AUTO-SCALING ==========
+  
+  void fillRect(int x, int y, int w, int h, uint16_t color) {
+    display.fillRect(scaleX(x), scaleY(y), scaleW(w), scaleH(h), color);
+  }
+  
+  void drawRect(int x, int y, int w, int h, uint16_t color) {
+    display.drawRect(scaleX(x), scaleY(y), scaleW(w), scaleH(h), color);
+  }
+  
+  void fillScreen(uint16_t color) {
+    display.fillScreen(color);
+  }
+  
+  void drawFastHLine(int x, int y, int w, uint16_t color) {
+    display.drawFastHLine(scaleX(x), scaleY(y), scaleW(w), color);
+  }
+  
+  void drawFastVLine(int x, int y, int h, uint16_t color) {
+    display.drawFastVLine(scaleX(x), scaleY(y), scaleH(h), color);
+  }
+  
+  void drawLine(int x0, int y0, int x1, int y1, uint16_t color) {
+    display.drawLine(scaleX(x0), scaleY(y0), scaleX(x1), scaleY(y1), color);
+  }
+  
+  void fillCircle(int x, int y, int r, uint16_t color) {
+    display.fillCircle(scaleX(x), scaleY(y), (int)(r * SCALE_FACTOR), color);
+  }
+  
+  void drawCircle(int x, int y, int r, uint16_t color) {
+    display.drawCircle(scaleX(x), scaleY(y), (int)(r * SCALE_FACTOR), color);
+  }
+  
+  
+  // ========== TEXT OPERATIONS WITH AUTO-SCALING ==========
+  
+  void setCursor(int x, int y) {
+    display.setCursor(scaleX(x), scaleY(y));
+  }
+  
+  void setTextColor(uint16_t color) {
+    display.setTextColor(color);
+  }
+  
+  void setTextColor(uint16_t fg, uint16_t bg) {
+    display.setTextColor(fg, bg);
+  }
+  
+  void setTextSize(float size) {
+    // LovyanGFX accepts a fractional scale, so intermediate sizes such as 1.5
+    // are available (glyph advance = 6 px * size). Signature is float rather
+    // than an added overload: with both, every setTextSize(1) / setTextSize(2)
+    // call in this sketch would become ambiguous.
+    display.setTextSize(size * SCALE_FACTOR);
+  }
+
+  void setTextWrap(bool wrap) {
+    display.setTextWrap(wrap);
+  }
+  
+  void print(const char* text) {
+    display.print(text);
+  }
+  
+  void print(String text) {
+    display.print(text);
+  }
+  
+  void print(char c) {
+    display.print(c);
+  }
+  
+  void print(int num) {
+    display.print(num);
+  }
+  
+  void print(float num, int decimalPlaces = 2) {
+    display.print(num, decimalPlaces);
+  }
+  
+  void println(const char* text) {
+    display.println(text);
+  }
+  
+  void println(String text) {
+    display.println(text);
+  }
+  
+  void println(char c) {
+    display.println(c);
+  }
+  
+  void println(int num) {
+    display.println(num);
+  }
+  
+  void println(float num, int decimalPlaces = 2) {
+    display.println(num, decimalPlaces);
+  }
+  
+  void printf(const char* format, ...) {
+    char buffer[256];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    display.print(buffer);
+  }
+  
+  // ========== IMAGE OPERATIONS (PASS THROUGH WITHOUT SCALING) ==========
+  // JPEG images are already at correct resolution, so we use Board.Display directly
+  
+  void pushImage(int x, int y, int w, int h, uint16_t* data) {
+    // Images are NOT scaled - they're already at target resolution
+    display.pushImage(x, y, w, h, data);
+  }
+};
+
+// Create global instance of scaled display
+// This replaces all Board.Lcd calls in the original code
+ScaledDisplay Lcd;
+
+// ========== TOUCH BUTTON INSTANCES ==========
+// CYD: three horizontal tap zones in the footer band (Y=205..239).
+// No visible button drawing — the footer text acts as the visual hint.
+// Zones match the left/center/right thirds of the 320px-wide panel.
+TouchButton btnPrev = {
+  0,    // x: left zone
+  205,  // y: footer band start
+  106,  // w: ~1/3 screen width
+  35,   // h: footer height
+  "PRV",
+  THEME_GREEN,
+  false
+};
+
+TouchButton btnScan = {
+  107,  // x: center zone
+  205,
+  106,
+  35,
+  "SCN",
+  THEME_GREEN,
+  false
+};
+
+TouchButton btnNext = {
+  213,  // x: right zone
+  205,
+  107,
+  35,
+  "NXT",
+  THEME_GREEN,
+  false
+};
+
+// Wrapper to use default settings (FORCE_CORE_REDOWNLOAD)
+bool downloadCoreImageFromScreenScraperDefault(String coreName) {
+  return downloadCoreImageFromScreenScraper(coreName, FORCE_CORE_REDOWNLOAD);
+}
+
+// Wrapper to explicitly force download 
+bool forceDownloadCoreImage(String coreName) {
+  return downloadCoreImageFromScreenScraper(coreName, true);
+}
+
+// Wrapper to download only if it doesn't exist
+bool downloadCoreImageIfNotExists(String coreName) {
+  return downloadCoreImageFromScreenScraper(coreName, false);
+}
+
+void showDownloadingScreen(String coreName, String gameName) {
+  Lcd.fillScreen(THEME_BLACK);
+
+  // Header: text logo + label
+  drawMiSTerLogo(10, 5);
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(120, 8);
+  Lcd.print("SCREENSCRAPER");
+  Lcd.setCursor(120, 20);
+  Lcd.print("AUTO-DOWNLOAD");
+
+  // Main panel (blue = game artwork download)
+  drawPanel(10, 50, 300, 80, THEME_BLUE);
+
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(20, 60);
+  Lcd.print("DOWNLOADING GAME IMAGE");
+
+  Lcd.setTextColor(THEME_YELLOW);
+  Lcd.setCursor(20, 80);
+  Lcd.printf("CORE: %s", foldForDisplay(coreName).c_str());
+
+  Lcd.setCursor(20, 95);
+  String displayGame = gameName.length() > 25 ? gameName.substring(0, 25) + "..." : gameName;
+  Lcd.printf("GAME: %s", displayGame.c_str());
+
+  Lcd.setCursor(20, 110);
+  Lcd.setTextColor(THEME_GREEN);
+  Lcd.print("Searching ScreenScraper database...");
+
+  // Status indicator (upper-right)
+  drawStatusIndicator(290, 15, THEME_GREEN, true);
+
+  // Footer
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setCursor(10, 220);
+  Lcd.print("Please wait - downloading from ScreenScraper.fr");
+}
+
+// Stoplight gradient: reserved for progress that genuinely converges on
+// success (bytes being fetched). GREEN must mean "about to succeed".
+void showDownloadProgress(int progress, String text) {
+  uint16_t barColor = (progress < 30) ? THEME_YELLOW :
+                      (progress < 70) ? THEME_CYAN   : THEME_GREEN;
+  showDownloadProgressColored(progress, text, barColor);
+}
+
+// Explicit-colour variant. The media-type sweep uses it with a fixed colour:
+// its bar measures how much of the SEARCH SPACE has been swept, not proximity
+// to success — a green bar at 90% while every type answers NOMEDIA is a lie.
+void showDownloadProgressColored(int progress, String text, uint16_t barColor) {
+  // Clear progress strip
+  Lcd.fillRect(10, 140, 300, 60, THEME_BLACK);
+
+  // Bar frame
+  Lcd.drawRect(20, 150, 280, 20, THEME_WHITE);
+  Lcd.fillRect(21, 151, 278, 18, THEME_BLACK);
+
+  // Bar fill
+  if (progress > 0) {
+    int fillWidth = (progress * 276) / 100;
+    Lcd.fillRect(22, 152, fillWidth, 16, barColor);
+  }
+
+  // Percentage centered above the bar
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(140, 155);
+  Lcd.printf("%d%%", progress);
+
+  // Status line under bar
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setCursor(20, 180);
+  Lcd.print(text);
+
+  // Wipe any leftover characters from a longer previous status
+  int textPx = text.length() * 6;
+  if (textPx < 280) {
+    Lcd.fillRect(20 + textPx, 180, 280 - textPx, 10, THEME_BLACK);
+  }
+}
+
+// Visible window (in characters) for the game name in the image footer.
+#define GAME_FOOTER_VISIBLE_CHARS_FULL    58
+
+// Kiosk mode state: whether the image footer is currently painted and when
+// it was last painted. Outside kiosk mode the footer is always up and these
+// are inert.
+static bool          g_imageFooterVisible = true;
+static unsigned long g_imageFooterShownAt = 0;
+
+static bool imageFooterSuppressed() {
+  return KIOSK_MODE && !g_imageFooterVisible;
+}
+
+static void noteImageFooterShown() {
+  g_imageFooterVisible = true;
+  g_imageFooterShownAt = millis();
+}
+
+// Hide the footer. The band belongs to the artwork, so the only way to get
+// those pixels back is to redraw the slide on screen - the same restore the
+// achievement popup performs.
+static void hideImageFooter() {
+  g_imageFooterVisible = false;
+  if (showingGameImage && currentGame.length() > 0) showGameSlide();
+  else                                              showCoreImageScreenWithAutoDownload(currentCore);
+}
+
+// Show the footer. The painters fill the band opaquely, so this covers the
+// artwork without a redraw and answers a tap immediately.
+static void restoreImageFooter() {
+  g_imageFooterVisible = true;
+  if (currentGame.length() > 0) addGameImageFooter(currentGame);
+  else                          drawCoreImageFooter();
+}
+
+// Repaint the band after a status banner covered it: the footer when it is
+// up, otherwise the artwork the banner was drawn over.
+static void repaintImageFooterBand() {
+  if (imageFooterSuppressed())       hideImageFooter();
+  else if (currentGame.length() > 0) addGameImageFooter(currentGame);
+  else                               drawCoreImageFooter();
+}
+
+void addGameImageFooter(String gameName) {
+  if (imageFooterSuppressed()) return;
+  Lcd.fillRect(0, 200, 320, 40, THEME_BLACK);
+  Lcd.drawFastHLine(0, 200, 320, THEME_CYAN);
+
+  Lcd.setTextWrap(false);
+
+  // === Line 1 (Y=210): "GAME: <scrolled name>" =============================
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(10, 210);
+  Lcd.print("GAME:");
+
+  // Re-init scroll state only when the underlying text changes (preserves
+  // the incremental scroll position across redraws).
+  // With the button: 26 chars from x=46 end at x=202, clear of it (x>=213).
+  // Without it (game not in ScreenScraper) the name reclaims the full width.
+  const bool showInfoButton = gameInfoAvailable();
+  const int visibleChars = showInfoButton ? 26 : 38;
+  if (imageFooterScroll.fullText != gameName ||
+      imageFooterScroll.maxChars != visibleChars) {
+    initScrollText(&imageFooterScroll, gameName, visibleChars);
+  }
+  String displayGame = getScrolledText(&imageFooterScroll);
+  while ((int)displayGame.length() < imageFooterScroll.maxChars) {
+    displayGame += ' ';
+  }
+
+  Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);  // bg = flicker-free
+  Lcd.setCursor(46, 210);
+  Lcd.print(displayGame);
+
+  // === Line 2 (Y=225): touch hint =========================================
+  // Shortened to 23 chars (x 40..178) so it never runs under the button.
+  Lcd.setTextColor(THEME_GREEN, THEME_BLACK);
+  Lcd.setCursor(10, 225);
+  Lcd.print("Touch screen for monitor");
+
+  // GAME INFO button in the right third of the footer — only when the game
+  // can actually produce a panel.
+  if (showInfoButton) drawGameInfoIcon();
+
+  noteImageFooterShown();
+}
+
+// -----------------------------------------------------------------------------
+// gameInfoAvailable() — can this game show a GAME INFO panel at all?
+//
+// The button is hidden whenever the answer is a definite no, so it never leads
+// to an empty panel. Four states, most certain first:
+//   1. metadata already in RAM for this game            -> yes
+//   2. a lazy fetch was already attempted and failed    -> no  (not in the DB)
+//   3. a .meta sidecar sits next to the artwork on SD   -> yes (cached earlier)
+//   4. never tried: offer it only if the game is identifiable — a CRC is what
+//      the jeuInfos query is built from, and lastGameSearchExhausted already
+//      means "system is in ScreenScraper, this game is not".
+//
+// The SD probe is memoised per game: the footer redraws on every screen change
+// and this must not turn into a directory scan each time.
+// -----------------------------------------------------------------------------
+bool gameInfoAvailable() {
+  if (currentGame.length() == 0) return false;
+
+  if (currentMeta.loaded && currentMeta.forGame == currentGame) return true;
+  if (metaFetchAttemptedFor == currentGame) return false;
+
+  static String metaProbeFor     = "\x01";   // sentinel: never a real game name
+  static bool   metaProbeSidecar = false;
+  if (metaProbeFor != currentGame) {
+    metaProbeFor = currentGame;
+    metaProbeSidecar = false;
+    if (sdCardAvailable) {
+      metaProbeSidecar = SD.exists(gameMetaPath(currentCore, currentGame, false));
+    }
+  }
+  if (metaProbeSidecar) return true;
+
+  if (lastGameSearchExhausted) return false;   // known absent from ScreenScraper
+
+  // Reaching here means the core IS mapped to a ScreenScraper system and the
+  // search is not exhausted. The only open question is whether the ROM can be
+  // identified by CRC — and lastRomHasCrc only answers it once something has
+  // actually fetched the ROM details. It never does when the artwork was
+  // already cached: the download returns early and the CRC recurrent stops as
+  // soon as an image exists. Offer the panel in that unknown state; its lazy
+  // fetch settles the question and hides the button on the next redraw if the
+  // ROM turns out to have no CRC.
+  if (lastRomCrcChecked) return lastRomHasCrc;
+  return true;
+}
+
+// -----------------------------------------------------------------------------
+// gameInfoRotationReady() — may the rotation show a GAME INFO slide right now?
+//
+// Deliberately stricter than gameInfoAvailable(), and the difference is the
+// whole point. That function ends on an optimistic `return true` for the
+// "never tried" state, which is correct for a button: a human tapped it, the
+// lazy fetch settles the question, and a wrong guess costs one tap to leave.
+// An unattended attract loop has no such escape — an optimistic guess here
+// would park "NO METADATA AVAILABLE" on screen for 30 s every cycle. So this
+// answers yes only when the metadata is already in hand, or provably sits on
+// the SD card next to the artwork.
+//
+// The SD probe is memoised per game: the rotation tick must never turn into a
+// directory scan. Kept separate from gameInfoAvailable()'s own probe on
+// purpose — that one was just fixed and field-validated, and folding the two
+// together would put a working function back in play for no functional gain.
+// -----------------------------------------------------------------------------
+bool gameInfoRotationReady() {
+  if (!appConfig.infoInRotation) return false;
+  if (currentGame.length() == 0)  return false;
+
+  if (currentMeta.loaded && currentMeta.forGame == currentGame) return true;
+
+  static String rotProbeFor = "\x01";   // sentinel: never a real game name
+  static bool   rotProbeHit = false;
+  if (rotProbeFor != currentGame) {
+    rotProbeFor = currentGame;
+    rotProbeHit = false;
+    if (sdCardAvailable) {
+      rotProbeHit = SD.exists(gameMetaPath(currentCore, currentGame, false));
+    }
+  }
+  return rotProbeHit;
+}
+
+// -----------------------------------------------------------------------------
+// drawGameInfoIcon() — "GAME INFO" button in the RIGHT THIRD of the footer band
+// of a fullscreen game/core image. Tapping anywhere in that third opens the
+// GAME INFO panel (see the image-mode touch handler).
+//
+// Filled in THEME_CYAN, the same colour as the "GAME:" label beside it, so the
+// footer reads as one visual family. Black text gives maximum contrast on cyan.
+// Body 216..312 x 205..235; the whole third (x>=213, y>=200) is the hit target,
+// which is why the footer's game name and hint text are kept clear of x=208.
+// -----------------------------------------------------------------------------
+void drawGameInfoIcon(bool pressed) {
+  const int BX = 216, BY = 205, BW = 96, BH = 30;
+
+  // Pressed state flashes the fill white, mirroring buttonPressFeedback()'s
+  // white-label flash on PRV / SCAN / NXT.
+  uint16_t bg = pressed ? THEME_WHITE : THEME_CYAN;
+  Lcd.fillRect(BX, BY, BW, BH, bg);
+
+  // "GAME INFO": 9 chars at size 1 = 54 px wide, 8 px tall — centred in the box
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(THEME_BLACK, bg);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(BX + (BW - 54) / 2, BY + (BH - 8) / 2);
+  Lcd.print("GAME INFO");
+}
+
+void drawCoreImageFooter() {
+  if (imageFooterSuppressed()) return;
+  // Footer band: same layout as addGameImageFooter so both screens look
+  // consistent on CYD. Differs only in content (no game = single hint line).
+  Lcd.fillRect(0, 200, 320, 40, THEME_BLACK);
+  Lcd.drawFastHLine(0, 200, 320, THEME_GREEN);
+
+  bool hasGame = (currentGame.length() > 0) && !g_currentGameIsContainer;
+  Lcd.setTextWrap(false);
+
+  if (hasGame) {
+    // === Line 1 (Y=210): GAME label + scrolling game name ==================
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(10, 210);
+    Lcd.print("GAME:");
+
+    const bool showInfoButton = gameInfoAvailable();
+    const int visibleChars = showInfoButton ? 26 : 38;   // button at x>=213
+    String gameFooterSeed = foldForDisplay(currentGame);   // display-only fold
+    if (imageFooterScroll.fullText != gameFooterSeed ||
+        imageFooterScroll.maxChars != visibleChars) {
+      initScrollText(&imageFooterScroll, gameFooterSeed, visibleChars);
+    }
+    String displayGame = getScrolledText(&imageFooterScroll);
+    while ((int)displayGame.length() < imageFooterScroll.maxChars) {
+      displayGame += ' ';
+    }
+
+    Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+    Lcd.setCursor(46, 210);
+    Lcd.print(displayGame);
+
+    // === Line 2 (Y=225): touch hint =======================================
+    Lcd.setTextColor(THEME_GREEN, THEME_BLACK);
+    Lcd.setCursor(10, 225);
+    Lcd.print("Touch screen for monitor");
+
+    // A game is loaded, so the GAME INFO panel may be reachable from here too:
+    // the 30 s rotation alternates game image <-> core image, and the touch
+    // handler accepts the button hitbox on both. Draw it under exactly the
+    // same condition the handler tests, so it is never an invisible button.
+    if (showInfoButton) drawGameInfoIcon();
+
+  } else {
+    // No active game: single centered hint vertically in the band
+    Lcd.setTextColor(THEME_GREEN, THEME_BLACK);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(40, 217);
+    Lcd.print("Touch screen for MiSTer monitor");
+  }
+
+  noteImageFooterShown();
+}
+
+void drawFooter() {
+  // Footer band Y=205..239 (35px). Two text rows inside it:
+  //   row 1 (Y=214): live data — SYS uptime / GAME-CORE / IMG:OK
+  //   row 2 (Y=228): touch navigation zones — <PRV  SCAN  NXT>
+  Lcd.drawFastHLine(0, 205, 320, THEME_GREEN);
+  Lcd.drawFastHLine(0, 206, 320, THEME_GREEN);
+
+  // Clear both text rows (flicker-free repaint)
+  Lcd.fillRect(0, 209, 320, 30, THEME_BLACK);
+
+  Lcd.setTextWrap(false);
+  Lcd.setTextSize(1);
+
+  // ===== ROW 1 (Y=214): live data =====================================
+
+  // Left: uptime
+  Lcd.setTextColor(THEME_CYAN, THEME_BLACK);
+  Lcd.setCursor(5, 214);
+  Lcd.printf("SYS:%02d:%02d",
+             (int)((millis() / 60000) % 60),
+             (int)((millis() / 1000)  % 60));
+
+  // Middle: GAME or CORE with scroll.
+  // Suppressed on the GAME INFO page (5): the game name is already the panel's
+  // scrolling title, and repeating it in the footer is noise.
+  if (currentPage != 5) {
+    const int FOOTER_MID_X = 78;
+    const int FOOTER_VIS   = 16;   // visible chars: 16 × 6 = 96 px
+
+    bool   hasGame = (currentGame.length() > 0) && !g_currentGameIsContainer;
+    String label  = hasGame ? "G:" : "C:";
+    String source = foldForDisplay(hasGame ? currentGame : currentCore);   // display-only fold
+
+    if (gameFooterScroll.fullText != source ||
+        gameFooterScroll.maxChars != FOOTER_VIS) {
+      initScrollText(&gameFooterScroll, source, FOOTER_VIS);
+    }
+    String displayName = getScrolledText(&gameFooterScroll);
+    while ((int)displayName.length() < FOOTER_VIS) displayName += ' ';
+
+    Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+    Lcd.setCursor(FOOTER_MID_X, 214);
+    Lcd.print(label);
+    Lcd.print(displayName);
+  }
+
+  // Right: SD/image cache indicator
+  if (sdCardAvailable) {
+    Lcd.setTextColor(THEME_GREEN, THEME_BLACK);
+    Lcd.setCursor(283, 214);
+    Lcd.print("IMG:OK");
+  }
+
+  // ===== ROW 2 (Y=228): touch navigation zones ========================
+  // Visual hint for the three TouchButton hitboxes (btnPrev/Scan/Next),
+  // which span the footer band split into left / center / right thirds.
+
+  // Faint vertical separators between the three zones
+  Lcd.drawFastVLine(106, 224, 15, 0x4208);  // dark grey ~RGB(32,32,32)
+  Lcd.drawFastVLine(213, 224, 15, 0x4208);
+
+  Lcd.setTextColor(THEME_GREEN, THEME_BLACK);
+  Lcd.setCursor(28,  228);  Lcd.print("<PRV");   // left zone  (x 0..106)
+  Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+  Lcd.setCursor(138, 228);  Lcd.print("SCAN");   // center zone (x 107..212)
+  Lcd.setTextColor(THEME_GREEN, THEME_BLACK);
+  Lcd.setCursor(245, 228);  Lcd.print("NXT>");   // right zone  (x 213..319)
+}
+
+// Parses a ROM details JSON response into `details`.
+// Handles: response preview, size truncation, memory check, all field extraction, and summary log.
+// `prefix` is "" for a first attempt or "Retry " for a retry — used in log messages.
+// Returns false if memory was insufficient; in that case `response` is freed and
+// `details.error` is set. The caller must call http.end() and return `details`.
+static bool _parseRomDetailsJson(String& response, RomDetails& details, const char* prefix) {
+  Serial.printf("%sROM details response: %d bytes\n", prefix, response.length());
+  Serial.printf("%sResponse preview:\n%s\n", prefix,
+                response.substring(0, min(200, (int)response.length())).c_str());
+
+  if (response.length() > 5000) {
+    Serial.printf("Large ROM response (%d bytes), truncating\n", response.length());
+    response = response.substring(0, 5000);
+  }
+
+  if (ESP.getFreeHeap() < 40000) {
+    Serial.printf("Low memory after ROM response (%d bytes)\n", ESP.getFreeHeap());
+    response = "";
+    details.error = prefix[0] ? "Memory insufficient on retry" : "Memory insufficient";
+    return false;
+  }
+
+  Serial.printf("Extracting ROM details from %sJSON...\n", prefix);
+
+  details.filename       = extractStringValue(response, "filename");
+  Serial.printf("  %sFilename: '%s'\n", prefix, details.filename.c_str());
+
+  details.crc32          = extractStringValue(response, "crc32");
+  Serial.printf("  %sCRC32: '%s' (length: %d)\n", prefix, details.crc32.c_str(), details.crc32.length());
+
+  details.md5            = extractStringValue(response, "md5");
+  Serial.printf("  %sMD5: '%s' (length: %d)\n", prefix, details.md5.c_str(), details.md5.length());
+
+  details.sha1           = extractStringValue(response, "sha1");
+  Serial.printf("  %sSHA1: '%s' (length: %d)\n", prefix, details.sha1.c_str(), details.sha1.length());
+
+  details.filesize       = extractIntValue(response, "size");
+  Serial.printf("  %sFile size: %ld bytes\n", prefix, details.filesize);
+
+  details.available      = extractBoolValue(response, "available");
+  Serial.printf("  %sAvailable: %s\n", prefix, details.available ? "YES" : "NO");
+
+  details.hashCalculated = extractBoolValue(response, "hash_calculated");
+  Serial.printf("  %sHash calculated: %s\n", prefix, details.hashCalculated ? "YES" : "NO");
+
+  details.fileTooLarge   = extractBoolValue(response, "file_too_large");
+  Serial.printf("  %sFile too large: %s\n", prefix, details.fileTooLarge ? "YES" : "NO");
+
+  details.searchName     = extractStringValue(response, "search_name");
+  details.nameSearchHint = extractBoolValue(response, "name_search_hint");
+  details.noHash         = extractBoolValue(response, "no_hash");
+  details.containerImage = extractBoolValue(response, "container_image");
+  details.noRomOnDisk    = extractBoolValue(response, "no_rom_on_disk");
+  Serial.printf("  %sSearch name: '%s' (hint: %s, no_hash: %s, container: %s, no_rom: %s)\n", prefix,
+                details.searchName.c_str(), details.nameSearchHint ? "YES" : "NO",
+                details.noHash ? "YES" : "NO", details.containerImage ? "YES" : "NO",
+                details.noRomOnDisk ? "YES" : "NO");
+
+  details.error          = extractStringValue(response, "error");
+  if (details.error.length() > 0) {
+    Serial.printf("  %sError: '%s'\n", prefix, details.error.c_str());
+  }
+
+  details.path           = extractStringValue(response, "path");
+  Serial.printf("  %sPath: '%s'\n", prefix, details.path.c_str());
+
+  details.ssRomnom       = extractStringValue(response, "ss_romnom");
+  if (details.ssRomnom.length() > 0) {
+    Serial.printf("  %sScreenScraper romnom override: '%s'\n", prefix,
+                  details.ssRomnom.c_str());
+  }
+
+  details.timestamp      = extractIntValue(response, "timestamp");
+
+  response = ""; // Free memory explicitly
+
+  Serial.printf("ROM Details %sSummary:\n", prefix);
+  if (details.available) {
+    Serial.printf("  ROM available: %s (%ld bytes)\n", details.filename.c_str(), details.filesize);
+    if (details.hashCalculated && details.crc32.length() > 0) {
+      Serial.printf("  CRC32 available for precise search: %s\n", details.crc32.c_str());
+    } else {
+      Serial.printf("  No CRC32 - will use name-based search\n");
+    }
+  } else {
+    Serial.printf("  ROM not available or accessible\n");
+  }
+
+  return true;
+}
+
+RomDetails getCurrentRomDetails() {
+  RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0, "", false, false, false};
+
+  Serial.printf("=== GETTING ROM DETAILS ===\n");
+  Serial.printf("Free heap before request: %d bytes\n", ESP.getFreeHeap());
+
+  if (ESP.getFreeHeap() < 50000) {
+    Serial.printf("Low memory for ROM details (%d bytes)\n", ESP.getFreeHeap());
+    details.error = "Low memory";
+    return details;
+  }
+
+  String url = String("http://") + misterIP + ":8081/status/rom/details";
+  Serial.printf("Requesting ROM details from: %s\n", url.c_str());
+
+  // The first request kicks off the server-side hash; large CD images won't be
+  // ready within a single HTTP timeout.
+  // Later attempts harvest the cached CRC once the server has computed it, so we
+  // poll on timeout/empty until the CRC arrives or we hit the attempt ceiling.
+  //
+  // Budget ≈ MAX_ATTEMPTS * (TIMEOUT + RETRY_WAIT). 5 * (12 s + 20 s) ≈ 150 s.
+  const int           ROM_DETAILS_MAX_ATTEMPTS  = 5;
+  const unsigned long ROM_DETAILS_TIMEOUT_MS    = 12000;
+  const unsigned long ROM_DETAILS_RETRY_WAIT_MS = 20000;
+
+  for (int attempt = 1; attempt <= ROM_DETAILS_MAX_ATTEMPTS; attempt++) {
+    if (ESP.getFreeHeap() < 45000) {
+      Serial.printf("Low memory for ROM details (%d bytes), aborting\n", ESP.getFreeHeap());
+      details.error += " + Low memory";
+      break;
+    }
+
+    Serial.printf("ROM details attempt %d/%d...\n", attempt, ROM_DETAILS_MAX_ATTEMPTS);
+
+    HTTPClient http;
+    http.begin(url);
+    http.setTimeout(ROM_DETAILS_TIMEOUT_MS);
+    http.addHeader("User-Agent", "MiSTer-Monitor");
+
+    unsigned long requestStart = millis();
+    int code = http.GET();
+    Serial.printf("HTTP Response: %d (took %lu ms)\n", code, millis() - requestStart);
+
+    if (code == 200) {
+      String response = http.getString();
+      Serial.printf("ROM details response: %d bytes\n", response.length());
+      Serial.printf("Response preview (first 200 chars):\n%s\n",
+                    response.substring(0, min(200, (int)response.length())).c_str());
+
+      if (response.length() > 5000) {
+        Serial.printf("Large ROM response (%d bytes), truncating\n", response.length());
+        response = response.substring(0, 5000);
+      }
+
+      if (!_parseRomDetailsJson(response, details, "")) {
+        http.end();
+        Serial.printf("Free heap after ROM details: %d bytes\n", ESP.getFreeHeap());
+        Serial.printf("=== ROM DETAILS COMPLETE (MEMORY FAIL) ===\n\n");
+        return details;
+      }
+      http.end();
+
+      // Success: server returned a usable CRC.
+      if (details.available && details.crc32.length() > 0) {
+        Serial.printf("ROM details ready on attempt %d (CRC %s)\n",
+                      attempt, details.crc32.c_str());
+        break;
+      }
+
+      // Definitive negative: no ROM, file can't be hashed, or the server has
+      // determined the CRC can NEVER arrive (no_hash: unindexable, mutable
+      // container like .vhd). Stop polling — for no_hash this saves the full
+      // 4x20s retry budget on every 0MHz load, and the name-search fallback
+      // (or the container gate) takes over immediately.
+      if (!details.available || details.fileTooLarge || details.noHash) {
+        Serial.printf("ROM details: definitive negative (available=%s, tooLarge=%s, noHash=%s) - stopping\n",
+                      details.available ? "YES" : "NO",
+                      details.fileTooLarge ? "YES" : "NO",
+                      details.noHash ? "YES" : "NO");
+        break;
+      }
+
+      // 200 but CRC not ready yet — fall through to wait and retry.
+      Serial.printf("ROM details: 200 without CRC yet, will retry\n");
+    } else {
+      http.end();
+      Serial.printf("Attempt %d/%d failed: HTTP %d\n", attempt, ROM_DETAILS_MAX_ATTEMPTS, code);
+      details.error = "HTTP " + String(code);
+    }
+
+    // Wait before the next attempt (skip after the final one).
+    if (attempt < ROM_DETAILS_MAX_ATTEMPTS) {
+      Serial.printf("Waiting %lus before retry (WDT-safe, yielding every 100ms)...\n",
+                    ROM_DETAILS_RETRY_WAIT_MS / 1000);
+      unsigned long _waitStart = millis();
+      while (millis() - _waitStart < ROM_DETAILS_RETRY_WAIT_MS) {
+        Board.update();                   // Keep touch state fresh
+        screenshotServer.handleClient();  // Keep HTTP server alive
+        delay(100);
+      }
+    }
+  }
+
+  Serial.printf("Free heap after ROM details: %d bytes\n", ESP.getFreeHeap());
+  Serial.printf("=== ROM DETAILS COMPLETE ===\n\n");
+  return details;
+}
+
+RomDetails getCurrentRomDetailsForced() {
+  // Calls /status/rom/details?force=1 — the server bypasses timestamp checks
+  // and reads CURRENTPATH/ACTIVEGAME directly to compute CRC.
+  RomDetails details = {"", "", "", "", 0, false, false, false, "", "", 0, "", false, false, false};
+
+  Serial.printf("=== FORCED ROM DETAILS (bypass timestamp) ===\n");
+  Serial.printf("Free heap before request: %d bytes\n", ESP.getFreeHeap());
+
+  if (ESP.getFreeHeap() < 50000) {
+    details.error = "Low memory";
+    return details;
+  }
+
+  String url = String("http://") + misterIP + ":8081/status/rom/details?force=1";
+  Serial.printf("Requesting forced ROM details from: %s\n", url.c_str());
+
+  // Same bounded-retry rationale as getCurrentRomDetails(): ?force=1 triggers a
+  // fresh server-side hash, so large CD images won't be ready within a single
+  // HTTP timeout. Poll until the CRC is cached or we hit the attempt ceiling.
+  // Budget ≈ MAX_ATTEMPTS * (TIMEOUT + RETRY_WAIT). 5 * (12 s + 20 s) ≈ 150 s.
+  const int           ROM_DETAILS_MAX_ATTEMPTS  = 5;
+  const unsigned long ROM_DETAILS_TIMEOUT_MS    = 12000;
+  const unsigned long ROM_DETAILS_RETRY_WAIT_MS = 20000;
+
+  for (int attempt = 1; attempt <= ROM_DETAILS_MAX_ATTEMPTS; attempt++) {
+    if (ESP.getFreeHeap() < 45000) {
+      Serial.printf("Low memory for forced ROM details (%d bytes), aborting\n", ESP.getFreeHeap());
+      details.error += " + Low memory";
+      break;
+    }
+
+    Serial.printf("Forced ROM details attempt %d/%d...\n", attempt, ROM_DETAILS_MAX_ATTEMPTS);
+
+    HTTPClient http;
+    http.begin(url);
+    http.setTimeout(ROM_DETAILS_TIMEOUT_MS);
+    http.addHeader("User-Agent", "MiSTer-Monitor");
+
+    unsigned long requestStart = millis();
+    int code = http.GET();
+    Serial.printf("Forced HTTP Response: %d (took %lu ms)\n", code, millis() - requestStart);
+
+    if (code == 200) {
+      String response = http.getString();
+      Serial.printf("Forced response (%d bytes): %s\n", response.length(),
+                    response.substring(0, min(200, (int)response.length())).c_str());
+
+      // Reuse the shared parser instead of a second inline copy. The duplicate
+      // that lived here silently skipped search_name / name_search_hint /
+      // no_hash / container_image, so the noHash break below could never fire
+      // and SCAN burned the full 5x20s budget on every container.
+      if (!_parseRomDetailsJson(response, details, "Forced ")) {
+        http.end();
+        Serial.printf("Free heap after forced ROM details: %d bytes\n", ESP.getFreeHeap());
+        return details;
+      }
+
+      http.end();
+
+      // Success: server returned a usable CRC.
+      if (details.available && details.crc32.length() > 0) {
+        Serial.printf("Forced ROM details ready on attempt %d (CRC %s)\n",
+                      attempt, details.crc32.c_str());
+        break;
+      }
+
+      // Definitive negative: no ROM, file can't be hashed, or the server has
+      // determined the CRC can NEVER arrive (no_hash). Same rationale as the
+      // non-forced loop.
+      if (!details.available || details.fileTooLarge || details.noHash) {
+        Serial.printf("Forced ROM details: definitive negative (available=%s, tooLarge=%s, noHash=%s) - stopping\n",
+                      details.available ? "YES" : "NO",
+                      details.fileTooLarge ? "YES" : "NO",
+                      details.noHash ? "YES" : "NO");
+        break;
+      }
+
+      // 200 but CRC not ready yet — fall through to wait and retry.
+      Serial.printf("Forced ROM details: 200 without CRC yet, will retry\n");
+    } else {
+      http.end();
+      Serial.printf("Forced attempt %d/%d failed: HTTP %d\n", attempt, ROM_DETAILS_MAX_ATTEMPTS, code);
+      details.error = "Forced HTTP " + String(code);
+    }
+
+    // Wait before the next attempt (skip after the final one).
+    if (attempt < ROM_DETAILS_MAX_ATTEMPTS) {
+      Serial.printf("Waiting %lus before retry (WDT-safe, yielding every 100ms)...\n",
+                    ROM_DETAILS_RETRY_WAIT_MS / 1000);
+      unsigned long _waitStart = millis();
+      while (millis() - _waitStart < ROM_DETAILS_RETRY_WAIT_MS) {
+        Board.update();                   // Keep touch state fresh
+        screenshotServer.handleClient();  // Keep HTTP server alive
+        delay(100);                       // Yield to FreeRTOS / feed WDT
+      }
+    }
+  }
+
+  Serial.printf("Free heap after forced ROM details: %d bytes\n", ESP.getFreeHeap());
+  Serial.printf("=== FORCED ROM DETAILS COMPLETE ===\n\n");
+  return details;
+}
+
+
+String extractMediaUrl(String response, String mediaKey) {
+  String searchKey = "\"" + mediaKey + "\":\"";
+  int startPos = response.indexOf(searchKey);
+  
+  if (startPos == -1) {
+    return ""; // Not found
+  }
+  
+  startPos += searchKey.length();
+  int endPos = response.indexOf("\"", startPos);
+  
+  if (endPos == -1) {
+    return ""; // Invalid format
+  }
+  
+  String url = response.substring(startPos, endPos);
+  
+  // Clean up escape sequences if any
+  url.replace("\\", "");
+  
+  return url;
+}
+
+
+String urlEncode(String str) {
+  String encoded = "";
+  
+  for (int i = 0; i < str.length(); i++) {
+    char c = str.charAt(i);
+    
+    if (isAlphaNumeric(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      encoded += c;
+    } else if (c == ' ') {
+      encoded += "%20";
+    } else {
+      // Percent-encode as an unsigned byte. Casting avoids sign extension on
+      // bytes above 0x7F, which would otherwise emit a broken escape sequence.
+      char hexBuf[4];
+      snprintf(hexBuf, sizeof(hexBuf), "%%%02X", (uint8_t)c);
+      encoded += hexBuf;
+    }
+  }
+  
+  return encoded;
+}
+
+void handleScreenScraperError(int httpCode, String response) {
+  Serial.printf("ScreenScraper Error Analysis (HTTP %d):\n", httpCode);
+  
+  switch (httpCode) {
+    case 400:
+      Serial.println("   Bad Request - Check URL parameters");
+      if (response.indexOf("champs obligatoires") != -1) {
+        Serial.println("   Missing required fields in URL");
+      }
+      break;
+    case 401:
+      Serial.println("   API closed for non-members (server overloaded)");
+      Serial.println("   Try again later when server load decreases");
+      break;
+    case 403:
+      Serial.println("   Login error - Check developer credentials");
+      Serial.println("   Verify devid and devpassword are correct");
+      break;
+    case 404:
+      Serial.println("   Game/ROM not found in database");
+      Serial.println("   CRC might not be catalogued or system incorrect");
+      break;
+    case 423:
+      Serial.println("   API completely closed (server problems)");
+      Serial.println("   Wait for ScreenScraper maintenance to complete");
+      break;
+    case 426:
+      Serial.println("   Software blacklisted (version obsolete)");
+      Serial.println("   Update software or change softname parameter");
+      break;
+    case 429:
+      if (response.indexOf("threads") != -1) {
+        Serial.println("   Thread limit reached - reduce request speed");
+      } else if (response.indexOf("minute") != -1) {
+        Serial.println("   Rate limit per minute reached");
+      } else {
+        Serial.println("   Rate limit reached");
+      }
+      Serial.println("   Wait before making more requests");
+      break;
+    case 430:
+      Serial.println("   Daily quota exceeded - try tomorrow");
+      Serial.println("   ScreenScraper limits requests per day per user");
+      break;
+    case 431:
+      Serial.println("   Too many unrecognized ROMs today");
+      Serial.println("   Try with ROMs that are more likely to be catalogued");
+      break;
+    case -1:
+      Serial.println("   Connection failed - server unreachable");
+      Serial.println("   Check internet connection and DNS resolution");
+      break;
+    case -11:
+      Serial.println("   Timeout - ScreenScraper is overloaded");
+      Serial.println("   This is normal during peak hours");
+      break;
+    case -3:
+    // Use a unique name that includes the subsystem ID
+      break;
+    default:
+      Serial.printf("   Unknown error: %d\n", httpCode);
+  }
+  
+  // Show error response preview if one exists
+  if (response.length() > 0 && response.length() < 500) {
+    Serial.println("Error response preview:");
+    Serial.println(response.substring(0, min(200, (int)response.length())));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Credential-safe logging helpers.
+//
+// ScreenScraper URLs carry credentials as plain-text query parameters, so any
+// log line that prints a full URL must be routed through
+// redactScreenScraperUrl() first. The shared developer password is ALWAYS
+// masked, even in debug mode, because it ships embedded in every public
+// binary. The user's own password is masked by default and only revealed when
+// the user enables debug=true in config.ini.
+// ---------------------------------------------------------------------------
+void maskUrlParameter(String &url, const char *param) {
+  int keyPos = url.indexOf(param);
+  if (keyPos < 0) return;
+  int valueStart = keyPos + strlen(param);
+  int valueEnd = url.indexOf('&', valueStart);
+  if (valueEnd < 0) valueEnd = url.length();
+  url = url.substring(0, valueStart) + "***" + url.substring(valueEnd);
+}
+
+String redactScreenScraperUrl(const String &url) {
+  String out = url;
+  maskUrlParameter(out, "devpassword=");
+  if (!ENABLE_DEBUG_MODE) {
+    maskUrlParameter(out, "sspassword=");
+  }
+  return out;
+}
+
+// Logs structural properties of a credential (length, boundary characters,
+// whitespace, URL-breaking characters) without revealing its value. This is
+// enough to diagnose the common config.ini mistakes: an empty value, trailing
+// spaces, an inline comment swallowed into the value, or characters that
+// break the query string.
+void logCredentialShape(const char *label, const String &value) {
+  if (value.length() == 0) {
+    Serial.printf("[SS] %s: EMPTY\n", label);
+    return;
+  }
+  bool hasWhitespace = false;
+  bool hasUrlUnsafe = false;
+  for (unsigned int i = 0; i < value.length(); i++) {
+    char c = value.charAt(i);
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\n') hasWhitespace = true;
+    if (c == '&' || c == '+' || c == '#' || c == '%' || c == '=' ||
+        c == '?' || c == '/' || c == ';') hasUrlUnsafe = true;
+  }
+  Serial.printf("[SS] %s: len=%u first='%c' last='%c' whitespace=%s url-unsafe=%s\n",
+                label, value.length(),
+                value.charAt(0), value.charAt(value.length() - 1),
+                hasWhitespace ? "YES" : "NO", hasUrlUnsafe ? "YES" : "NO");
+}
+
+// Maps a ScreenScraper HTTP status code to a short on-screen message.
+// Semantics match handleScreenScraperError(). The numeric code is included
+// so a user can report it verbatim in a support request.
+String ssHudMessage(int httpCode) {
+  const char *label;
+  switch (httpCode) {
+    case 400: label = "SS BAD REQUEST";     break;
+    case 401: label = "SS SERVER BUSY";     break;
+    case 403: label = "SS LOGIN FAILED";    break;
+    case 404: label = "NOT IN SS DATABASE"; break;
+    case 423: label = "SS API CLOSED";      break;
+    case 426: label = "SS UPDATE REQUIRED"; break;
+    case 429: label = "SS RATE LIMIT";      break;
+    case 430: label = "SS DAILY QUOTA";     break;
+    case 431: label = "SS ROM QUOTA";       break;
+    case -1:  label = "SS UNREACHABLE";     break;
+    case -11: label = "SS TIMEOUT";         break;
+    default:  label = (httpCode <= 0) ? "SS CONNECTION ERROR" : "SS ERROR"; break;
+  }
+  return String(label) + " (" + String(httpCode) + ")";
+}
+
+// One-shot full-screen notice. Two constraints shape it:
+//  - Screens redraw on every rotation tick, so a blocking notice must fire
+//    only once per key — otherwise an unsupported core would nag forever.
+//  - It must paint its OWN background: it can fire from states where no
+//    downloading screen was ever drawn (an MGL launch delivers core+game in
+//    one step), and a bare HUD strip would stamp over the previous screen.
+void ssNotifyOnce(const String& key, const char* message, const String& detail) {
+  static String lastNotifiedKey = "\x01";   // sentinel: never a real key
+  if (lastNotifiedKey == key) return;
+  lastNotifiedKey = key;
+
+  Lcd.fillScreen(THEME_BLACK);
+
+  // Header: same idiom as showDownloadingScreen
+  drawMiSTerLogo(10, 5);
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(120, 8);
+  Lcd.print("SCREENSCRAPER");
+  Lcd.setCursor(120, 20);
+  Lcd.print("ARTWORK STATUS");
+
+  drawPanel(10, 50, 300, 80, THEME_BLUE);
+
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(20, 60);
+  Lcd.print(message);
+
+  if (detail.length() > 0) {
+    String d = detail.length() > 40 ? detail.substring(0, 40) + "..." : detail;
+    Lcd.setTextColor(THEME_YELLOW);
+    Lcd.setCursor(20, 85);
+    Lcd.print(d);
+  }
+
+  Lcd.setTextColor(THEME_GREEN);
+  Lcd.setCursor(20, 110);
+  Lcd.print("Showing default image instead...");
+
+  delay(3000);
+}
+
+// The core itself has no ScreenScraper system id: no artwork is possible for
+// it OR for any of its games. Distinct from "game not in the database".
+void ssNotifyUnsupportedCore(const String& coreName) {
+  ssNotifyOnce("core:" + coreName, "CORE NOT IN SS DATABASE", coreName);
+}
+
+String getCoreSavePath(String searchCore) {
+  String savePath;
+  
+  Serial.printf("Building CORE save path for: '%s'\n", searchCore.c_str());
+  Serial.printf("lastArcadeSystemeId: '%s' (length: %d)\n", lastArcadeSystemeId.c_str(), lastArcadeSystemeId.length());
+  
+  String finalCoreName = searchCore;
+  String searchCoreLower = searchCore;
+  searchCoreLower.toLowerCase();
+  if (searchCoreLower == "arcade" && lastArcadeSystemeId.length() > 0) {
+    // Use a unique name that includes the subsystem ID
+    finalCoreName = "Arcade_" + lastArcadeSystemeId;
+    Serial.printf("Using subsystem-specific core name: %s\n", finalCoreName.c_str());
+  }
+  
+  // Sanitize before any path concatenation — friendly names may contain '/'
+  String safeFinalName = sanitizeCoreFilename(finalCoreName);
+
+  if (ENABLE_ALPHABETICAL_FOLDERS) {
+    String alphabetPath = getAlphabeticalPath(safeFinalName);
+    
+    Serial.printf("Alphabetical core path: %s\n", alphabetPath.c_str());
+    
+    // Create alphabetical directory if it does not exist
+    if (!SD.exists(alphabetPath)) {
+      if (SD.mkdir(alphabetPath)) {
+        Serial.printf("Created alphabet dir for core: %s\n", alphabetPath.c_str());
+      } else {
+        Serial.printf("Failed to create alphabet dir: %s\n", alphabetPath.c_str());
+      }
+    }
+    
+    // The core image goes directly in the alphabetical folder
+    savePath = alphabetPath + "/" + safeFinalName + ".jpg";
+  } else {
+    savePath = String(CORE_IMAGES_PATH) + "/" + safeFinalName + ".jpg";
+  }
+  
+  Serial.printf("Final CORE save path: %s\n", savePath.c_str());
+  return savePath;
+}
+
+bool downloadCoreImageFromScreenScraper(String coreName, bool forceDownload) {
+  if (downloadInProgress) {
+    Serial.println("Download already in progress");
+    return false;
+  }
+  
+  DownloadFlagGuard dlGuard;
+  g_lastSSHttpCode = 0;
+  g_mediaAttemptCount = 0;
+  bool success = false;
+  
+  Serial.printf("\n=== ENHANCED CORE IMAGE DOWNLOAD ===\n");
+  Serial.printf("Core: '%s'\n", coreName.c_str());
+  Serial.printf("Force Download: %s\n", forceDownload ? "YES" : "NO");
+  Serial.printf("lastArcadeSystemeId: '%s' (length: %d)\n", lastArcadeSystemeId.c_str(), lastArcadeSystemeId.length());
+  Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
+  
+  // Skip download for menu/main
+  String coreNameLower = coreName;
+  coreNameLower.toLowerCase();
+  if (coreNameLower == "menu" || coreNameLower == "main") {
+    Serial.println("Skipping download for MENU core");
+    return false;
+  }
+  
+  String systemId = getScreenScraperSystemId(coreName);
+  
+  bool usingArcadeSubsystem = false;   // selects which config.ini order applies
+
+  // Arcade subsystem management
+  if (systemId == "75" && lastArcadeSystemeId.length() > 0) {
+    usingArcadeSubsystem = true;
+    String oldSystemId = systemId;
+    systemId = lastArcadeSystemeId;
+    Serial.printf("Using arcade subsystem ID %s instead of generic Arcade ID %s\n", 
+                 systemId.c_str(), oldSystemId.c_str());
+    
+    // Check if the specific image for the subsystem already exists
+    String specificImagePath = getCoreSavePath(coreName); // Now it returns a route with a subsystem.
+    if (!SD.exists(specificImagePath)) {
+      forceDownload = true;
+      Serial.printf("Subsystem-specific image not found at %s, forcing download\n", 
+                   specificImagePath.c_str());
+    } else {
+      Serial.printf("Subsystem-specific image already exists: %s\n", 
+                   specificImagePath.c_str());
+      
+      // If a forced download is not performed and the specific image already exists, use the existing one.
+      if (!forceDownload) {
+        return true;
+      }
+    }
+  }
+  
+  // Force download for arcade subsystems to ensure we get the specific image
+  if (systemId != "75" && lastArcadeSystemeId.length() > 0) {
+    Serial.printf("Forcing download for arcade subsystem %s\n", systemId.c_str());
+    forceDownload = true;
+  }
+  
+  if (systemId.length() == 0) {
+    Serial.printf("System '%s' not supported by ScreenScraper\n", coreName.c_str());
+    ssNotifyUnsupportedCore(coreName);
+    return false;
+  }
+  
+  Serial.printf("Mapped to ScreenScraper system ID: %s\n", systemId.c_str());
+  
+  // Build CLEAN mediaSysteme.php URL (NO duplicate resize parameters)
+  String baseUrl = "https://api.screenscraper.fr/api2/mediaSysteme.php";
+  baseUrl += "?devid=" + String(SCREENSCRAPER_DEV_USER);
+  baseUrl += "&devpassword=" + String(SCREENSCRAPER_DEV_PASS);
+  baseUrl += "&softname=" + String(SCREENSCRAPER_SOFTWARE);
+  baseUrl += "&ssid=" + urlEncode(String(SCREENSCRAPER_USER));
+  baseUrl += "&sspassword=" + urlEncode(String(SCREENSCRAPER_PASS));
+  baseUrl += "&systemeid=" + systemId;
+  
+  // Empty hash parameters (required by API)
+  baseUrl += "&crc=";
+  baseUrl += "&md5=";
+  baseUrl += "&sha1=";
+  
+  Serial.printf("Base URL: %s\n", redactScreenScraperUrl(baseUrl).c_str());
+  
+  // Determine save path for core image
+  String searchCore = coreName;
+  searchCore.toLowerCase();
+  String savePath = getCoreSavePath(searchCore);
+  
+  Serial.printf("Save path: %s\n", savePath.c_str());
+  
+  // CHECK IF AN IMAGE ALREADY EXISTS AND IF A DOWNLOAD SHOULD BE FORCED
+  bool imageExists = SD.exists(savePath);
+  if (imageExists) {
+    Serial.printf("Existing image found: %s\n", savePath.c_str());
+    if (!forceDownload) {
+      Serial.println("Image exists and force download disabled - skipping download");
+      return true; // Consider it a success if it already exists
+    } else {
+      Serial.println("FORCE DOWNLOAD enabled - will redownload with new priority");
+      // Optionally, rename the existing file as a backup
+      String backupPath = savePath + ".backup";
+      if (SD.exists(backupPath)) {
+        SD.remove(backupPath);
+      }
+      SD.rename(savePath, backupPath);
+      Serial.printf("Existing image backed up to: %s\n", backupPath.c_str());
+    }
+  }
+  
+  // Same dispatcher the game paths use, so [images] core_media_order and
+  // arcade_subsystem_media_order finally decide what is tried and the
+  // preferred region applies to system artwork too.
+  String& coreOrder = usingArcadeSubsystem ? ARCADE_SUBSYSTEM_MEDIA_ORDER_STR
+                                           : CORE_MEDIA_ORDER_STR;
+  success = applyMediaOrderAndDownload(baseUrl, savePath, coreOrder);
+  
+  if (success) {
+    Serial.printf("CORE IMAGE DOWNLOAD SUCCESS!\n");
+    Serial.printf("   Core: %s\n", coreName.c_str());
+    Serial.printf("   System ID: %s\n", systemId.c_str());
+    Serial.printf("   File: %s\n", savePath.c_str());
+    Serial.printf("   Force Download: %s\n", forceDownload ? "Enabled" : "Disabled");
+    
+    // ADDITIONAL DEBUG FOR ARCADE SUBSYSTEMS
+    if (systemId != "75" && lastArcadeSystemeId.length() > 0) {
+      Serial.printf("ARCADE SUBSYSTEM SUCCESS!\n");
+      Serial.printf("   Subsystem ID: %s\n", systemId.c_str());
+      Serial.printf("   Specific image saved as: %s\n", savePath.c_str());
+    }
+  } else {
+    Serial.println("Core image download failed for all media types");
+    Serial.printf("Last ScreenScraper HTTP status: %d (%s)\n",
+                  g_lastSSHttpCode, ssHudMessage(g_lastSSHttpCode).c_str());
+    Serial.printf("   Core: %s\n", coreName.c_str());
+    Serial.printf("   System ID: %s\n", systemId.c_str());
+    Serial.println("   Possible reasons:");
+    Serial.println("   - System not in ScreenScraper database");
+    Serial.println("   - No media available for this system");
+    Serial.println("   - Network connectivity issues");
+    Serial.println("   - ScreenScraper server overloaded");
+    
+    // ADDITIONAL DEBUG FOR ARCADE SUBSYSTEM PROBLEMS
+    if (systemId != "75" && lastArcadeSystemeId.length() > 0) {
+      Serial.printf("ARCADE SUBSYSTEM FAILED!\n");
+      Serial.printf("   Attempted subsystem ID: %s\n", systemId.c_str());
+      Serial.printf("   Fallback: Try generic Arcade image if available\n");
+    }
+  }
+  
+  Serial.printf("Free heap after download: %d bytes\n", ESP.getFreeHeap());
+  Serial.println("=== CORE IMAGE DOWNLOAD COMPLETE ===\n");
+  
+  return success;
+}
+
+// Core image download screen
+void showCoreDownloadingScreen(String coreName) {
+  Lcd.fillScreen(THEME_BLACK);
+
+  // Header: text logo + label
+  drawMiSTerLogo(10, 5);
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(120, 8);
+  Lcd.print("SCREENSCRAPER");
+  Lcd.setCursor(120, 20);
+  Lcd.print("SYSTEM DOWNLOAD");
+
+  // Main panel (orange = system/core artwork download)
+  drawPanel(10, 50, 300, 80, THEME_ORANGE);
+
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(20, 60);
+  Lcd.print("DOWNLOADING SYSTEM IMAGE");
+
+  Lcd.setTextColor(THEME_YELLOW);
+  Lcd.setCursor(20, 80);
+  Lcd.printf("SYSTEM: %s", foldForDisplay(coreName).c_str());
+
+  Lcd.setCursor(20, 95);
+  Lcd.setTextColor(THEME_GREEN);
+  Lcd.print("Searching ScreenScraper database...");
+
+  Lcd.setCursor(20, 110);
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.print("Media: wheel > photo > illustration");
+
+  // Status indicator (upper-right, orange to match panel)
+  drawStatusIndicator(290, 15, THEME_ORANGE, true);
+
+  // Footer
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setCursor(10, 220);
+  Lcd.print("Downloading system artwork from ScreenScraper.fr");
+}
+
+void showCoreImageScreenWithAutoDownload(String coreName) {
+  String imagePath = "";
+  
+  Serial.printf(" === ENHANCED CORE IMAGE DISPLAY ===\n");
+  Serial.printf("Core: '%s'\n", coreName.c_str());
+  Serial.printf("lastArcadeSystemeId: '%s' (length: %d)\n", 
+                lastArcadeSystemeId.c_str(), lastArcadeSystemeId.length());
+  
+  if (!sdCardAvailable) {
+    Serial.println("SD not available, showing SD error");
+    showSDCardError();
+    return;
+  }
+  
+  if (coreName.length() == 0 || coreName == "NO SERVER" || coreName == "TIMEOUT" || coreName.startsWith("ERROR") || coreName.equalsIgnoreCase("MENU")) {
+  Serial.printf("Special state detected: '%s' - showing menu with overlay\n", coreName.c_str());
+  showMenuImageWithCoreOverlay(coreName);
+  return;
+}
+  
+  // CRITICAL FIX: For Arcade cores, ALWAYS ensure we have subsystem info
+  String coreNameLower = coreName;
+  coreNameLower.toLowerCase();
+  bool isMameCore = (coreNameLower == "arcade");
+  bool needsSubsystemSearch = false;
+  
+  if (isMameCore && currentGame.length() > 0) {
+    Serial.printf("Arcade core detected with active game: '%s'\n", currentGame.c_str());
+    
+    // Check if we need to search for subsystem info
+    if (lastArcadeSystemeId.length() == 0) {
+      Serial.println("No subsystem ID available - need to search");
+      needsSubsystemSearch = true;
+    } else {
+      Serial.printf("Subsystem ID available: %s\n", lastArcadeSystemeId.c_str());
+      // Check if subsystem-specific image exists
+      String subsystemCoreName = "Arcade_" + lastArcadeSystemeId;
+      // Defensive sanitization — keep filename rules consistent everywhere
+      String safeSubsystemName = sanitizeCoreFilename(subsystemCoreName);
+      String subsystemPath;
+      
+      if (ENABLE_ALPHABETICAL_FOLDERS) {
+        String alphabetPath = getAlphabeticalPath(safeSubsystemName);
+        subsystemPath = alphabetPath + "/" + safeSubsystemName + ".jpg";
+      } else {
+        subsystemPath = String(CORE_IMAGES_PATH) + "/" + safeSubsystemName + ".jpg";
+      }
+      
+      if (!SD.exists(subsystemPath)) {
+        Serial.printf("Subsystem image doesn't exist: %s\n", subsystemPath.c_str());
+        Serial.println("Need to download subsystem image");
+        needsSubsystemSearch = true; // Force search to ensure we have correct subsystem
+      }
+    }
+  }
+  
+  // STEP 1: If Arcade needs subsystem search, do it FIRST
+  if (needsSubsystemSearch) {
+    Serial.println("=== PERFORMING MANDATORY SUBSYSTEM SEARCH ===");
+    
+    // Call the existing function to update subsystem info
+    updateArcadeSubsystemForCurrentGame(coreName, currentGame);
+    
+    // Small delay to ensure processing completes
+    delay(100);
+    
+    Serial.printf("After subsystem search - lastArcadeSystemeId: '%s'\n", 
+                  lastArcadeSystemeId.c_str());
+  }
+  
+  // STEP 2: Now try to find the appropriate image
+  Serial.printf("Trying to find image for: '%s'\n", coreName.c_str());
+  
+  bool imageExists = findCoreImage(coreName, imagePath);
+  bool shouldDownload = false;
+  
+  // Decide if download is needed
+  if (FORCE_CORE_REDOWNLOAD) {
+    Serial.println("FORCE_CORE_REDOWNLOAD enabled - will download regardless of existing image");
+    shouldDownload = true;
+  } else if (!imageExists) {
+    Serial.println("No core image found - will attempt download");
+    shouldDownload = true;
+  } else {
+    Serial.println("Image exists - checking if it's the correct one...");
+    
+    // For Arcade, verify we have the right image
+    if (isMameCore && lastArcadeSystemeId.length() > 0) {
+      String expectedSubsystemName = "Arcade_" + lastArcadeSystemeId;
+      
+      // Check if current found image is actually the subsystem-specific image
+      if (imagePath.indexOf(expectedSubsystemName) >= 0) {
+        Serial.printf("Found correct subsystem image: %s\n", imagePath.c_str());
+        shouldDownload = false;
+      } else {
+        Serial.printf("Found generic Arcade image, but need subsystem image: %s\n", expectedSubsystemName.c_str());
+        Serial.println("Will download subsystem-specific image");
+        shouldDownload = true;
+      }
+    } else {
+      shouldDownload = false;
+    }
+  }
+  
+  // STEP 3: Download if necessary
+  if (shouldDownload && ENABLE_AUTO_DOWNLOAD && WiFi.status() == WL_CONNECTED && !downloadInProgress) {
+    Serial.println("Attempting core image download from ScreenScraper...");
+    
+    // Show downloading screen for core
+    showCoreDownloadingScreen(coreName);
+    
+    if (downloadCoreImageFromScreenScraperDefault(coreName)) {
+      Serial.println("Core image download successful!");
+      
+      // Re-check for image after successful download  
+      if (findCoreImage(coreName, imagePath)) {
+        Serial.printf("Image verified after download: %s\n", imagePath.c_str());
+      } else {
+        Serial.println("Download succeeded but image not found - using fallback");
+      }
+    } else {
+      Serial.println("Core image download failed");
+      
+      // Try to find any existing image as fallback
+      if (!findCoreImage(coreName, imagePath)) {
+        Serial.println("No fallback image available - showing Menu Image With Core Overlay");
+        coreDownloadFailedFor = coreName;  // Prevent screensaver from retrying this core
+        showMenuImageWithCoreOverlay(coreName);
+        return;
+      }
+    }
+  }
+  
+  // STEP 4: Display the final image
+  if (imagePath.length() > 0) {
+    Serial.printf("Displaying core image: %s\n", imagePath.c_str());
+    
+    // logic for subsystem images
+    if (isMameCore && lastArcadeSystemeId.length() > 0) {
+      if (imagePath.indexOf("Arcade_" + lastArcadeSystemeId) >= 0) {
+        Serial.printf("SUCCESS: Displaying subsystem-specific image for subsystem %s\n", 
+                     lastArcadeSystemeId.c_str());
+      } else {
+        Serial.printf("FALLBACK: Displaying generic Arcade image (subsystem %s image not available)\n", 
+                     lastArcadeSystemeId.c_str());
+      }
+    }
+    
+    // Use the original display logic from the existing function
+    if (displayCoreImage(imagePath)) {
+      Serial.println(imageFooterSuppressed()
+                     ? "Image displayed correctly, footer suppressed (kiosk)"
+                     : "Image displayed correctly, adding footer");
+      
+      // Footer in PHYSICAL coordinates (full screen width, below image area)
+      drawCoreImageFooter();
+      
+      Serial.println(imageFooterSuppressed() ? "Footer skipped (kiosk)"
+                                             : "Footer added successfully");
+      return;
+    } else {
+      Serial.println("Error displaying image, fallback to menu image");
+    }
+  } else {
+    Serial.printf("No image path available for core: %s\n", coreName.c_str());
+  }
+  
+  // FALLBACK: Show menu image with core overlay
+  showMenuImageWithCoreOverlay(coreName);
+  
+  Serial.println("=== ENHANCED CORE IMAGE DISPLAY COMPLETE ===\n");
+}
+
+// ========== TOUCH HANDLING FUNCTION ==========
+
+void handleTouch() {
+  // Step 1: Get current touch state from Board.Touch.getDetail
+  // This returns a structure with all touch information
+  auto touch = Board.Touch.getDetail();
+  
+  // Step 2: Check if this is a NEW touch event
+  // wasPressed() is true only at the moment of initial contact
+  // This prevents one touch from triggering multiple actions
+  if (touch.wasPressed()) {
+    
+    // Step 3: Get physical touch coordinates (1280x720 space)
+    int physicalX = touch.x;
+    int physicalY = touch.y;
+    
+    // Step 4: Debug logging (helpful during development and testing)
+    Serial.println("Touch detected!");
+    Serial.printf("  Physical coordinates: (%d, %d)\n", physicalX, physicalY);
+    // Serial.printf("  Logical coordinates: (%d, %d)\n", logicalX, logicalY);
+    
+    // Step 5: Check each button in sequence
+    // Using if-else ensures only one button can be activated per touch
+    
+    // Firmware update offer: while the MiSTer holds a newer image for this
+    // board, the HUD version panel is orange (see drawVersionPanel). The
+    // panel sits next to the nav buttons and kept losing taps to them, so the
+    // target is the whole HUD body, above the PRV/SCAN/NXT footer.
+    // The tap only reopens the offer banner: installing takes a second tap,
+    // and a stray touch on the HUD cannot start a reflash. Main HUD only.
+    if (currentPage == 0 && !showingCoreImage &&
+        firmwareOffer.available && firmwareOtaCapable() &&
+        physicalY < 205) {
+      Serial.println("  -> UPDATE offer tapped");
+      showUpdateOfferBanner();   // confirm step: a second tap installs
+      needsRedraw = true;
+      lastButtonPress = millis();
+    }
+    else
+    // GAME INFO subpage toggle (page 5 only).
+    // The "1/2>>" indicator at 238..298 x 40..56 is the visual affordance, but
+    // the hit target is EVERYTHING above the footer: y 0..204, full width. That
+    // covers the header band, the game title row and the indicator itself.
+    // Page 5 has no other interactive element up there, and a small target was
+    // proving unreliable — not because of its size, but because wasPressed() is
+    // only sampled once per loop iteration, and this page's scroll refreshers
+    // make that iteration long. Using no X bound also makes it immune to a
+    // mirrored touch X axis. The footer (y>=205) still belongs to PRV/SCAN/NXT.
+    // Gated on a synopsis existing, because that is exactly when the indicator
+    // is drawn; without it there is no second subpage to toggle to.
+    if (currentPage == 5 && currentMeta.loaded &&
+        currentMeta.synopsis.length() > 0 &&
+        physicalY < 205) {
+      Serial.println("  -> GAME INFO subpage toggle");
+
+      // Feedback: repaint the indicator in white, beep, hold — same contract
+      // as buttonPressFeedback(). The full redraw below restores the cyan.
+      Lcd.setTextWrap(false);
+      Lcd.setTextColor(THEME_WHITE, THEME_BLACK);
+      Lcd.setTextSize(2);
+      Lcd.setCursor(238, 40);
+      Lcd.print(gameInfoSubPage == 0 ? "1/2>>" : "<<2/2");
+      playNextButtonSound();
+      delay(200);
+
+      // The user touched a rotation slide: it stops being an attract slide and
+      // becomes a panel they are reading. Clearing the flag hands the lifecycle
+      // back to the on-demand rules — synopsis, auto-scroll, self-exit — which
+      // is what "touch for the synopsis" has to mean to be worth anything.
+      gameInfoFromRotation = false;
+
+      gameInfoSubPage ^= 1;
+      gameInfoSubPageChange = millis();
+      resetGameInfoSynScroll();
+      needsRedraw = true;
+      lastButtonPress = millis();
+    }
+
+    // RETROACHIEVEMENTS subpage cycle (page 6). Same wide hit target and
+    // feedback contract as the GAME INFO toggle above, and for the same
+    // wasPressed()-sampling reason. Cycles: progress panel -> list page
+    // 1..N -> back to the panel. Only offered when a matched game actually
+    // reports trophies. The list fetch happens right here, before the
+    // redraw, so displayRAList() always finds a buffer that matches
+    // raSubPage (server answers from its progress cache: tens of ms).
+    else if (currentPage == 6 && raStatus.valid && raStatus.status == "ok" &&
+             raStatus.total > 0 && physicalY < 205) {
+      // TEMP CALIBRATION: raw touch Y of every page-6 content tap. Use these
+      // readings to set RA_ROW_TOUCH_TOP / RA_ROW_TOUCH_PITCH, then this line
+      // can be removed.
+      Serial.printf("  [RA touch] physicalY=%d physicalX=%d subPage=%d detail=%d\n",
+                    physicalY, physicalX, raSubPage, raDetailShown ? 1 : 0);
+
+      // Gesture split by touch Y only (X may be mirrored). Row bands live in
+      // TOUCH space: row i is centred at RA_ROW_TOUCH_TOP + i*RA_ROW_TOUCH_PITCH,
+      // so the first band starts at rowBandTop. Taps above that are the title/
+      // indicator area -> cycle subpages. Taps from rowBandTop down to the
+      // footer map to a row, clamped to the last one so there is no dead zone.
+      int rowBandTop = RA_ROW_TOUCH_TOP - RA_ROW_TOUCH_PITCH / 2;
+
+      if (raDetailShown) {
+        Serial.println("  -> RA detail close");
+        raDetailShown = false;
+        playNextButtonSound();
+        needsRedraw = true;
+        lastButtonPress = millis();
+      } else if (raSubPage > 0 && raListValid && raListPage == raSubPage &&
+                 raListCount > 0 && physicalY >= rowBandTop) {
+        int row = (physicalY - rowBandTop) / RA_ROW_TOUCH_PITCH;
+        if (row >= raListCount) row = raListCount - 1;   // clamp: no dead zone
+        if (row < 0) row = 0;
+        Serial.printf("  -> RA detail open (row %d)\n", row);
+        raDetailRow   = row;
+        raDetailShown = true;
+        playNextButtonSound();
+        needsRedraw = true;
+        lastButtonPress = millis();
+      } else {
+        Serial.println("  -> RA TROPHIES subpage cycle");
+        drawRAPageIndicator(true);      // white flash, page-5 feedback idiom
+        playNextButtonSound();
+        delay(200);
+
+        int listPages = (raStatus.total + RA_LIST_PER_PAGE - 1) / RA_LIST_PER_PAGE;
+        raSubPage = (raSubPage + 1) % (listPages + 1);
+        raDetailShown = false;
+        if (raSubPage > 0 && (!raListValid || raListPage != raSubPage)) {
+          getRAList(raSubPage);
+        }
+        needsRedraw = true;
+        lastButtonPress = millis();
+      }
+    }
+
+    // Check PREV button
+    else if (btnPrev.contains(physicalX, physicalY)) {
+      Serial.println("  -> PREV button pressed");
+      
+      // Visual and audio feedback
+      buttonPressFeedback(&btnPrev, playPrevButtonSound);
+      
+      // Execute PREV action: navigate to previous page
+      currentPage = (currentPage - 1 + totalPages) % totalPages;
+      needsRedraw = true;
+      lastPageChange = millis();
+      lastButtonPress = millis();
+    }
+    
+    // Check SCAN button — global refresh, including forced ROM details rescan
+    else if (btnScan.contains(physicalX, physicalY)) {
+      // Lock: ignore additional SCAN presses while a scan is already running.
+      if (scanInProgress) {
+        Serial.println("  -> SCAN button pressed (IGNORED — already scanning)");
+        lastButtonPress = millis();
+      } else {
+        Serial.println("  -> SCAN button pressed (global refresh + force ROM rescan)");
+        
+        // Quick visual+audio feedback (200 ms, label flashes white)
+        buttonPressFeedback(&btnScan, playScanButtonSound);
+        
+        // === Enter SCANNING state ===
+        scanInProgress = true;
+        const char* originalLabel = btnScan.label;  // remember literal "SCAN" pointer
+        btnScan.label = "SCANNING";
+        
+        // Erase the old "SCAN" label area before redrawing with longer text.
+        // btnScan is at (950,300) with size 200x80; the label is centered.
+        // Wipe a generous strip across the middle of the button so neither
+        // "SCAN" nor "SCANNING" leave residual pixels at any phase.
+        Lcd.fillRect(btnScan.x + 10, btnScan.y + 24,
+                            btnScan.w - 20, 32, THEME_BLACK);
+        btnScan.draw(THEME_YELLOW);   // SCANNING in yellow to stand out
+        
+        // === Run the actual operation ===
+        // Step 1: refresh all MiSTer state (core, game, system, network, etc.)
+        updateMiSTerData();
+        
+        // Step 2: if a game is active, force a complete fresh search.
+        if (currentGame.length() > 0) {
+          Serial.println("Game active — forcing ROM details + image rescan");
+          RomDetails fresh = getCurrentRomDetailsForced();
+          lastRomHasCrc = fresh.available && fresh.hashCalculated && fresh.crc32.length() > 0;
+          lastRomCrcChecked = true;
+          Serial.printf("After SCAN rescan: CRC available = %s\n",
+                        lastRomHasCrc ? "YES" : "NO");
+
+          // SCAN ALWAYS forces a complete fresh image search, even when the
+          // CRC was already known.
+          lastSearchedGame        = "";
+          lastGameImageOK         = false;
+          lastGameSearchExhausted = false;
+          g_currentGameIsContainer = false; // SCAN re-decides from fresh rom details
+
+          // Re-run the game image pipeline now and show the result, instead
+          // of just flagging a HUD redraw.
+          btnScan.label   = originalLabel;
+          scanInProgress  = false;
+          lastButtonPress = millis();
+          showGameSlide();
+          showingCoreImage   = true;
+          coreImageStartTime = millis();
+          return;   // switched to the image screen; skip the HUD-redraw tail
+        }
+        
+        // === Exit SCANNING state ===
+        // Restore original label BEFORE the page redraw is triggered, so any
+        // btnScan.draw() called from updateDisplay() picks up "SCAN" again.
+        btnScan.label = originalLabel;
+        scanInProgress = false;
+        
+        // Wipe the (now larger) "SCANNING" footprint and draw "SCAN"
+        Lcd.fillRect(btnScan.x + 10, btnScan.y + 24,
+                            btnScan.w - 20, 32, THEME_BLACK);
+        btnScan.draw(THEME_CYAN);
+        
+        needsRedraw     = true;
+        lastPageChange  = millis();
+        lastButtonPress = millis();
+      }
+    }
+    
+    // Check NEXT button
+    else if (btnNext.contains(physicalX, physicalY)) {
+      Serial.println("  -> NEXT button pressed");
+      
+      // Visual and audio feedback
+      buttonPressFeedback(&btnNext, playNextButtonSound);
+      
+      // Execute NEXT action: navigate to next page
+      currentPage = (currentPage + 1) % totalPages;
+      needsRedraw = true;
+      lastPageChange = millis();
+      lastButtonPress = millis();
+    }
+    
+    // Touch was outside all buttons - ignore it
+    else {
+      Serial.println("  -> Touch outside button areas (ignored)");
+    }
+  }
+}
+
+void setup() {
+  // =====================================================================
+  // ANTI-CRASH BLOCK — must run BEFORE Board.begin() and Serial
+  // =====================================================================
+
+  // 1) The brownout detector is left as it is: on the ESP32-S3 with core 3.3.x
+  //    writing its register trips the brownout ISR and the board boot-loops.
+
+  // =====================================================================
+  // Normal init
+  // =====================================================================
+  auto cfg = Board.config();
+
+  cfg.clear_display = true;
+  cfg.output_power = true;
+  cfg.internal_imu = false;
+  cfg.external_imu = false;
+
+  Board.begin(cfg);
+
+  // ========== START SERIAL FIRST ==========
+  Serial.begin(115200);
+  delay(500);  // Give the serial time
+
+  // =====================================================================
+  // 2) Log the reset reason — tells us exactly WHY the device restarted.
+  //    Check Serial Monitor after a crash to read this line.
+  //    Reasons: POWERON=1, EXT=2, SW=3, PANIC=4, INT_WDT=5,
+  //             TASK_WDT=6, WDT=7, DEEPSLEEP=8, BROWNOUT=9, SDIO=10
+  // =====================================================================
+  {
+    esp_reset_reason_t reason = esp_reset_reason();
+    const char* resetNames[] = {
+      "UNKNOWN", "POWERON", "EXT_PIN", "SW_RESET",
+      "PANIC/EXCEPTION", "INT_WATCHDOG", "TASK_WATCHDOG", "OTHER_WDT",
+      "DEEPSLEEP", "BROWNOUT", "SDIO"
+    };
+    int idx = (int)reason;
+    Serial.println("\n\n========================================");
+    Serial.printf("  RESET REASON: %s (code %d)\n",
+                  (idx >= 0 && idx <= 10) ? resetNames[idx] : "UNKNOWN", idx);
+    if (reason == ESP_RST_PANIC)
+      Serial.println("  >>> CRASH DETECTED: check for null pointer or stack overflow <<<");
+    if (reason == ESP_RST_TASK_WDT)
+      Serial.println("  >>> TASK WATCHDOG: main loop was blocked too long <<<");
+    if (reason == ESP_RST_BROWNOUT)
+      Serial.println("  >>> BROWNOUT: power supply insufficient during peak load <<<");
+    if (reason == ESP_RST_SW)
+      Serial.println("  >>> SW RESTART: ESP.restart() was called (likely low heap) <<<");
+    Serial.println("========================================\n");
+  }
+
+  // =====================================================================
+  // 3) Detect and log PSRAM — confirms large buffers can use external RAM
+  // =====================================================================
+  {
+    bool hasPsram = psramFound();
+    size_t psramSize = hasPsram ? ESP.getPsramSize() : 0;
+    size_t freePsram = hasPsram ? ESP.getFreePsram() : 0;
+    Serial.printf("[MEMORY] Internal heap: %u bytes free\n", ESP.getFreeHeap());
+    Serial.printf("[MEMORY] PSRAM %s | Size: %u KB | Free: %u KB\n",
+                  hasPsram ? "FOUND" : "NOT FOUND",
+                  psramSize / 1024, freePsram / 1024);
+    if (!hasPsram) {
+      Serial.println("[MEMORY] WARNING: No PSRAM detected. Large allocs use internal heap.");
+    }
+  }
+
+  Serial.println("\n\n=== BOOT START ===");
+  
+  // The board has an I2S DAC and speaker, but like the CYD build this sketch
+  // plays no sound. Boot melody skipped.
+  Serial.println("=== SPEAKER ===  (skipped: not used on this board)");
+  
+
+  // Initialize speaker
+  /*auto spk_cfg = Board.Speaker.config();
+  spk_cfg.sample_rate = 48000;  // Sample rate
+  spk_cfg.task_priority = 2;    // Task priority
+  spk_cfg.task_pinned_core = PRO_CPU_NUM;
+  spk_cfg.dma_buf_count = 8;
+  spk_cfg.dma_buf_len = 256;
+  
+  Board.Speaker.config(spk_cfg);
+  Board.Speaker.begin();
+  Board.Speaker.setVolume(100);  // High volume (0-255)
+  
+  Serial.println("Speaker initialized");*/
+  
+  display.setRotation(1);
+  display.setBrightness(DISPLAY_BRIGHTNESS_NORMAL);
+  display.setColorDepth(16);
+
+  // CYD: confirm panel resolution after init so we can spot rotation/driver issues.
+  Serial.printf("[DISPLAY] Resolution: %dx%d (expected 320x240 after rotation=1)\n",
+                display.width(), display.height());
+  Serial.printf("[DISPLAY] Color depth: %d bpp\n", display.getColorDepth());
+  
+  Serial.println("=== MiSTer Monitor with Core and Games Images Starting ===");
+  Serial.printf("Display: %dx%d\n", display.width(), display.height());
+  Serial.printf("Target MiSTer IP: %s\n", misterIP);
+  
+  Serial.println("=== INITIALIZING SD CARD ===");
+  Serial.printf("Using CS pin: GPIO %d (HSPI bus)\n", TFCARD_CS_PIN);
+  Serial.println("Mode: SPI at 25 MHz");
+
+  // Start the dedicated HSPI bus for SD before SD.begin() can use it.
+  sdSPI.begin(14 /*SCK*/, 16 /*MISO*/, 17 /*MOSI*/, TFCARD_CS_PIN);
+
+  int sdRetries = 0;
+  while (!SD.begin(TFCARD_CS_PIN, sdSPI, 25000000) && sdRetries < 5) {
+    sdRetries++;
+    Serial.printf("SD Card initialization attempt %d/5 failed!\n", sdRetries);
+    delay(500);
+  }
+  
+  if (sdRetries < 5) {
+    Serial.println("SD Card initialized successfully");
+    sdCardAvailable = true;
+    
+    // Display SD card information for diagnostics
+    uint8_t cardType = SD.cardType();
+    Serial.printf("Card Type: %s\n", 
+                  cardType == CARD_MMC ? "MMC" :
+                  cardType == CARD_SD ? "SDSC" :
+                  cardType == CARD_SDHC ? "SDHC" : "UNKNOWN");
+    
+    uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+    Serial.printf("Card Size: %llu MB\n", cardSize);
+  } else {
+    Serial.println("SD Card initialization failed after 5 attempts");
+    Serial.println("Application will continue but image features will be disabled");
+    sdCardAvailable = false;
+  }
+  
+  // ── Load /config.ini from SD card ─────────────────────────────────────────
+  loadConfig(appConfig);
+
+  // [ui] flip_display - 180 degree panel rotation for cases that mount the
+  // board upside down. Applied here rather than in Board.begin() because the
+  // value lives on the SD card, which is not mounted that early in setup().
+  applyDisplayFlip(appConfig.flipDisplay);
+
+  ssid     = appConfig.ssid.c_str();
+  password = appConfig.wifiPass.c_str();
+  // MiSTer IP from config.ini. When set it pins the display to that server;
+  // when blank, UDP discovery fills it in. appConfig is global, so the
+  // c_str() pointer stays valid for the program's lifetime.
+  misterIP = appConfig.misterIP.c_str();
+  pinMisterFromConfig();
+    if (appConfig.ssDevUser.length() > 0) {
+    _ss_dev_user_str = appConfig.ssDevUser;
+    _ss_dev_pass_str = appConfig.ssDevPass;
+  } else {
+    _ss_dev_user_str = SS_DEV_ID_EMBEDDED;
+    _ss_dev_pass_str = SS_DEV_PASS_EMBEDDED;
+  }
+
+  _ss_user_str            = appConfig.ssUser;
+  _ss_pass_str            = appConfig.ssPass;
+  _boxart_region_str      = appConfig.boxartRegion;
+  _info_lang_str          = appConfig.infoLang;
+  _info_synopsis_max      = appConfig.infoSynopsisMax;
+  if (_info_synopsis_max < 200)  _info_synopsis_max = 200;
+  if (_info_synopsis_max > 2000) _info_synopsis_max = 2000;
+  GAMEINFO_SYN_STEP_MS = (unsigned long) appConfig.infoScrollStepMs;
+  if (GAMEINFO_SYN_STEP_MS < 200)  GAMEINFO_SYN_STEP_MS = 200;
+  if (GAMEINFO_SYN_STEP_MS > 8000) GAMEINFO_SYN_STEP_MS = 8000;
+  gameInfoSynAuto = appConfig.infoScrollAuto;
+  _core_images_path_str   = appConfig.coreImagesPath;
+  _default_core_image_str = appConfig.defaultCoreImage;
+
+  GAME_MEDIA_ORDER_STR              = appConfig.gameMediaOrder;
+  ARCADE_MEDIA_ORDER_STR           = appConfig.arcadeMediaOrder;
+  ARCADE_SUBSYSTEM_MEDIA_ORDER_STR = appConfig.arcadeSubsystemMediaOrder;
+  CORE_MEDIA_ORDER_STR             = appConfig.coreMediaOrder;
+  IMAGE_UPSCALE                    = appConfig.imageUpscale;
+  {
+    // Ceiling clamped to what one MCU can grow to inside FINE_BLOCK_MAX.
+    float maxScale = appConfig.imageUpscaleMax;
+    if (maxScale < 1.0f)   maxScale = 1.0f;
+    if (maxScale > 2.875f) maxScale = 2.875f;
+    IMAGE_UPSCALE_MAX_Q16 = (int32_t)(maxScale * 65536.0f);
+  }
+  KIOSK_MODE                       = appConfig.kioskMode;
+  KIOSK_HIDE_DELAY_MS              = constrain(appConfig.kioskHideDelayMs, 500, 600000);
+  ARTWORK_MAX_HEIGHT               = KIOSK_MODE ? TARGET_HEIGHT : IMAGE_AREA_HEIGHT;
+  // Kiosk mode starts with the artwork uncovered; a tap brings the footer up.
+  g_imageFooterVisible             = !KIOSK_MODE;
+  STANDBY_WHEN_OFFLINE        = appConfig.standbyWhenOffline;
+  STANDBY_OFFLINE_MIN         = constrain(appConfig.standbyOfflineMin, 1, 1440);
+  STANDBY_IDLE_MIN            = constrain(appConfig.standbyIdleMin, 0, 1440);
+  STANDBY_BRIGHTNESS          = constrain(appConfig.standbyBrightness, 0, 255);
+  STANDBY_DIM_PCT             = constrain(appConfig.standbyDim, 5, 100);
+  {
+    String screen = appConfig.standbyScreen;
+    screen.toLowerCase();
+    STANDBY_SCREEN_CLOCK = (screen != "minimal");
+    if (screen != "minimal" && screen != "clock")
+      Serial.printf("[CONFIG] Unknown standby_screen '%s' - using clock\n", screen.c_str());
+  }
+  CLOCK_24H                   = appConfig.clock24h;
+  TIMEZONE_STR                = appConfig.timezone;
+  TIMEZONE_STR.trim();
+  NTP_SERVER_STR              = appConfig.ntpServer;
+  NTP_SERVER_STR.trim();
+  if (NTP_SERVER_STR.length() == 0) NTP_SERVER_STR = "pool.ntp.org";
+  Serial.printf("[CONFIG] Image mode       : %s\n",
+                IMAGE_MODE == IMAGE_MODE_GAME   ? "game"   :
+                IMAGE_MODE == IMAGE_MODE_SYSTEM ? "system" : "rotate");
+  Serial.printf("[CONFIG] Image upscale    : %s (max x%.2f)\n",
+                IMAGE_UPSCALE ? "on" : "off", IMAGE_UPSCALE_MAX_Q16 / 65536.0f);
+  Serial.printf("[CONFIG] Kiosk mode       : %s (%d ms)\n", KIOSK_MODE ? "on" : "off", KIOSK_HIDE_DELAY_MS);
+  Serial.printf("[CONFIG] Artwork height   : %d px\n", ARTWORK_MAX_HEIGHT);
+  Serial.printf("[CONFIG] Standby          : offline %s (%d min), idle %d min, brightness %d, dim %d%%\n",
+                STANDBY_WHEN_OFFLINE ? "on" : "off", STANDBY_OFFLINE_MIN,
+                STANDBY_IDLE_MIN, STANDBY_BRIGHTNESS, STANDBY_DIM_PCT);
+  Serial.printf("[CONFIG] Standby screen   : %s, %s-hour\n",
+                STANDBY_SCREEN_CLOCK ? "clock" : "minimal", CLOCK_24H ? "24" : "12");
+  {
+    String mode = appConfig.imageMode;
+    mode.toLowerCase();
+    if      (mode == "game")   IMAGE_MODE = IMAGE_MODE_GAME;
+    else if (mode == "system") IMAGE_MODE = IMAGE_MODE_SYSTEM;
+    else {
+      IMAGE_MODE = IMAGE_MODE_ROTATE;
+      if (mode != "rotate")
+        Serial.printf("[CONFIG] Unknown image_mode '%s' - using rotate\n", mode.c_str());
+    }
+  }
+  {
+    String scaling = appConfig.screenshotScaling;
+    scaling.toLowerCase();
+    scaling.trim();
+    SCREENSHOT_FILL = (scaling != "integer");
+    if (scaling != "integer" && scaling != "fill")
+      Serial.printf("[CONFIG] Unknown screenshot_scaling '%s' - using fill\n", scaling.c_str());
+    Serial.printf("[CONFIG] Screenshot scale : %s\n", SCREENSHOT_FILL ? "fill" : "integer");
+  }
+
+  CORE_IMAGE_TIMEOUT          = appConfig.coreImageTimeout;
+  SYSTEM_IMAGE_TIMEOUT        = (appConfig.systemImageTimeout > 0)
+                                ? appConfig.systemImageTimeout
+                                : CORE_IMAGE_TIMEOUT;   // 0/unset = same as the game image
+  ENABLE_ALPHABETICAL_FOLDERS = appConfig.alphabeticalFolders;
+  SCREENSCRAPER_TIMEOUT       = appConfig.ssTimeout;
+  SCREENSCRAPER_RETRIES       = appConfig.ssRetries;
+  USE_HTTPS_SCREENSCRAPER     = appConfig.ssUseHttps;
+  ENABLE_DEBUG_MODE           = appConfig.debugMode;
+  ENABLE_AUTO_DOWNLOAD        = appConfig.autoDownload;
+  MAX_IMAGE_SIZE              = appConfig.maxImageSize;
+  DOWNLOAD_TIMEOUT            = appConfig.downloadTimeout;
+  FORCE_CORE_REDOWNLOAD       = appConfig.forceCoreRedownload;
+  FORCE_GAME_REDOWNLOAD       = appConfig.forceGameRedownload;
+  SCROLL_SPEED_MS             = appConfig.scrollSpeedMs;
+  SCROLL_PAUSE_START_MS       = appConfig.scrollPauseStartMs;
+  SCROLL_PAUSE_END_MS         = appConfig.scrollPauseEndMs;
+
+  Serial.printf("[CONFIG] MiSTer IP   : %s\n", misterIP);
+  Serial.printf("[CONFIG] WiFi SSID   : %s\n", ssid);
+  Serial.printf("[CONFIG] SS User     : %s\n", SCREENSCRAPER_USER);
+  Serial.printf("[CONFIG] Region      : %s\n", BOXART_REGION);
+  Serial.printf("[CONFIG] Game order       : %s\n", GAME_MEDIA_ORDER_STR.c_str());
+  Serial.printf("[CONFIG] Arcade order     : %s\n", ARCADE_MEDIA_ORDER_STR.c_str());
+  Serial.printf("[CONFIG] Arcade subsys ord: %s\n", ARCADE_SUBSYSTEM_MEDIA_ORDER_STR.c_str());
+  Serial.printf("[CONFIG] Core order       : %s\n", CORE_MEDIA_ORDER_STR.c_str());
+  // ──────────────────────────────────────────────────────────────────────────
+
+  bootFrameLoaded = false;  // Reset boot frame flag
+  backgroundLoaded = false; // Ensure interface frame loads
+
+  // Boot screen
+  showBootSequence();
+  
+  // FIRST: Connect WiFi (highest priority)
+  connectWithAnimation();
+  standbyStartClock();   // time sync runs in the background from here on
+
+  // Get current core and game BEFORE showing interface
+  if (!getStateSnapshot()) {
+    getCurrentCore();
+    getCurrentGame();
+  }
+  
+  // If SD available, show appropriate image
+  if (sdCardAvailable) {
+    // Prioritize game image over core image
+    if (currentGame.length() > 0 && currentCore != "MENU") {
+      showGameSlide();
+    } else {
+      showCoreImageScreenWithAutoDownload(currentCore);
+    }
+    showingCoreImage = true;
+    coreImageStartTime = millis(); // Record start time
+    lastCoreCheck = millis(); // Initialize check timer
+  }
+  
+
+  Serial.println("==========================================\n");
+  
+  // First complete update
+  updateMiSTerData();
+  needsRedraw = true;
+  
+  // Initialize last button press time
+  lastButtonPress = millis();
+
+  if (ENABLE_AUTO_DOWNLOAD) {
+    Serial.println("ScreenScraper auto-download enabled");
+    Serial.printf("User: %s\n", SCREENSCRAPER_USER);
+  }
+  // Start screenshot HTTP server (only if WiFi connected)
+  if (WiFi.status() == WL_CONNECTED) {
+    registerWebConfigRoutes();   // /config editor + /reboot on the same server
+    registerWebFilesRoutes();    // /files SD card browser on the same server
+    registerFirmwareUpdateRoutes(drawFirmwareProgress);   // /update on the same server
+    setupScreenshotServer();
+  }
+}
+
+// ========== STANDBY: STATE LOGIC ==========
+// Nothing in this block draws. It decides when the standby screen starts and
+// ends; everything that touches the panel lives in the drawing block below.
+
+#define STANDBY_WAKE_NONE        0
+#define STANDBY_WAKE_TOUCH       1
+#define STANDBY_WAKE_LINK        2       // the MiSTer answered again
+#define STANDBY_WAKE_ACTIVITY    3       // core, game or achievement change
+
+#define STANDBY_POLL_ONLINE_MS   10000UL // state check while the link is up
+#define STANDBY_POLL_OFFLINE_MS  60000UL // single-request probe while it is down
+#define STANDBY_BREATH_MS        6000UL  // one full breath of the logo
+#define STANDBY_STATUS_PULSE_MS  3000UL  // one full pulse of the clock screen status dot
+
+static bool          standbyActive        = false;
+static bool          standbyFromImage     = false;  // image mode was up on entry
+static unsigned long standbyLastActivity  = 0;      // core/game change, touch or wake
+static bool          standbyOffline       = false;  // link currently down
+static unsigned long standbyOfflineSince  = 0;      // valid while standbyOffline
+static unsigned long standbyLastPoll      = 0;
+static bool          standbyPrevConnected = false;
+static String        standbySeenCore      = "";
+static String        standbySeenGame      = "";
+
+// Friendly timezone names, one word each. Anything not listed here is taken
+// as a POSIX TZ string and passed through untouched. POSIX offsets are
+// inverted with respect to UTC: a zone one hour ahead of UTC is written "-1".
+struct StandbyTzName { const char* name; const char* posix; };
+static const StandbyTzName STANDBY_TZ_NAMES[] = {
+  { "uk",          "GMT0BST,M3.5.0/1,M10.5.0"     }, // United Kingdom, Ireland
+  { "portugal",    "WET0WEST,M3.5.0/1,M10.5.0"    }, // Portugal
+  { "iceland",     "GMT0"                         }, // Iceland, Ghana, Senegal, Mali
+  { "spain",       "CET-1CEST,M3.5.0,M10.5.0/3"   }, // Spain, France, Germany, Italy, Netherlands, Poland, Sweden
+  { "nigeria",     "WAT-1"                        }, // Nigeria, Algeria, Tunisia, Angola, Cameroon
+  { "greece",      "EET-2EEST,M3.5.0/3,M10.5.0/4" }, // Greece, Finland, Romania, Bulgaria, Ukraine, Estonia
+  { "southafrica", "SAST-2"                       }, // South Africa, Zimbabwe, Zambia, Botswana
+  { "turkey",      "<+03>-3"                      }, // Turkey, Saudi Arabia, Kenya, Russia (Moscow)
+  { "dubai",       "<+04>-4"                      }, // UAE, Oman, Georgia, Armenia, Azerbaijan
+  { "india",       "IST-5:30"                     }, // India, Sri Lanka
+  { "thailand",    "<+07>-7"                      }, // Thailand, Vietnam, Cambodia, Indonesia (Jakarta)
+  { "china",       "CST-8"                        }, // China, Taiwan, Hong Kong, Singapore, Malaysia, Philippines
+  { "japan",       "JST-9"                        }, // Japan, South Korea
+  { "sydney",      "AEST-10AEDT,M10.1.0,M4.1.0/3" }, // Australia (Sydney, Melbourne, Hobart)
+  { "newzealand",  "NZST-12NZDT,M9.5.0,M4.1.0/3"  }, // New Zealand
+  { "argentina",   "<-03>3"                       }, // Argentina, Uruguay, Brazil (Sao Paulo, Rio)
+  { "venezuela",   "<-04>4"                       }, // Venezuela, Bolivia, Paraguay, Dominican Republic
+  { "colombia",    "<-05>5"                       }, // Colombia, Peru, Ecuador
+  { "useastern",   "EST5EDT,M3.2.0,M11.1.0"       }, // USA (New York, Miami), Canada (Toronto)
+  { "mexico",      "CST6"                         }, // Mexico, Guatemala, Costa Rica, El Salvador
+  { "uscentral",   "CST6CDT,M3.2.0,M11.1.0"       }, // USA (Chicago, Dallas), Canada (Winnipeg)
+  { "usmountain",  "MST7MDT,M3.2.0,M11.1.0"       }, // USA (Denver), Canada (Edmonton)
+  { "uspacific",   "PST8PDT,M3.2.0,M11.1.0"       }, // USA (Los Angeles, Seattle), Canada (Vancouver)
+};
+
+static bool standbyClockEnabled = false;   // a timezone is set and sync was started
+
+// Starts the background time sync. Without a timezone there is no clock at
+// all: showing UTC to someone who never chose it would be showing the wrong
+// time. The server name must outlive the call, the sync client keeps the
+// pointer, which is why it is read from a global.
+static void standbyStartClock() {
+  if (TIMEZONE_STR.length() == 0) {
+    Serial.println("[CLOCK] No timezone set - clock disabled");
+    return;
+  }
+  String wanted = TIMEZONE_STR;
+  wanted.toLowerCase();
+  const char* posix = TIMEZONE_STR.c_str();
+  for (size_t i = 0; i < sizeof(STANDBY_TZ_NAMES) / sizeof(STANDBY_TZ_NAMES[0]); i++) {
+    if (wanted == STANDBY_TZ_NAMES[i].name) {
+      posix = STANDBY_TZ_NAMES[i].posix;
+      break;
+    }
+  }
+  Serial.printf("[CLOCK] Timezone '%s' -> %s, server %s\n",
+                TIMEZONE_STR.c_str(), posix, NTP_SERVER_STR.c_str());
+  configTzTime(posix, NTP_SERVER_STR.c_str());
+  standbyClockEnabled = true;
+}
+
+// Wall-clock time, or false while the clock is disabled or was never set.
+// Reads the clock directly so it never blocks waiting for a time sync.
+static bool standbyLocalTime(struct tm* out) {
+  static bool announced = false;
+  if (!standbyClockEnabled) return false;
+  time_t now = time(nullptr);
+  if (now < 1609459200) return false;
+  localtime_r(&now, out);
+  if (!announced) {
+    announced = true;
+    Serial.printf("[CLOCK] Time set: %04d-%02d-%02d %02d:%02d\n", out->tm_year + 1900,
+                  out->tm_mon + 1, out->tm_mday, out->tm_hour, out->tm_min);
+  }
+  return true;
+}
+
+// Hour as shown on screen: 0-23, or 1-12 with clock_24h off.
+static int standbyDisplayHour(const struct tm* t) {
+  if (CLOCK_24H) return t->tm_hour;
+  int h = t->tm_hour % 12;
+  return h == 0 ? 12 : h;
+}
+
+// Brightness of a breathing element, 48-255, for a breath of periodMs. Never
+// reaches zero, so the element never vanishes. Quantised so it is repainted a
+// fixed number of times per breath rather than on every pass.
+static int standbyBreathLevel(unsigned long now, unsigned long periodMs) {
+  float phase = (float)(now % periodMs) / (float)periodMs;
+  float wave  = 0.5f - 0.5f * cosf(phase * 6.2831853f);
+  int level   = 48 + (int)(wave * 207.0f);
+  return level & ~0x03;
+}
+
+// Software dimming. The backlight of some units only switches on and off, so
+// standby also darkens what it draws. Both helpers are plain arithmetic on
+// standby_dim: a brightness level (0-255) and an RGB565 colour.
+static int standbyDimLevel(int level) {
+  int dimmed = level * STANDBY_DIM_PCT / 100;
+  return dimmed < 16 ? 16 : dimmed;          // never fade out completely
+}
+
+static uint16_t standbyDimColor(uint16_t color) {
+  if (STANDBY_DIM_PCT >= 100) return color;
+  // Rounded, not truncated: very dark colours keep their hue a little longer.
+  int r = (((color >> 11) & 0x1F) * STANDBY_DIM_PCT + 50) / 100;
+  int g = (((color >> 5)  & 0x3F) * STANDBY_DIM_PCT + 50) / 100;
+  int b = (( color        & 0x1F) * STANDBY_DIM_PCT + 50) / 100;
+  return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+// Called on every pass while awake. Watches the state variables themselves
+// instead of hooking the poll sites, so every path that updates them is
+// covered, whichever screen is up.
+static void standbyObserve(bool touched) {
+  unsigned long now = millis();
+  bool stateChanged = connected && (currentCore != standbySeenCore ||
+                                    currentGame != standbySeenGame);
+  if (touched || stateChanged || raPopupUntil != 0) {
+    standbyLastActivity = now;
+  }
+  standbySeenCore = currentCore;
+  standbySeenGame = currentGame;
+
+  if (connected) {
+    standbyOffline = false;
+  } else if (!standbyOffline) {
+    standbyOffline      = true;
+    standbyOfflineSince = now;
+  }
+}
+
+// The offline trigger also waits out the last touch, so the screen does not
+// go dark under someone browsing the monitor pages with the MiSTer off.
+static bool standbyShouldEnter() {
+  unsigned long now = millis();
+  if (STANDBY_WHEN_OFFLINE && standbyOffline) {
+    unsigned long need = (unsigned long)STANDBY_OFFLINE_MIN * 60000UL;
+    if (now - standbyOfflineSince >= need && now - standbyLastActivity >= need) {
+      Serial.printf("[STANDBY] Enter: MiSTer offline for %d min\n", STANDBY_OFFLINE_MIN);
+      return true;
+    }
+  }
+  if (STANDBY_IDLE_MIN > 0 &&
+      now - standbyLastActivity >= (unsigned long)STANDBY_IDLE_MIN * 60000UL) {
+    Serial.printf("[STANDBY] Enter: no activity for %d min\n", STANDBY_IDLE_MIN);
+    return true;
+  }
+  return false;
+}
+
+static void standbyEnter() {
+  standbyActive        = true;
+  standbyFromImage     = showingCoreImage;
+  standbyPrevConnected = connected;
+  standbySeenCore      = currentCore;
+  standbySeenGame      = currentGame;
+  standbyLastPoll      = millis();
+}
+
+// Standby runs its own state check: the regular ones sit further down the
+// loop, past the early return. With the link down it is one request a minute,
+// because every request against a powered-off host blocks until it times out
+// and touch is not read meanwhile. Re-discovery keeps running on top of this.
+static void standbyPoll() {
+  unsigned long interval = connected ? STANDBY_POLL_ONLINE_MS : STANDBY_POLL_OFFLINE_MS;
+  if (millis() - standbyLastPoll < interval) return;
+  if (connected) {
+    if (!getStateSnapshot()) {
+      getCurrentCore();
+      getCurrentGame();
+    }
+  } else {
+    getCurrentCore();
+  }
+  standbyLastPoll = millis();
+}
+
+static int standbyWakeReason(bool touched) {
+  if (touched) return STANDBY_WAKE_TOUCH;
+  bool linkRestored    = connected && !standbyPrevConnected;
+  standbyPrevConnected = connected;
+  if (linkRestored) return STANDBY_WAKE_LINK;
+  // Core and game fall back to cached values while the link is down, so a
+  // difference only counts as activity when it comes from a live answer.
+  if (connected && (currentCore != standbySeenCore || currentGame != standbySeenGame ||
+                    raPopupUntil != 0)) {
+    return STANDBY_WAKE_ACTIVITY;
+  }
+  return STANDBY_WAKE_NONE;
+}
+
+// Leaving restamps every idle timer, so nothing that was counting down
+// before standby fires on the first pass after it, and a touch wake with the
+// MiSTer still off earns a full offline period before the screen dims again.
+static void standbyLeave(int reason) {
+  Serial.printf("[STANDBY] Leave: %s\n",
+                reason == STANDBY_WAKE_TOUCH ? "touch" :
+                reason == STANDBY_WAKE_LINK  ? "MiSTer is back" : "activity");
+  if (reason == STANDBY_WAKE_LINK && !getStateSnapshot()) {
+    getCurrentCore();
+    getCurrentGame();
+  }
+  unsigned long now = millis();
+  standbyActive        = false;
+  standbyLastActivity  = now;
+  standbyOfflineSince  = now;
+  standbySeenCore      = currentCore;
+  standbySeenGame      = currentGame;
+  lastButtonPress      = now;
+  coreImageStartTime   = now;
+  lastCoreCheck        = now;
+  g_imageFooterShownAt = now;
+  // Link up: refresh the monitor pages at once. Link down: hold the full
+  // refresh back, it would block the first minute after the wake.
+  lastUpdate           = connected ? 0 : now;
+}
+
+// ========== STANDBY: DRAWING ==========
+// Layout for a 320x240 panel. The logo is decoded straight to the panel and
+// stays still; on the minimal screen it is the backlight that breathes.
+#define STANDBY_LOGO_RAW_PATH    "/cores/logo_standby.565"        // minimal screen, preferred
+#define STANDBY_LOGO_PATH        "/cores/logo_standby.jpg"        // minimal screen, fallback
+#define STANDBY_CLOCK_LOGO_PATH  "/cores/logo_standby_clock.jpg"  // clock screen; optional
+#define STANDBY_LOGO_MAX_BYTES   60000
+#define STANDBY_DOT_R            4
+#define STANDBY_DOT_MARGIN       12      // dot centre to the right and bottom edges
+#define STANDBY_LABEL_GAP        7       // dot edge to the end of its label
+#define STANDBY_LABEL_ONLINE     0x0471  // dim cyan, the dot's own colour muted
+#define STANDBY_LABEL_OFFLINE    0x9B20  // dim orange, likewise
+
+#define STANDBY_CLOCK_LOGO_Y     -1       // negative: no logo on the clock screen
+#define STANDBY_DIGIT_Y          30
+#define STANDBY_DIGIT_W          42
+#define STANDBY_DIGIT_H          76
+#define STANDBY_DIGIT_T          9       // segment thickness
+#define STANDBY_DIGIT_GAP        10       // between digits, and around the colon
+#define STANDBY_COLON_W          14
+#define STANDBY_SEG_JOIN         1       // dark gap where two segments meet
+#define STANDBY_DATE_Y           122
+#define STANDBY_DATE_FONT        fonts::DejaVu18
+#define STANDBY_DATE_BAND_H      24
+#define STANDBY_RULE_Y           162
+#define STANDBY_STATUS_TOP       176     // band shared by the status and game lines
+#define STANDBY_STATUS_BAND_H    44
+#define STANDBY_STATUS_Y         182     // status line when the game line is under it
+#define STANDBY_STATUS_Y_ALONE   182     // status line with no game line under it
+#define STANDBY_GAME_Y           204
+#define STANDBY_TEXT_SIZE        1       // default font: 6x8 px per character, times this
+#define STANDBY_LINE_MARGIN      22      // text window of the two bottom lines, each side
+#define STANDBY_STATUS_DOT_R     3
+#define STANDBY_SEG_LIT          THEME_CYAN
+#define STANDBY_SEG_GHOST        0x08E3  // unlit segments: a faint tint of the lit colour
+
+// ---- Backlight --------------------------------------------------------------
+// The display library drives the backlight with 8-bit brightness, too coarse
+// for a slow breath at low levels: the steps show. Standby takes the pin over
+// at 13 bits and hands it back on the way out. ledcAttach() refuses a pin
+// that is still attached, so the pin is released first and every step checked.
+#define STANDBY_BL_PIN           5     // = cfg.pin_bl in board_hal.h (GPIO21 is the SD CS here)
+#define STANDBY_BL_FREQ          5000
+#define STANDBY_BL_BITS          13
+
+static bool     standbyBlFine   = false;
+static uint32_t standbyBlDuty   = 0xFFFFFFFF;
+
+static void standbyBacklightBegin() {
+  ledcDetach(STANDBY_BL_PIN);
+  standbyBlFine = ledcAttach(STANDBY_BL_PIN, STANDBY_BL_FREQ, STANDBY_BL_BITS);
+  standbyBlDuty = 0xFFFFFFFF;
+  if (!standbyBlFine) {
+    Serial.println("[STANDBY] Fine backlight control unavailable - using 8-bit steps");
+    display.light()->init(STANDBY_BRIGHTNESS);
+  }
+}
+
+static void standbyBacklightEnd() {
+  // Always release the pin, also after the 8-bit fallback: that path leaves it
+  // attached through display.light()->init(), and a second init() on a pin
+  // that is still attached fails silently, leaving the screen dark.
+  ledcDetach(STANDBY_BL_PIN);
+  standbyBlFine = false;
+  if (!display.light()->init(DISPLAY_BRIGHTNESS_NORMAL)) {
+    Serial.println("[STANDBY] Backlight init failed - driving the pin high");
+    pinMode(STANDBY_BL_PIN, OUTPUT);
+    digitalWrite(STANDBY_BL_PIN, HIGH);
+  }
+}
+
+// level is 0-255 of standby_brightness. Squared, so the breath looks even to
+// the eye instead of lingering at the bright end.
+static void standbyBacklightWrite(int level) {
+  if (!standbyBlFine) {
+    uint32_t b = (uint32_t)STANDBY_BRIGHTNESS * level * level / (255UL * 255UL);
+    if (b != standbyBlDuty) { display.setBrightness((uint8_t)b); standbyBlDuty = b; }
+    return;
+  }
+  uint64_t full = (1UL << STANDBY_BL_BITS) - 1;
+  uint32_t duty = (uint32_t)((uint64_t)STANDBY_BRIGHTNESS * level * level * full /
+                             (255ULL * 255ULL * 255ULL));
+  if (duty == 0 && STANDBY_BRIGHTNESS > 0 && level > 0) duty = 1;
+  if (duty != standbyBlDuty) { ledcWrite(STANDBY_BL_PIN, duty); standbyBlDuty = duty; }
+}
+
+static void standbyBacklightBreathe() {
+  float phase = (float)(millis() % STANDBY_BREATH_MS) / (float)STANDBY_BREATH_MS;
+  float wave  = 0.5f - 0.5f * cosf(phase * 6.2831853f);
+  standbyBacklightWrite(60 + (int)(wave * 195.0f));
+}
+
+// ---- Logo ---------------------------------------------------------------------
+static int  standbyDrawnLink   = -1;        // -1 = dot not painted yet
+static int  standbyDrawnMask[4] = { -1, -1, -1, -1 };
+static int  standbyDrawnDay    = -1;
+static int  standbyDrawnAmPm   = -1;
+static int  standbyStatusDotX  = 0;         // where the status line put its dot
+static int  standbyStatusDotY  = 0;
+static int  standbyDrawnPulse  = -1;
+
+// The two lines under the rule scroll when they do not fit, with the same
+// helper and the same [ui] scroll timings as the rest of the interface.
+static ScrollTextState standbyStatusScroll = {"", 0, 0, 0, 0, false, false, false};
+static ScrollTextState standbyGameScroll   = {"", 0, 0, 0, 0, false, false, false};
+static String   standbyDrawnStatus = "";
+static String   standbyDrawnGame   = "";
+static int      standbyStatusX     = 0;
+static int      standbyGameX       = 0;
+static int      standbyStatusLineY = 0;
+static uint16_t standbyStatusColor = 0;
+static bool     standbyShowGame    = false;
+
+// Anything close to black is forced to black, which removes the faint
+// speckles JPEG leaves around sharp edges (these panels lift the dark end
+// enough to show them), and the rest follows standby_dim. Pixels are
+// byte-swapped RGB565, as both logo paths hand them over.
+static void standbyLogoPixels(uint16_t* px, int n) {
+  for (int i = 0; i < n; i++) {
+    uint16_t p = (uint16_t)((px[i] >> 8) | (px[i] << 8));
+    if (((p >> 11) & 0x1F) < 5 && ((p >> 5) & 0x3F) < 10 && (p & 0x1F) < 5) p = 0;
+    else p = standbyDimColor(p);
+    px[i] = (uint16_t)((p >> 8) | (p << 8));
+  }
+}
+
+static int standbyLogoBlock(JPEGDRAW *pDraw) {
+  standbyLogoPixels(pDraw->pPixels, pDraw->iWidth * pDraw->iHeight);
+  display.pushImage(pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels);
+  return 1;
+}
+
+// Raw logo: a 4-byte header (width, height, little-endian) followed by
+// RGB565 pixels, high byte first, row by row. It is copied to the panel one
+// row at a time, so it needs no memory and reaches the screen exactly as it
+// was drawn. The JPEG decoder rounds its arithmetic for speed, which on a
+// 16-bit panel leaves lighter and darker blotches in flat colours.
+static bool drawStandbyLogoRaw(const char* path, int yTop) {
+  static uint16_t row[TARGET_WIDTH];
+  if (!sdCardAvailable || !SD.exists(path)) return false;
+  File f = SD.open(path);
+  if (!f) return false;
+  uint8_t head[4];
+  bool ok = (f.read(head, 4) == 4);
+  int w = head[0] | (head[1] << 8);
+  int h = head[2] | (head[3] << 8);
+  ok = ok && w > 0 && w <= TARGET_WIDTH && h > 0 && h <= TARGET_HEIGHT &&
+       f.size() == (size_t)(4 + w * h * 2);
+  if (ok) {
+    int x = (TARGET_WIDTH - w) / 2;
+    int y = (yTop < 0) ? (TARGET_HEIGHT - h) / 2 : yTop;
+    for (int r = 0; r < h && ok; r++) {
+      ok = (f.read((uint8_t*)row, w * 2) == w * 2);
+      if (!ok) break;
+      standbyLogoPixels(row, w);
+      display.pushImage(x, y + r, w, 1, row);
+    }
+  }
+  f.close();
+  return ok;
+}
+
+// Game image from a .565 (see PngImage.h), centred in a boxW x boxH box at
+// boxX, boxY and grown by the largest integer factor that fits, so pixel art
+// keeps square pixels. image_upscale does not apply: it governs fractional
+// growth of JPEG artwork. Read row by row: measured no slower than larger
+// blocks on the card, and it needs no heap.
+// Returns false for a missing or malformed file, or for one larger than the
+// box, i.e. stored for another box size; the caller then regenerates it.
+// scaleOut, when not null, receives the factor used.
+static bool drawRaw565InBox(const char* path, int boxX, int boxY, int boxW, int boxH,
+                            int* scaleOut) {
+  static uint16_t row[TARGET_WIDTH];
+  static uint16_t grown[TARGET_WIDTH];
+  if (boxW > TARGET_WIDTH) boxW = TARGET_WIDTH;
+  if (!sdCardAvailable) return false;
+  File f = SD.open(path);
+  if (!f) return false;
+  uint8_t head[4];
+  bool ok = (f.read(head, 4) == 4);
+  int w = head[0] | (head[1] << 8);
+  int h = head[2] | (head[3] << 8);
+  ok = ok && w > 0 && h > 0 && w <= boxW && h <= boxH &&
+       f.size() == (size_t)(4 + w * h * 2);
+  if (!ok) { f.close(); return false; }
+
+  int k = min(boxW / w, boxH / h);
+  if (scaleOut) *scaleOut = k;
+  int x0 = boxX + (boxW - w * k) / 2;
+  int y0 = boxY + (boxH - h * k) / 2;
+
+  uint32_t t0 = millis(), readUs = 0, pushUs = 0;
+  display.startWrite();
+  for (int y = 0; y < h && ok; y++) {
+    uint32_t tr = micros();
+    ok = (f.read((uint8_t*)row, w * 2) == (size_t)w * 2);
+    readUs += micros() - tr;
+    if (!ok) break;
+    uint32_t tp = micros();
+    if (k == 1) {
+      display.pushImage(x0, y0 + y, w, 1, row);
+    } else {
+      for (int x = 0; x < w; x++)
+        for (int j = 0; j < k; j++) grown[x * k + j] = row[x];
+      for (int j = 0; j < k; j++) display.pushImage(x0, y0 + y * k + j, w * k, 1, grown);
+    }
+    pushUs += micros() - tp;
+  }
+  display.endWrite();
+  f.close();
+  Serial.printf("[PNG] drew .565 %dx%d x%d in %u ms (read %u KB in %u ms, panel %u ms)\n",
+                w, h, k, (unsigned)(millis() - t0), (unsigned)((size_t)w * h * 2 / 1024),
+                (unsigned)(readUs / 1000), (unsigned)(pushUs / 1000));
+  return ok;
+}
+
+// Panel sink for decodePngScaled(): centres the image in its box and grows it
+// by the largest integer factor that fits, like drawRaw565InBox().
+struct PngPanelSink {
+  int boxX, boxY, boxW, boxH;
+  int k, x0, y0;
+};
+
+static bool pngPanelSize(void* user, int w, int h) {
+  PngPanelSink* s = (PngPanelSink*)user;
+  if (w > s->boxW || h > s->boxH) return false;
+  s->k = min(s->boxW / w, s->boxH / h);
+  s->x0 = s->boxX + (s->boxW - w * s->k) / 2;
+  s->y0 = s->boxY + (s->boxH - h * s->k) / 2;
+  return true;
+}
+
+static bool pngPanelRow(void* user, int y, const uint16_t* row, int w) {
+  static uint16_t grown[TARGET_WIDTH];
+  PngPanelSink* s = (PngPanelSink*)user;
+  if (s->k == 1) {
+    display.pushImage(s->x0, s->y0 + y, w, 1, row);
+    return true;
+  }
+  for (int x = 0; x < w; x++)
+    for (int j = 0; j < s->k; j++) grown[x * s->k + j] = row[x];
+  for (int j = 0; j < s->k; j++)
+    display.pushImage(s->x0, s->y0 + y * s->k + j, w * s->k, 1, grown);
+  return true;
+}
+
+// Decodes a PNG straight to the panel, scaled for the box (see PngImage.h;
+// fill selects the screenshot_scaling mode). scaleOut and info, when not
+// null, receive the integer factor used and the decode details.
+static bool drawPngInBox(const char* path, int boxX, int boxY, int boxW, int boxH, bool fill,
+                         int* scaleOut, PngConvInfo* info) {
+  if (!sdCardAvailable) return false;
+  if (boxW > TARGET_WIDTH) boxW = TARGET_WIDTH;
+  PngPanelSink s = { boxX, boxY, boxW, boxH, 1, 0, 0 };
+  display.startWrite();
+  bool ok = decodePngScaled(SD, path, boxW, boxH, fill, pngPanelSize, pngPanelRow, &s, info);
+  display.endWrite();
+  if (scaleOut) *scaleOut = s.k;
+  return ok;
+}
+
+// Width and height stored in a .565 header, false if unreadable.
+static bool raw565Size(const String& path, int* w, int* h) {
+  File f = SD.open(path);
+  if (!f) return false;
+  uint8_t head[4];
+  bool ok = f.read(head, 4) == 4;
+  f.close();
+  if (!ok) return false;
+  *w = head[0] | (head[1] << 8);
+  *h = head[2] | (head[3] << 8);
+  return true;
+}
+
+// Game image from a PNG, in the same box as displayCoreImageCentered().
+// Palette and grayscale PNGs are decoded straight to the panel. RGB ones are
+// too, unless PNG_RGB_VIA_565 says this board reads a .565 faster: then they
+// are drawn from a .565 beside the PNG, made on first use and remade whenever
+// it is not the size the current box calls for (kiosk mode and
+// screenshot_scaling both change that).
+static bool displayGamePngCentered(const String& pngPath) {
+  int w = 0, h = 0, type = -1;
+  if (!sdCardAvailable || !pngReadHeader(SD, pngPath.c_str(), &w, &h, &type)) return false;
+  g_artBoxW = TARGET_WIDTH;
+  g_artBoxH = KIOSK_MODE ? TARGET_HEIGHT : IMAGE_AREA_HEIGHT;
+  Lcd.fillScreen(THEME_BLACK);
+
+  PngConvInfo info;
+  if (PNG_RGB_VIA_565 && (type == 2 || type == 6)) {
+    String raw = pngPath.substring(0, pngPath.lastIndexOf('.')) + ".565";
+    int wantW = 0, wantH = 0, haveW = -1, haveH = -1;
+    pngFitSize(w, h, g_artBoxW, g_artBoxH, SCREENSHOT_FILL, &wantW, &wantH);
+    if (!raw565Size(raw, &haveW, &haveH) || haveW != wantW || haveH != wantH) {
+      if (!convertPngTo565(SD, pngPath.c_str(), raw.c_str(), g_artBoxW, g_artBoxH,
+                           SCREENSHOT_FILL, &info)) {
+        Serial.printf("[PNG] %s: no .565 (%s), decoding directly\n",
+                      pngPath.c_str(), info.error);
+      } else {
+        Serial.printf("[PNG] .565 %dx%d made in %u ms (writing %u ms), largest block %u\n",
+                      info.outW, info.outH, (unsigned)info.ms, (unsigned)info.sinkMs,
+                      (unsigned)info.largestBlock);
+      }
+    }
+    if (drawRaw565InBox(raw.c_str(), 0, 0, g_artBoxW, g_artBoxH, nullptr)) return true;
+  }
+
+  // A .565 left by an earlier firmware is dead weight where this board decodes
+  // RGB directly; it can be over 1 MB.
+  if (!PNG_RGB_VIA_565 && (type == 2 || type == 6)) {
+    String raw = pngPath.substring(0, pngPath.lastIndexOf('.')) + ".565";
+    if (SD.exists(raw)) SD.remove(raw);
+  }
+
+  int k = 1;
+  bool ok = drawPngInBox(pngPath.c_str(), 0, 0, g_artBoxW, g_artBoxH, SCREENSHOT_FILL, &k, &info);
+  Serial.printf("[PNG] %s %dx%d -> %dx%d x%d, %u ms (panel %u ms), largest block %u%s%s\n",
+                pngPath.c_str(), info.srcW, info.srcH, info.outW, info.outH, k,
+                (unsigned)info.ms, (unsigned)info.sinkMs, (unsigned)info.largestBlock,
+                ok ? "" : ", failed: ", ok ? "" : info.error);
+  return ok;
+}
+
+// Decodes a JPEG screenshot straight to the panel, scaled for the box like
+// drawPngInBox() (see JpegImage.h).
+static bool drawJpegInBox(const char* path, int boxX, int boxY, int boxW, int boxH, bool fill,
+                          int* scaleOut, PngConvInfo* info) {
+  if (!sdCardAvailable) return false;
+  if (boxW > TARGET_WIDTH) boxW = TARGET_WIDTH;
+  PngPanelSink s = { boxX, boxY, boxW, boxH, 1, 0, 0 };
+  display.startWrite();
+  bool ok = decodeJpegScaled(jpeg, SD, path, boxW, boxH, fill, pngPanelSize, pngPanelRow, &s, info);
+  display.endWrite();
+  if (scaleOut) *scaleOut = s.k;
+  return ok;
+}
+
+// Screenshot or title screen stored as JPEG, in the same box and with the same
+// screenshot_scaling as the PNG ones. False for a JPEG the decoder refuses
+// (progressive): the caller then falls back to the box-art path.
+static bool displayGameJpegCentered(const String& jpgPath) {
+  if (!sdCardAvailable) return false;
+  g_artBoxW = TARGET_WIDTH;
+  g_artBoxH = KIOSK_MODE ? TARGET_HEIGHT : IMAGE_AREA_HEIGHT;
+  Lcd.fillScreen(THEME_BLACK);
+  PngConvInfo info;
+  int k = 1;
+  bool ok = drawJpegInBox(jpgPath.c_str(), 0, 0, g_artBoxW, g_artBoxH, SCREENSHOT_FILL, &k, &info);
+  Serial.printf("[JPG] %s %dx%d -> %dx%d x%d, %u ms (panel %u ms), largest block %u%s%s\n",
+                jpgPath.c_str(), info.srcW, info.srcH, info.outW, info.outH, k,
+                (unsigned)info.ms, (unsigned)info.sinkMs, (unsigned)info.largestBlock,
+                ok ? "" : ", failed: ", ok ? "" : info.error);
+  return ok;
+}
+
+// Shows a cached game image whatever its format. Screenshots and title screens
+// follow screenshot_scaling, PNG or JPEG; box art and the rest keep the JPEG
+// artwork path and image_upscale.
+bool displayGameImage(const String& imagePath) {
+  if (imagePath.endsWith(".png")) return displayGamePngCentered(imagePath);
+  if ((imagePath.endsWith(".snap.jpg") || imagePath.endsWith(".title.jpg")) &&
+      displayGameJpegCentered(imagePath)) return true;
+  return displayCoreImageCentered(imagePath);
+}
+
+// Decodes a logo file to the panel, centred horizontally. yTop < 0 centres it
+// vertically too. halfScale decodes at half size, which is how one file
+// serves both screens.
+static bool drawStandbyLogoFile(const char* path, int yTop, bool halfScale) {
+  if (!sdCardAvailable || !SD.exists(path)) return false;
+  File f = SD.open(path);
+  if (!f) return false;
+  size_t fileSize = f.size();
+  if (fileSize < 4 || fileSize > STANDBY_LOGO_MAX_BYTES) { f.close(); return false; }
+  uint8_t* buf = (uint8_t*)malloc(fileSize);
+  if (!buf) { f.close(); return false; }
+  f.read(buf, fileSize);
+  f.close();
+
+  bool ok = false;
+  if (buf[0] == 0xFF && buf[1] == 0xD8 && jpeg.openRAM(buf, fileSize, standbyLogoBlock)) {
+    int w = jpeg.getWidth()  / (halfScale ? 2 : 1);
+    int h = jpeg.getHeight() / (halfScale ? 2 : 1);
+    int x = (TARGET_WIDTH - w) / 2;
+    int y = (yTop < 0) ? (TARGET_HEIGHT - h) / 2 : yTop;
+    jpeg.setPixelType(RGB565_BIG_ENDIAN);
+    ok = jpeg.decode(x, y, halfScale ? JPEG_SCALE_HALF : 0);
+    jpeg.close();
+  }
+  free(buf);
+  return ok;
+}
+
+static void drawStandbyLogoText(int yTop) {
+  const char* label = "MiSTer FPGA";
+  int size = 2;
+  display.setTextSize(size);
+  display.setTextColor(standbyDimColor(THEME_WHITE), THEME_BLACK);
+  display.setCursor((TARGET_WIDTH - (int)strlen(label) * 6 * size) / 2,
+                    yTop < 0 ? (TARGET_HEIGHT - 8 * size) / 2 : yTop);
+  display.print(label);
+}
+
+// Link state as a steady dot in the bottom right corner: cyan while the
+// MiSTer answers, orange while it does not. Repainted only on a change.
+static void drawStandbyLinkDot() {
+  int link = connected ? 1 : 0;
+  if (link == standbyDrawnLink) return;
+  int cx = TARGET_WIDTH  - STANDBY_DOT_MARGIN;
+  int cy = TARGET_HEIGHT - STANDBY_DOT_MARGIN;
+  display.fillCircle(cx, cy, STANDBY_DOT_R,
+                     standbyDimColor(connected ? THEME_CYAN : THEME_ORANGE));
+
+  // Label, right-aligned so it ends just before the dot: the two states are
+  // different lengths, and this keeps the dot where the eye expects it. The
+  // longer state sets the width of the band that is cleared first.
+  const char* label = connected ? "MiSTer ONLINE" : "MiSTer OFFLINE";
+  const int charW   = 6 * STANDBY_TEXT_SIZE;
+  int right = cx - STANDBY_DOT_R - STANDBY_LABEL_GAP;
+  int band  = 14 * charW;
+  display.fillRect(right - band, cy - 4 * STANDBY_TEXT_SIZE, band, 8 * STANDBY_TEXT_SIZE,
+                   THEME_BLACK);
+  display.setTextSize(STANDBY_TEXT_SIZE);
+  display.setTextColor(standbyDimColor(connected ? STANDBY_LABEL_ONLINE
+                                                 : STANDBY_LABEL_OFFLINE), THEME_BLACK);
+  display.setCursor(right - (int)strlen(label) * charW, cy - 4 * STANDBY_TEXT_SIZE);
+  display.print(label);
+  standbyDrawnLink = link;
+}
+
+// Black screen, the logo at its centre, the link dot in the corner, and the
+// backlight breathing.
+static void drawStandbyMinimal(bool fullRedraw) {
+  if (fullRedraw) {
+    display.fillScreen(THEME_BLACK);
+    if (!drawStandbyLogoRaw(STANDBY_LOGO_RAW_PATH, -1) &&
+        !drawStandbyLogoFile(STANDBY_LOGO_PATH, -1, false)) {
+      drawStandbyLogoText(-1);
+    }
+    standbyDrawnLink = -1;
+  }
+  drawStandbyLinkDot();
+  standbyBacklightBreathe();
+}
+
+// ---- Clock screen: logo, seven-segment time, date, link status lines ----
+// Segments are drawn as shapes, not taken from a font: they stay sharp at any
+// size, and lit and unlit segments cover exactly the same pixels, so a digit
+// changes without clearing anything and without flicker.
+static void drawStandbySegH(int x0, int x1, int yc, int t, uint16_t color) {
+  int h = t / 2;
+  display.fillRect(x0 + h, yc - h, (x1 - x0) - 2 * h + 1, 2 * h + 1, color);
+  display.fillTriangle(x0, yc, x0 + h, yc - h, x0 + h, yc + h, color);
+  display.fillTriangle(x1, yc, x1 - h, yc - h, x1 - h, yc + h, color);
+}
+
+static void drawStandbySegV(int xc, int y0, int y1, int t, uint16_t color) {
+  int h = t / 2;
+  display.fillRect(xc - h, y0 + h, 2 * h + 1, (y1 - y0) - 2 * h + 1, color);
+  display.fillTriangle(xc, y0, xc - h, y0 + h, xc + h, y0 + h, color);
+  display.fillTriangle(xc, y1, xc - h, y1 - h, xc + h, y1 - h, color);
+}
+
+// mask bits: 0 top, 1 upper right, 2 lower right, 3 bottom, 4 lower left,
+// 5 upper left, 6 middle. A zero mask draws the digit fully unlit.
+static void drawStandbyDigit(int x, int mask) {
+  const int t = STANDBY_DIGIT_T, j = STANDBY_SEG_JOIN;
+  int left = x + t / 2, right = x + STANDBY_DIGIT_W - t / 2;
+  int top  = STANDBY_DIGIT_Y + t / 2;
+  int mid  = STANDBY_DIGIT_Y + STANDBY_DIGIT_H / 2;
+  int bot  = STANDBY_DIGIT_Y + STANDBY_DIGIT_H - t / 2;
+  auto color = [mask](int bit) -> uint16_t {
+    return standbyDimColor(((mask >> bit) & 1) ? STANDBY_SEG_LIT : STANDBY_SEG_GHOST);
+  };
+  drawStandbySegH(left + j, right - j, top, t, color(0));
+  drawStandbySegV(right, top + j, mid - j, t, color(1));
+  drawStandbySegV(right, mid + j, bot - j, t, color(2));
+  drawStandbySegH(left + j, right - j, bot, t, color(3));
+  drawStandbySegV(left, mid + j, bot - j, t, color(4));
+  drawStandbySegV(left, top + j, mid - j, t, color(5));
+  drawStandbySegH(left + j, right - j, mid, t, color(6));
+}
+
+// Text window of the two bottom lines, in characters of the default
+// fixed-width font, and where it starts.
+static int standbyLineChars() {
+  return (TARGET_WIDTH - 2 * STANDBY_LINE_MARGIN) / (6 * STANDBY_TEXT_SIZE);
+}
+
+// A line that fits is centred. One that does not starts at the left edge of
+// the window and scrolls inside it, so whatever sits to its left stays put.
+static int standbyLineX(int length) {
+  if (length > standbyLineChars()) return STANDBY_LINE_MARGIN;
+  return (TARGET_WIDTH - length * 6 * STANDBY_TEXT_SIZE) / 2;
+}
+
+// Repaints a line only when its visible part changed. A scrolling line is
+// padded to the full window, so each step overwrites the previous one and
+// nothing has to be cleared.
+static void drawStandbyScrollLine(ScrollTextState* state, String* drawn, int x, int y,
+                                  uint16_t color) {
+  String visible = getScrolledText(state);
+  if (visible == *drawn) return;
+  *drawn = visible;
+  if (state->needsScroll) {
+    while ((int)visible.length() < state->maxChars) visible += ' ';
+  }
+  display.setTextSize(STANDBY_TEXT_SIZE);
+  display.setTextColor(standbyDimColor(color), THEME_BLACK);
+  display.setCursor(x, y);
+  display.print(visible);
+}
+
+static void drawStandbyClock(bool fullRedraw, const struct tm* t) {
+  static const uint8_t segMask[10] = { 0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
+  static const char* const dayName[7]    = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
+  static const char* const monthName[12] = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                                             "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+  const int total = 4 * STANDBY_DIGIT_W + STANDBY_COLON_W + 4 * STANDBY_DIGIT_GAP;
+  const int x0    = (TARGET_WIDTH - total) / 2;
+  const int step  = STANDBY_DIGIT_W + STANDBY_DIGIT_GAP;
+  const int digitX[4] = { x0, x0 + step,
+                          x0 + 2 * step + STANDBY_COLON_W + STANDBY_DIGIT_GAP,
+                          x0 + 3 * step + STANDBY_COLON_W + STANDBY_DIGIT_GAP };
+
+  if (fullRedraw) {
+    display.fillScreen(THEME_BLACK);
+    // A dedicated clock logo wins; without one the main logo goes in at half size.
+    if (STANDBY_CLOCK_LOGO_Y >= 0 &&
+        !drawStandbyLogoFile(STANDBY_CLOCK_LOGO_PATH, STANDBY_CLOCK_LOGO_Y, false) &&
+        !drawStandbyLogoFile(STANDBY_LOGO_PATH, STANDBY_CLOCK_LOGO_Y, true)) {
+      drawStandbyLogoText(STANDBY_CLOCK_LOGO_Y);
+    }
+    uint16_t lit = standbyDimColor(STANDBY_SEG_LIT);
+    int cx = x0 + 2 * step + STANDBY_COLON_W / 2;
+    int d  = STANDBY_DIGIT_T;
+    display.fillRect(cx - d / 2, STANDBY_DIGIT_Y + STANDBY_DIGIT_H / 3 - d / 2, d, d, lit);
+    display.fillRect(cx - d / 2, STANDBY_DIGIT_Y + 2 * STANDBY_DIGIT_H / 3 - d / 2, d, d, lit);
+    display.fillRect(TARGET_WIDTH / 4, STANDBY_RULE_Y, TARGET_WIDTH / 2, 1, standbyDimColor(0x4208));
+    for (int i = 0; i < 4; i++) standbyDrawnMask[i] = -1;
+    standbyDrawnDay   = -1;
+    standbyDrawnAmPm  = -1;
+    standbyDrawnLink  = -1;
+    standbyDrawnPulse = -1;
+  }
+  standbyBacklightWrite(255);
+
+  // Time. With clock_24h off the leading zero of the hour stays unlit.
+  int hour = standbyDisplayHour(t);
+  int mask[4] = { segMask[hour / 10], segMask[hour % 10],
+                  segMask[t->tm_min / 10], segMask[t->tm_min % 10] };
+  if (!CLOCK_24H && hour < 10) mask[0] = 0;
+  for (int i = 0; i < 4; i++) {
+    if (mask[i] == standbyDrawnMask[i]) continue;
+    drawStandbyDigit(digitX[i], mask[i]);
+    standbyDrawnMask[i] = mask[i];
+  }
+  if (!CLOCK_24H) {
+    int pm = t->tm_hour >= 12 ? 1 : 0;
+    if (pm != standbyDrawnAmPm) {
+      display.setTextSize(STANDBY_TEXT_SIZE);
+      display.setTextColor(standbyDimColor(0x0410), THEME_BLACK);
+      display.setCursor(x0 + total + 4, STANDBY_DIGIT_Y + STANDBY_DIGIT_H - 8 * STANDBY_TEXT_SIZE);
+      display.print(pm ? "PM" : "AM");
+      standbyDrawnAmPm = pm;
+    }
+  }
+
+  // Date, in a proportional font. The default font goes back in afterwards:
+  // the rest of the interface assumes it.
+  if (t->tm_yday != standbyDrawnDay) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%s  %d  %s  %d", dayName[t->tm_wday % 7], t->tm_mday,
+             monthName[t->tm_mon % 12], t->tm_year + 1900);
+    display.fillRect(0, STANDBY_DATE_Y - 2, TARGET_WIDTH, STANDBY_DATE_BAND_H, THEME_BLACK);
+    display.setFont(&STANDBY_DATE_FONT);
+    display.setTextSize(1);
+    display.setTextColor(standbyDimColor(THEME_YELLOW), THEME_BLACK);
+    display.setCursor((TARGET_WIDTH - (int)display.textWidth(buf)) / 2, STANDBY_DATE_Y);
+    display.print(buf);
+    display.setFont(&fonts::Font0);
+    standbyDrawnDay = t->tm_yday;
+  }
+
+  // Link status line, with the running game on a line of its own under it.
+  // Core and game changes end standby, so the link state is the only part of
+  // this that can change while the screen is up.
+  int link = connected ? 1 : 0;
+  if (link != standbyDrawnLink) {
+    standbyShowGame = connected && currentGame.length() > 0;
+    String line     = connected ? String("MiSTer ONLINE - ") + foldForDisplay(currentCore)
+                                : String("MiSTer OFFLINE");
+    String game     = standbyShowGame ? foldForDisplay(currentGame) : String("");
+    display.fillRect(0, STANDBY_STATUS_TOP, TARGET_WIDTH, STANDBY_STATUS_BAND_H, THEME_BLACK);
+    initScrollText(&standbyStatusScroll, line, standbyLineChars());
+    initScrollText(&standbyGameScroll,   game, standbyLineChars());
+    standbyStatusX     = standbyLineX(line.length());
+    standbyGameX       = standbyLineX(game.length());
+    standbyStatusLineY = standbyShowGame ? STANDBY_STATUS_Y : STANDBY_STATUS_Y_ALONE;
+    standbyStatusColor = connected ? 0x05E0 : 0xBBE0;
+    standbyDrawnStatus = "";
+    standbyDrawnGame   = "";
+    // The dot sits left of where the status text starts, outside the scroll window.
+    standbyStatusDotX  = standbyStatusX - 3 * STANDBY_STATUS_DOT_R;
+    standbyStatusDotY  = standbyStatusLineY + 4 * STANDBY_TEXT_SIZE;
+    standbyDrawnLink   = link;
+    standbyDrawnPulse  = -1;
+  }
+  drawStandbyScrollLine(&standbyStatusScroll, &standbyDrawnStatus, standbyStatusX,
+                        standbyStatusLineY, standbyStatusColor);
+  if (standbyShowGame) {
+    drawStandbyScrollLine(&standbyGameScroll, &standbyDrawnGame, standbyGameX,
+                          STANDBY_GAME_Y, 0xBDE0);
+  }
+
+  // Status dot, pulsing slowly in the colour of the link state.
+  int pulse = standbyBreathLevel(millis(), STANDBY_STATUS_PULSE_MS);
+  if (pulse != standbyDrawnPulse) {
+    int r = connected ? 0   : 255;
+    int g = connected ? 255 : 165;
+    display.fillCircle(standbyStatusDotX, standbyStatusDotY, STANDBY_STATUS_DOT_R,
+                       standbyDimColor(display.color565(r * pulse / 255, g * pulse / 255, 0)));
+    standbyDrawnPulse = pulse;
+  }
+}
+
+// The clock screen needs a valid time. Until there is one the minimal screen
+// stands in, and the clock takes over on its own once the sync lands.
+static void drawStandbyScreen(bool fullRedraw) {
+  static int drawnScreen = -1;
+  struct tm tmNow;
+  int screen = (STANDBY_SCREEN_CLOCK && standbyLocalTime(&tmNow)) ? 1 : 0;
+  if (screen != drawnScreen) fullRedraw = true;
+  drawnScreen = screen;
+  if (screen == 1) drawStandbyClock(fullRedraw, &tmNow);
+  else             drawStandbyMinimal(fullRedraw);
+}
+
+// Put back whatever was on screen before standby, from the current state.
+static void standbyRestoreScreen() {
+  if (standbyFromImage && sdCardAvailable) {
+    if (currentGame.length() > 0 && !currentCore.equalsIgnoreCase("MENU")) {
+      showGameSlide();
+    } else {
+      showCoreImageScreenWithAutoDownload(currentCore);
+    }
+    showingCoreImage   = true;
+    coreImageStartTime = millis();
+    lastCoreCheck      = millis();
+  } else {
+    showingCoreImage = false;
+    backgroundLoaded = false;
+    needsRedraw      = true;
+  }
+}
+
+void loop() {
+  Board.update();
+  screenshotServer.handleClient();  // Non-blocking screenshot server poll
+
+  // Update requested from the /update page. Runs here, not in the handler:
+  // handleClient() is pumped from inside drawing and download code, and a
+  // reflash started there would re-enter all of it. Sits above the standby
+  // block on purpose: the request came from a browser, so the panel may be
+  // dark, and the update must not wait for a wake tap.
+  if (firmwareWebRequested) {
+    firmwareWebRequested = false;
+    runFirmwareUpdate("web");
+    needsRedraw = true;
+    if (standbyActive) drawStandbyScreen(true);
+  }
+
+  // --- Periodic MiSTer re-discovery while offline ---------------------------
+  // Discovery runs once at boot. If the MiSTer wasn't on the network yet
+  // (e.g. its IP delayed by a CIFS mount), boot-time discovery fails and the
+  // display would stay OFFLINE forever. While disconnected, re-broadcast
+  // periodically to pick the MiSTer up once it appears, then refresh state.
+  {
+    static unsigned long lastRediscovery = 0;
+    const unsigned long  REDISCOVERY_INTERVAL_MS = 10000;
+    if (!connected && WiFi.status() == WL_CONNECTED &&
+        millis() - lastRediscovery > REDISCOVERY_INTERVAL_MS) {
+      lastRediscovery = millis();
+      Serial.println("[REDISCOVERY] Offline — re-broadcasting for MiSTer...");
+      if (discoverMister(2, 400)) {        // quick probe (<=0.8s); sets misterIP
+        Serial.printf("[REDISCOVERY] Found at %s — refreshing state\n", misterIP);
+        updateMiSTerData();                // getCurrentCore() sets connected on HTTP 200
+        needsRedraw = true;
+      }
+    }
+  }
+  // --------------------------------------------------------------------------
+  // --- Standby ---------------------------------------------------------------
+  // Sits below the re-discovery block, which keeps probing for the MiSTer
+  // while the link is down, and above everything that draws. The wake tap is
+  // spent by returning: the touch edge is gone by the next pass.
+  {
+    bool touched = Board.Touch.getDetail().wasPressed();
+    if (standbyActive) {
+      standbyPoll();
+      if (connected) pollRA();
+      int wake = standbyWakeReason(touched);
+      if (wake == STANDBY_WAKE_NONE) {
+        wasConnected = connected;
+        drawStandbyScreen(false);
+        delay(20);
+        return;
+      }
+      standbyLeave(wake);
+      standbyBacklightEnd();
+      standbyRestoreScreen();
+      if (wake == STANDBY_WAKE_TOUCH) return;
+    } else {
+      standbyObserve(touched);
+      if (standbyShouldEnter()) {
+        standbyEnter();
+        standbyBacklightBegin();
+        drawStandbyScreen(true);
+        return;
+      }
+    }
+  }
+  // Reconnect banner: fire on any OFFLINE -> ONLINE transition, no matter which
+  // path restored the link (re-discovery, screensaver refresh, normal polling).
+  if (connected && !wasConnected) {
+    Serial.println("[RECONNECT] Link restored — showing banner");
+    showReconnectBanner();
+    delay(2400);
+    needsRedraw = true;          // repaint normal UI over the banner next loop
+  }
+  wasConnected = connected;
+
+  // RetroAchievements ready banner: armed by getRAStatus() when a game with
+  // achievements is newly matched. Sits here, above the screensaver block, so
+  // it fires in every mode — including over the fullscreen artwork, which is
+  // exactly where a game normally starts.
+  // Version mismatch warning: armed by getStateSnapshot() on the first poll
+  // that reveals server and firmware are out of step. Shown before the RA
+  // banner because it explains why anything else may be misbehaving.
+  if (versionMismatchPending) {
+    versionMismatchPending = false;
+    // A mismatch the MiSTer can fix is offered as an update; any other kind
+    // (server older than us, no image for this board, or a board still on
+    // the single-slot layout that must be reflashed by cable) is only
+    // reported, and /update explains why.
+    if (firmwareOffer.available && firmwareOtaCapable()) showUpdateOfferBanner();
+    else                                                 showVersionMismatchBanner();
+    needsRedraw = true;
+  }
+
+  if (raBannerPending) {
+    raBannerPending = false;
+    Serial.println("[RA] Game with achievements loaded — showing banner");
+    showRAReadyBanner();
+    needsRedraw = true;          // repaint normal UI over the banner next loop
+  }
+
+  // SAFETY: Check for critical memory levels every 30 seconds
+  static unsigned long lastMemoryCheck = 0;
+  if (millis() - lastMemoryCheck > 30000) {
+    size_t freeHeap    = ESP.getFreeHeap();
+    size_t freePsram   = psramFound() ? ESP.getFreePsram() : 0;
+    size_t largestFree = ESP.getMaxAllocHeap();
+    Serial.printf("[HEAP] Free: %u B | Largest block: %u B | PSRAM free: %u KB\n",
+                  freeHeap, largestFree, freePsram / 1024);
+
+    if (freeHeap < 50000) {
+      Serial.printf("[HEAP] CRITICAL: %u bytes free — running forceMemoryCleanup()\n", freeHeap);
+      forceMemoryCleanup();
+
+      if (ESP.getFreeHeap() < 30000) {
+        // Log all memory state before intentional restart
+        Serial.printf("[HEAP] EMERGENCY RESTART: heap %u < 30000 bytes\n", ESP.getFreeHeap());
+        Serial.printf("[HEAP] PSRAM free: %u bytes\n", freePsram);
+        Serial.printf("[HEAP] This restart is intentional (SW_RESET reason on next boot)\n");
+        delay(200);  // Flush serial
+        ESP.restart();
+      }
+    }
+    lastMemoryCheck = millis();
+  }
+
+  if (showingCoreImage) {
+    // Kiosk mode: the footer stays up for a while after every repaint, then
+    // goes dark until the next tap. Timed from the last paint, not from the
+    // slide clock, so slide changes and banners each get a dwell.
+    if (KIOSK_MODE && g_imageFooterVisible &&
+        millis() - g_imageFooterShownAt > (unsigned long) KIOSK_HIDE_DELAY_MS) {
+      hideImageFooter();
+    }
+
+  // There is no timed exit from image mode. The slide clock
+  // (coreImageStartTime) is consumed by the rotation block below, and a
+  // core without a game keeps its image up until the 10 s state check sees
+  // a real change. Leaving and re-entering on a timer used to redraw the
+  // same artwork from scratch (a visible clear + decode every
+  // core_image_timeout), and at short timeouts it also pre-empted the
+  // game/system rotation.
+
+  // In image mode: ANY touch exits to interface
+  // We don't need to check specific buttons, any touch will do
+  auto touch = Board.Touch.getDetail();
+  if (touch.wasPressed()) {
+    int tx = touch.x;
+    int ty = touch.y;
+
+    // Kiosk mode: a tap on a dark footer brings it back and stops there.
+    // Leaving image mode or opening GAME INFO takes a second tap, on a
+    // footer the user can see.
+    if (KIOSK_MODE && !g_imageFooterVisible) {
+      Serial.println("Touch detected - restoring footer (kiosk mode)");
+      restoreImageFooter();
+      return;
+    }
+
+    // === GAME INFO button: right third of the footer band ===
+    // Matches btnNext's x range (213..320) in the HUD, and the footer band
+    // starts at y=200. Only active when a game is loaded, which is exactly
+    // when the button is drawn.
+    // Tested with the SAME predicate that decides whether the button is drawn:
+    // when it is hidden this falls through to the default "exit to monitor".
+    if (currentGame.length() > 0 && tx >= 213 && ty >= 200 && gameInfoAvailable()) {
+      Serial.println("GAME INFO button pressed - opening panel");
+
+      // Same feedback contract as buttonPressFeedback(): flash white, beep,
+      // hold 200 ms. No restore needed — the panel replaces this screen.
+      drawGameInfoIcon(true);
+      playNextButtonSound();
+      delay(200);
+
+      currentPage           = 5;
+      gameInfoSubPage       = 0;
+      gameInfoSubPageChange = millis();
+      gameInfoFromRotation  = false;   // opened on demand: full panel lifecycle
+      resetGameInfoSynScroll();
+      showingCoreImage      = false;
+      backgroundLoaded      = false;
+      needsRedraw           = true;
+      lastButtonPress       = millis();
+      return;
+    }
+
+  // === Default: exit to monitor ===
+    Serial.println("Touch detected - exiting core image to interface");
+    Lcd.fillRect(0, 0, 320, 40, THEME_CYAN);
+    Lcd.setTextSize(2);
+    Lcd.setTextColor(THEME_BLACK);
+    Lcd.setCursor(100, 12);
+    Lcd.print("LOADING...");
+    showingCoreImage         = false;
+    backgroundLoaded         = false;
+    needsRedraw              = true;
+    lastButtonPress          = millis();
+    return;
+  }
+    
+    // Check core and game changes every 10 seconds
+    if (millis() - lastCoreCheck > 10000) {
+      String oldCore = currentCore;
+      String oldGame = currentGame;
+      Serial.println("Checking core/game change while showing image...");
+      if (!getStateSnapshot()) {
+        getCurrentCore();
+        getCurrentGame();
+      }
+      
+      // Check if game changed first (higher priority)
+      if (oldGame != currentGame && sdCardAvailable) {
+        showingGameImage = true; // New game: the cycle restarts on its image
+        gameInfoFromRotation = false;  // slide belonged to the previous game
+        String coreNameLower = currentCore;
+  coreNameLower.toLowerCase();
+  bool isMameCore = (coreNameLower == "arcade");
+  
+  if (isMameCore && oldGame != currentGame) {
+    Serial.printf("Arcade game change during display - forcing subsystem reset\n");
+    Serial.printf("Previous game: '%s'\n", oldGame.c_str());
+    Serial.printf("Current game: '%s'\n", currentGame.c_str());
+    Serial.printf("Previous lastArcadeSystemeId: '%s'\n", lastArcadeSystemeId.c_str());
+    
+    // Force subsystem reset for game change during display
+    lastArcadeSystemeId = "";
+    lastProcessedGame = "";
+    forceSubsystemUpdate = true;
+    
+    Serial.printf("Cleared subsystem state for display game change\n");
+  }
+        if (currentGame.length() > 0) {
+  Serial.printf("Game changed during display: '%s' -> '%s'\n", oldGame.c_str(), currentGame.c_str());
+  if (isMameCore) {
+      Serial.printf("Calling subsystem update during display for Arcade...\n");
+      updateArcadeSubsystemForCurrentGameEnhanced(currentCore, currentGame, forceSubsystemUpdate);
+      forceSubsystemUpdate = false; // Reset flag after use
+    } else {
+      updateArcadeSubsystemForCurrentGame(currentCore, currentGame);
+    }
+  startCrcRecurrentForGame(currentGame, currentCore);
+  
+  showGameSlide();
+} else {
+  Serial.println("Game unloaded, showing core image");
+  lastArcadeSystemeId = "";
+    lastProcessedGame = "";
+    forceSubsystemUpdate = false;
+    Serial.printf("Cleared subsystem state on display game unload\n");
+  stopCrcRecurrent();
+  
+  showCoreImageScreenWithAutoDownload(currentCore);
+}
+        coreImageStartTime = millis(); // Reset timer
+      }
+      // Check if core changed (ALWAYS update core image when core changes, regardless of game state)
+      else if (oldCore != currentCore && sdCardAvailable) {
+        Serial.printf("Core changed during display: '%s' -> '%s'\n", oldCore.c_str(), currentCore.c_str());
+        coreDownloadFailedFor = "";  // New core — allow download attempt
+        // If there's an active game, show game image, otherwise show core image
+        if (currentGame.length() > 0) {
+          Serial.printf("Core changed with active game, showing game image for new core\n");
+          showGameSlide();
+        } else {
+          Serial.printf("Core changed without game, showing core image\n");
+          showCoreImageScreenWithAutoDownload(currentCore);
+        }
+        coreImageStartTime = millis(); // Reset timer
+      }
+      
+      lastCoreCheck = millis();
+    }
+    
+  // Rotation logic for games (only when game is active and core is not MENU)
+  // Rotation debug logging
+  static unsigned long lastRotationLog = 0;
+  if (millis() - lastRotationLog > 5000) { // Log every 5 seconds
+    Serial.printf("ROTATION STATUS: game='%s', core='%s', showingGameImage=%s, slide age=%lu ms (target: %lu)\n",
+                  currentGame.c_str(), currentCore.c_str(),
+                  showingGameImage ? "true" : "false",
+                  millis() - coreImageStartTime, currentSlideTimeout());
+    lastRotationLog = millis();
+  }
+
+  // Rotation logic for games (only when game is active and core is not MENU).
+  // Static image modes never toggle: the opening slide is the only slide.
+    if (IMAGE_MODE == IMAGE_MODE_ROTATE && currentGame.length() > 0 && currentCore != "MENU") {
+      // The slide clock is coreImageStartTime, restamped by every draw site;
+      // each half of the cycle has its own dwell (core_image_timeout for the
+      // game image, system_image_timeout for the system image).
+      if (millis() - coreImageStartTime > currentSlideTimeout()) {
+        // GAME INFO slide ([gameinfo] info_in_rotation): an interstitial on the
+        // game -> core leg, so the cycle reads game -> info -> core. It sits
+        // second for a reason: every game change resets the rotation to the
+        // game image, so a third-place slide only surfaces 60 s in — longer
+        // than a SAM game often lives, which is exactly the audience that asked
+        // for this. showingGameImage stays true across the slide: we are still
+        // in the game half of the cycle, and the hand-back flips it to false so
+        // the core image follows.
+        if (showingGameImage && gameInfoRotationReady()) {
+          Serial.println("ROTATION: GAME INFO slide");
+          currentPage           = 5;
+          gameInfoSubPage       = 0;
+          gameInfoSubPageChange = millis();
+          gameInfoFromRotation  = true;
+          resetGameInfoSynScroll();
+          showingCoreImage      = false;   // page 5 is a monitor page
+          backgroundLoaded      = false;
+          needsRedraw           = true;
+          lastButtonPress       = millis();  // no screensaver while it shows
+          return;
+        }
+
+        showingGameImage = !showingGameImage;
+        
+        if (showingGameImage) {
+          showGameSlide();
+        } else {
+          showCoreImageScreenWithAutoDownload(currentCore);
+        }
+        coreImageStartTime = millis(); // Reset main timer
+      }
+    }
+
+    if (showingCoreImage) {
+      // Animate the GAME: scroll on any fullscreen image screen that has a
+      // game name in the footer (game image, core image with GAME line,
+      // menu image with overlay). Frozen while the footer is dark: the band
+      // belongs to the artwork then, and repainting the title into it leaves
+      // the name floating on its own.
+      if (currentGame.length() > 0 && g_imageFooterVisible) {
+        static unsigned long lastFooterUpdate = 0;
+        if (millis() - lastFooterUpdate > 100) {
+          if (imageFooterScroll.needsScroll && imageFooterScroll.fullText.length() > 0) {
+            String scrolledText = getScrolledText(&imageFooterScroll);
+            
+            // Pad the visible window to a constant character count so the
+            // pixel width is stable across frames. This is what lets us use
+            // setTextColor(fg, bg) without leaving stale glyphs at the right.
+            int targetLen = imageFooterScroll.maxChars;
+            while ((int)scrolledText.length() < targetLen) {
+              scrolledText += ' ';
+            }
+            
+            // CYD: match addGameImageFooter()/drawCoreImageFooter() layout
+            // exactly — the GAME: value is drawn at x=46, y=210, size 1.
+            Lcd.setTextWrap(false);
+            Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+            Lcd.setTextSize(1);
+            Lcd.setCursor(46, 210);
+            Lcd.print(scrolledText);
+          }
+          lastFooterUpdate = millis();
+        }
+      }
+    }
+
+    // RetroAchievements live layer — MUST run while the fullscreen artwork is
+    // up. The return just below is the real screensaver early-exit (every
+    // iteration while showingCoreImage), so poll the unlock counter and
+    // paint/restore the popup over the image right here, before we bail out.
+    pollRA();
+    serviceRAPopup();
+
+    // Don't continue with rest of loop while showing image
+    return;
+  }
+  
+  // === NORMAL INTERFACE CODE ===
+  
+  // Check timeout to activate screensaver
+  // The GAME INFO panel governs its own exit when it has a synopsis to show:
+  // it leaves as soon as the text has finished scrolling, however long that
+  // takes. The 1-min timeout is only a fallback for panels that never reach
+  // that state (no metadata, or metadata without a synopsis). Both funnel into
+  // the same return-to-image path below rather than duplicating it.
+  bool gameInfoSelfExits = (currentPage == 5 && currentMeta.loaded &&
+                            currentMeta.synopsis.length() > 0);
+  unsigned long screensaverTimeout =
+      (currentPage == 5) ? GAMEINFO_SCREEN_TIMEOUT : SCREENSAVER_TIMEOUT;
+  bool timeToLeave =
+      (!gameInfoSelfExits && millis() - lastButtonPress > screensaverTimeout) ||
+      (currentPage == 5 && gameInfoForceExit);
+  gameInfoForceExit = false;                 // one-shot: never latches
+  if (!showingCoreImage && sdCardAvailable && timeToLeave
+      && (currentCore != coreDownloadFailedFor || currentGame.length() > 0 || FORCE_CORE_REDOWNLOAD)) {
+    Serial.println("=== SCREENSAVER ACTIVATION ANALYSIS ===");
+    Serial.printf("Current core: '%s'\n", currentCore.c_str());
+    Serial.printf("Current game: '%s'\n", currentGame.c_str());
+    Serial.printf("Connected: %s\n", connected ? "YES" : "NO");
+    Serial.printf("Time since last button: %lu ms\n", millis() - lastButtonPress);
+
+    // Any panel exit funnels through here (synopsis forceExit and the 1-min
+    // fallback both do): release the page-5 residency so a later touch exit
+    // from image mode lands on the monitor page instead of resurrecting the
+    // panel with expired lifecycle timers. The slide clock is restamped at
+    // the end of this block, after the draw, so the image below always gets
+    // a full slot before the rotation can fire again.
+    if (currentPage == 5) {
+      currentPage      = 0;
+      gameInfoSubPage  = 0;
+      resetGameInfoSynScroll();   // safe: gameInfoForceExit already consumed above
+    }
+    
+    // Force fresh data check before screensaver
+    Serial.println("Forcing fresh data check before screensaver...");
+    String oldCore = currentCore;
+    String oldGame = currentGame;
+    
+    // Get fresh data from MiSTer
+    if (!getStateSnapshot()) {
+      getCurrentCore();
+      getCurrentGame();
+    }
+    
+    if (oldCore != currentCore) {
+      Serial.printf("Core changed during screensaver check: '%s' -> '%s'\n", oldCore.c_str(), currentCore.c_str());
+    }
+    if (oldGame != currentGame) {
+      Serial.printf("Game changed during screensaver check: '%s' -> '%s'\n", oldGame.c_str(), currentGame.c_str());
+    }
+    
+    Serial.println("Activating screensaver - showing image due to inactivity");
+    
+    bool isArcadeCore = (currentCore.equalsIgnoreCase("mame") || 
+                         currentCore.equalsIgnoreCase("arcade"));
+    bool hasActiveGame = (currentGame.length() > 0);
+    bool shouldShowGame = false;
+    
+    if (hasActiveGame && (currentCore != "MENU" && currentCore != "Menu")) {
+      shouldShowGame = true;
+      Serial.printf("Active game detected: '%s' on core '%s'\n", currentGame.c_str(), currentCore.c_str());
+    } else if (isArcadeCore && !hasActiveGame) {
+      Serial.printf("Arcade core without game - checking if game detection failed\n");
+      // For arcade cores, try to show core image even without detected game
+      shouldShowGame = false;
+    } else if (currentCore == "MENU" || currentCore == "Menu") {
+      Serial.printf("Menu core detected - showing menu image\n");
+      shouldShowGame = false;
+    } else {
+      Serial.printf("No active game, showing core image for: '%s'\n", currentCore.c_str());
+      shouldShowGame = false;
+    }
+    
+    if (shouldShowGame) {
+      Serial.printf("Showing game image: '%s' on '%s'\n", currentGame.c_str(), currentCore.c_str());
+      showGameSlide();   // every entry into image mode restarts the cycle
+    } else {
+      Serial.printf("Showing core image for: '%s'\n", currentCore.c_str());
+      showCoreImageScreenWithAutoDownload(currentCore);
+    }
+    
+    showingCoreImage = true;
+    coreImageStartTime = millis();
+    lastCoreCheck = millis();
+    Serial.printf("Set showingCoreImage = true, timestamp = %lu\n", coreImageStartTime);
+    Serial.println("=== SCREENSAVER ACTIVATION COMPLETE ===");
+    return;
+  }
+  
+  // Navigation with debounce
+  handleTouch();
+
+  // === RETROACHIEVEMENTS: counter poll (page path) ==========================
+  // The screensaver path polls and services the popup inside its own block
+  // above (before that block's return). Here we cover the page path; the
+  // page-path popup is serviced after the page render, further down.
+  pollRA();
+
+  if (showingCoreImage) return;
+
+  static unsigned long lastStateLog = 0;
+  if (millis() - lastStateLog > 30000) {
+    Serial.printf("STATE: currentGame='%s', crcRecurrentActive=%s, downloadInProgress=%s\n", 
+                  currentGame.c_str(), 
+                  crcRecurrentActive ? "YES" : "NO",
+                  downloadInProgress ? "YES" : "NO");
+    lastStateLog = millis();
+  }
+
+  processCrcRecurrent();
+
+  // Update data every 60 seconds (1 minute)
+  if (millis() - lastUpdate > 60000) {
+    String oldCore = currentCore;
+    String oldGame = currentGame;
+    updateMiSTerData();
+    
+    
+// Detect game change with arcade subsystem reset
+if (oldGame != currentGame && sdCardAvailable) {
+  showingGameImage = true; // New game: the cycle restarts on its image
+  Serial.printf("=== ENHANCED GAME CHANGE DETECTED ===\n");
+  Serial.printf("Previous game: '%s' (length: %d)\n", oldGame.c_str(), oldGame.length());
+  Serial.printf("Current game: '%s' (length: %d)\n", currentGame.c_str(), currentGame.length());
+  Serial.printf("Current core: '%s'\n", currentCore.c_str());
+  Serial.printf("SD card available: %s\n", sdCardAvailable ? "YES" : "NO");
+  
+  // CRITICAL: For Arcade core game changes, force subsystem reset
+  String coreNameLower = currentCore;
+  coreNameLower.toLowerCase();
+  bool isMameCore = (coreNameLower == "arcade");
+  
+  if (isMameCore) {
+    Serial.printf("Arcade core detected - preparing for subsystem update\n");
+    Serial.printf("Previous processed game: '%s'\n", lastProcessedGame.c_str());
+    Serial.printf("Current lastArcadeSystemeId: '%s'\n", lastArcadeSystemeId.c_str());
+    
+    // FORCE subsystem reset for any game change in Arcade
+    if (oldGame != currentGame) {
+      Serial.printf("FORCING subsystem reset due to game change\n");
+      lastArcadeSystemeId = "";           // Clear old subsystem
+      lastProcessedGame = "";             // Clear processed game tracker
+      forceSubsystemUpdate = true;        // Force update flag
+      gameChangeTime = millis();          // Record change time
+      
+      Serial.printf("Cleared subsystem state for new arcade game\n");
+    }
+  }
+  
+  if (currentGame.length() > 0) {
+    Serial.printf("Game loaded: '%s' on core '%s'\n", currentGame.c_str(), currentCore.c_str());
+    
+    // Update subsystem with special handling for Arcade
+    if (isMameCore) {
+      Serial.printf("Calling ENHANCED subsystem update for Arcade with force=%s...\n", 
+                   forceSubsystemUpdate ? "YES" : "NO");
+      updateArcadeSubsystemForCurrentGameEnhanced(currentCore, currentGame, forceSubsystemUpdate);
+      forceSubsystemUpdate = false; // Reset flag after use
+    } else {
+      // For non-Arcade cores, use original function
+      updateArcadeSubsystemForCurrentGame(currentCore, currentGame);
+    }
+    
+    startCrcRecurrentForGame(currentGame, currentCore);
+    
+    Serial.printf("Calling showGameSlide()...\n");
+    showGameSlide();
+    Serial.printf("showGameSlide() returned\n");
+  } else if (oldGame.length() > 0) {
+    Serial.println("Game unloaded, returning to core image");
+    
+    // Clear ALL subsystem-related state when unloading game
+    lastArcadeSystemeId = "";
+    lastProcessedGame = "";
+    forceSubsystemUpdate = false;
+    Serial.printf("Cleared ALL subsystem state on game unload\n");
+    
+    stopCrcRecurrent();
+    
+    Serial.printf("Calling showCoreImageScreenWithAutoDownload()...\n");
+    showCoreImageScreenWithAutoDownload(currentCore);
+    Serial.printf("showCoreImageScreenWithAutoDownload() returned\n");
+  }
+  
+  showingCoreImage = true;
+  coreImageStartTime = millis();
+  lastButtonPress = millis();
+  Serial.printf("Set showingCoreImage = true\n");
+  Serial.printf("=== ENHANCED GAME CHANGE HANDLING COMPLETE ===\n");
+}
+    
+    // Detect core change with detailed logging (only if no game active)
+    if (oldCore != currentCore && currentGame.length() == 0 && sdCardAvailable) {
+      Serial.printf("\n=== CORE CHANGE DETECTED ===\n");
+      Serial.printf("Previous core: '%s'\n", oldCore.c_str());
+      Serial.printf("Current core: '%s'\n", currentCore.c_str());
+      Serial.printf("No active game (length: %d)\n", currentGame.length());
+      Serial.printf("Calling showCoreImageScreenWithAutoDownload()...\n");
+      showCoreImageScreenWithAutoDownload(currentCore);
+      Serial.printf("showCoreImageScreenWithAutoDownload() returned\n");
+      
+      showingCoreImage = true;
+      coreImageStartTime = millis();
+      lastButtonPress = millis(); // Reset screensaver timer for automatic image display
+      Serial.printf("Set showingCoreImage = true, timestamp = %lu\n", coreImageStartTime);
+      Serial.printf("=== CORE CHANGE HANDLING COMPLETE ===\n");
+      return;
+    }
+    
+    needsRedraw = true;
+    lastUpdate = millis();
+  }
+
+  
+  // === GAME INFO subpage handling ===========================================
+  // Lifecycle of the panel when left alone:
+  //   subpage 1/2 (fields)   -> 30 s, then flip to the synopsis
+  //   subpage 2/2 (synopsis) -> exactly as long as its scroll takes, plus a
+  //                             2 s tail, then exit back to the game image
+  // A synopsis short enough to need no scrolling dwells for GAMEINFO_SYN_FIT_MS.
+  // Nothing here touches lastButtonPress, so the 1-min fallback timeout still
+  // rescues the panel when there is no metadata (and hence no synopsis) at all.
+  {
+    static int giLastPage = -1;
+    if (currentPage == 5 && !showingCoreImage) {
+      if (giLastPage != 5) {
+        gameInfoSubPage = 0;
+        gameInfoSubPageChange = millis();
+        resetGameInfoSynScroll();
+      } else if (gameInfoFromRotation && gameInfoSubPage == 0) {
+        // Rotation slide: 1/2 only, for the same 30 s the other slides get,
+        // then hand back to the core image. Checked before the on-demand
+        // lifecycle below and without requiring a synopsis: a slide must leave
+        // on the beat whether or not there is a second subpage to flip to,
+        // rather than fall through to the 1-min fallback and stall the cycle.
+        // Touching the panel clears gameInfoFromRotation, so this branch stops
+        // applying the moment the user takes over.
+        if (millis() - gameInfoSubPageChange > GAMEINFO_SUBPAGE_TIMEOUT) {
+          Serial.println("ROTATION: GAME INFO slide done - back to core image");
+          gameInfoFromRotation = false;
+          currentPage          = 0;       // release page-5 residency: a later
+                                          // touch exit from image mode must
+                                          // land on the monitor page, not here
+          showingGameImage     = false;   // the core image is next in the cycle
+          showCoreImageScreenWithAutoDownload(currentCore);
+          showingCoreImage     = true;
+          coreImageStartTime   = millis();
+          lastButtonPress      = millis();
+          // giLastPage stays 5 for the whole image phase (its maintenance
+          // line sits below the image-mode early return, so image iterations
+          // never reach it); the clean-re-entry guard cannot be relied on
+          // after this exit — the currentPage reset above is what actually
+          // prevents an unintended panel resurrection.
+          return;
+        }
+      } else if (currentMeta.loaded && currentMeta.synopsis.length() > 0) {
+        if (gameInfoSubPage == 0) {
+          if (millis() - gameInfoSubPageChange > GAMEINFO_SUBPAGE_TIMEOUT) {
+            gameInfoSubPage = 1;
+            gameInfoSubPageChange = millis();
+            resetGameInfoSynScroll();
+            needsRedraw = true;
+          }
+        } else {
+          tickGameInfoSynScroll();
+          if (gameInfoSynCycled) {
+            // Manual mode (info_scroll_auto=false) always uses the long FIT dwell
+            // (15 s) so the reader has time on a synopsis that never scrolled.
+            // Auto mode keeps the original choice: the short EXIT tail when it
+            // scrolled, the long FIT dwell when it fit without scrolling.
+            unsigned long dwell = (!gameInfoSynAuto || !gameInfoSynNeedsScroll())
+                                  ? GAMEINFO_SYN_FIT_MS : GAMEINFO_SYN_EXIT_MS;
+            if (millis() - gameInfoSynCycledTime >= dwell) {
+              Serial.println("GAME INFO: synopsis finished — returning to image");
+              gameInfoForceExit = true;
+            }
+          }
+        }
+      }
+    }
+    // Leaving the panel (or any page) for image mode forces a clean re-entry.
+    giLastPage = showingCoreImage ? -1 : currentPage;
+  }
+
+  // === RETROACHIEVEMENTS subpage lifecycle ===================================
+  // Re-enter page 6 on the progress panel; the trophy-list buffer itself is
+  // per-game (getRAStatus() resets it when game_id changes).
+  {
+    static int raLastPageSeen = -1;
+    if (currentPage == 6 && !showingCoreImage && raLastPageSeen != 6) {
+      raSubPage = 0;
+      raDetailShown = false;
+    }
+    raLastPageSeen = showingCoreImage ? -1 : currentPage;
+  }
+
+  // Only redraw when necessary
+  if (needsRedraw) {
+    updateDisplay();
+    needsRedraw = false;
+  }
+  
+  static unsigned long lastFooterScrollUpdate = 0;
+  if (millis() - lastFooterScrollUpdate > 100) { // Update every 100ms
+    // Page 5 (GAME INFO) draws no game name in the footer, so nothing to scroll.
+    if (!showingCoreImage && currentPage != 5 && gameFooterScroll.needsScroll) {
+      String textToShow = (currentGame.length() > 0) ? currentGame : currentCore;
+
+      if (gameFooterScroll.fullText == textToShow) {
+        // Match drawFooter() row 1 exactly: size 1, the value starts right
+        // after the 2-char "G:"/"C:" label at x = FOOTER_MID_X(78) + 2*6 = 90,
+        // y = 214. Only the value zone is repainted (label is static);
+        // flicker-free via setTextColor(fg, bg).
+        const int nameX = 78 + 2 * 6;   // 90
+
+        String displayText = getScrolledText(&gameFooterScroll);
+        while ((int)displayText.length() < gameFooterScroll.maxChars) {
+          displayText += ' ';
+        }
+
+        Lcd.setTextWrap(false);
+        Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+        Lcd.setTextSize(1);
+        Lcd.setCursor(nameX, 214);
+        Lcd.print(displayText);
+      }
+    }
+    lastFooterScrollUpdate = millis();
+  }
+  // Refresh the core name scroll on the main HUD page (page 0).
+  static unsigned long lastMainHUDCoreUpdate = 0;
+  if (currentPage == 0 && !showingCoreImage &&
+      millis() - lastMainHUDCoreUpdate > 100) {
+    if (mainHUDCoreScroll.needsScroll) {
+      String displayText = getScrolledText(&mainHUDCoreScroll);
+      while ((int)displayText.length() < mainHUDCoreScroll.maxChars) {
+        displayText += ' ';
+      }
+      
+      // Same physical position as Lcd.setCursor(20, 80) at size 3 inside
+      // the panel of color = (connected ? THEME_GREEN : THEME_YELLOW).
+      // Lcd maps (20,80) → physical (130, 360). Width: 14 chars × 12 px logical
+      // × 2 scale × 1 (size 3 doubles per glyph at 6px logical → 12 logical
+      // × 2 scale = 24 px per char, 14 × 24 = 336 px wide).
+      uint16_t panelColor = connected ? THEME_GREEN : THEME_YELLOW;
+      Lcd.setTextColor(THEME_BLACK, panelColor);
+      Lcd.setTextSize(3);
+      Lcd.setCursor(20, 80);
+      Lcd.print(displayText);
+    }
+    lastMainHUDCoreUpdate = millis();
+  }
+
+  // Scroll the game title on the GAME INFO page (5). Repaints only the title
+  // row, at exactly the same cursor/size/colours displayGameInfo() uses, so
+  // it stays in sync across subpage flips without a full redraw.
+  static unsigned long lastGameInfoTitleUpdate = 0;
+  if (currentPage == 5 && !showingCoreImage &&
+      millis() - lastGameInfoTitleUpdate > 100) {
+    if (gameInfoTitleScroll.needsScroll) {
+      String displayTitle = getScrolledText(&gameInfoTitleScroll);
+      while ((int)displayTitle.length() < gameInfoTitleScroll.maxChars) {
+        displayTitle += ' ';
+      }
+      Lcd.setTextWrap(false);
+      Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+      Lcd.setTextSize(2);
+      Lcd.setCursor(10, 40);
+      Lcd.print(displayTitle);
+    }
+    lastGameInfoTitleUpdate = millis();
+  }
+
+  // Scroll any over-long grid value (genre, developer, publisher...) on the
+  // fields subpage. Each row repaints only its value column, at the y that
+  // displayGameInfo() recorded when it centred the block.
+  static unsigned long lastGameInfoRowUpdate = 0;
+  if (currentPage == 5 && !showingCoreImage && gameInfoSubPage == 0 &&
+      millis() - lastGameInfoRowUpdate > 100) {
+    Lcd.setTextWrap(false);
+    Lcd.setTextColor(THEME_WHITE, THEME_BLACK);
+    Lcd.setTextSize(1.5);
+    for (int r = 0; r < 6; r++) {
+      if (!gameInfoRowShown[r] || !gameInfoRowScroll[r].needsScroll) continue;
+      String v = getScrolledText(&gameInfoRowScroll[r]);
+      while ((int)v.length() < gameInfoRowScroll[r].maxChars) v += ' ';
+      Lcd.setCursor(GI_VAL_X, gameInfoRowY[r]);
+      Lcd.print(v);
+    }
+    lastGameInfoRowUpdate = millis();
+  }
+  
+  // === RETROACHIEVEMENTS: unlock popup lifecycle (PAGE path) ================
+  // Runs after the page has rendered so the popup lands on top. The image
+  // path services the same function above the screensaver early-return.
+  serviceRAPopup();
+
+  // === RETROACHIEVEMENTS: last-unlock title scroll (page 6) ==================
+  static unsigned long lastRAScrollUpdate = 0;
+  if (currentPage == 6 && !showingCoreImage && raSubPage == 0 &&
+      raStatus.valid && raStatus.status == "ok" && raUnlockScroll.needsScroll &&
+      millis() - lastRAScrollUpdate > 100) {
+    String raShown = getScrolledText(&raUnlockScroll);
+    while ((int)raShown.length() < raUnlockScroll.maxChars) raShown += ' ';
+    Lcd.setTextWrap(false);
+    Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(46, 162);
+    Lcd.print(raShown);
+    lastRAScrollUpdate = millis();
+  }
+
+  // Subtle animations only for specific elements
+  if (millis() - animTimer > 1000) {
+    blinkState = (blinkState + 1) % 4;
+    
+    // Only update status indicators without clearing screen
+    if (currentPage == 0) {
+      drawStatusIndicator(307, 15, connected ? THEME_GREEN : THEME_RED, connected && blinkState < 2);
+    }
+    animTimer = millis();
+  }
+  
+  // Poll fast on the GAME INFO page too: its title/grid scroll refreshers make
+  // each iteration longer, and at a 100 ms cadence a quick tap on the subpage
+  // indicator can fall entirely between two touch samples. The refreshers keep
+  // their own 100 ms timers, so this only raises the touch sampling rate.
+  // Page 6 gets the same treatment now that its subpage indicator is tappable.
+  delay(needsRedraw || showingCoreImage ||
+        currentPage == 5 || currentPage == 6 ? 10 : 100);
+}
+
+void initSDCard() {
+  Serial.println("\n=== Initializing SD card ===");
+  
+  // Give WiFi time to stabilize
+  delay(500);
+  
+  // Try to initialize SD
+  if (SD.begin(TFCARD_CS_PIN, sdSPI, 25000000)) {
+    sdCardAvailable = true;
+    Serial.println("SD card initialized successfully");
+    
+    // Basic verification without consuming much memory
+    uint8_t cardType = SD.cardType();
+    if (cardType == CARD_NONE) {
+      Serial.println("No SD card detected");
+      sdCardAvailable = false;
+      return;
+    }
+    
+    Serial.printf("Card type: %s\n", 
+                  cardType == CARD_MMC ? "MMC" :
+                  cardType == CARD_SD ? "SDSC" :
+                  cardType == CARD_SDHC ? "SDHC" : "UNKNOWN");
+    
+    // Verify only that main directory exists
+    if (SD.exists(CORE_IMAGES_PATH)) {
+      Serial.printf("Directory found: %s\n", CORE_IMAGES_PATH);
+    } else {
+      Serial.printf("Creating directory: %s\n", CORE_IMAGES_PATH);
+      if (!SD.mkdir(CORE_IMAGES_PATH)) {
+        Serial.println("Error creating directory");
+        sdCardAvailable = false;
+        return;
+      }
+    }
+    
+    // Create subdirectories only if enabled
+    if (ENABLE_ALPHABETICAL_FOLDERS) {
+      // Create # folder for numbers
+      String numDir = String(CORE_IMAGES_PATH) + "/#";
+      if (!SD.exists(numDir)) SD.mkdir(numDir);
+      
+      // Create some basic folders (not all)
+      char basicFolders[] = {'A', 'G', 'M', 'N', 'S'};
+      for (char c : basicFolders) {
+        String subdir = String(CORE_IMAGES_PATH) + "/" + String(c);
+        if (!SD.exists(subdir)) SD.mkdir(subdir);
+      }
+      Serial.println("Basic subdirectories created");
+    }
+    
+  } else {
+    sdCardAvailable = false;
+    Serial.println("Error initializing SD card");
+  }
+}
+
+// Implementation of the debug function (add this with other functions)
+void checkMisterDebugState() {
+  /**
+   * Quick debug check when Menu state is detected
+   * Helps diagnose if MiSTer is really in menu or there's a detection issue
+   */
+  
+  // Only check occasionally to avoid spam
+  static unsigned long lastDebugCheck = 0;
+  if (millis() - lastDebugCheck < 15000) { // Every 15 seconds max
+    return;
+  }
+  lastDebugCheck = millis();
+  
+  Serial.println("=== QUICK MISTER DEBUG CHECK ===");
+  
+  HTTPClient http;
+  String url = String("http://") + misterIP + ":8081/status/debug/game";
+  
+  http.begin(url);
+  http.setTimeout(3000); // Quick timeout
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+  
+  int code = http.GET();
+  
+  if (code == 200) {
+    String response = http.getString();
+    Serial.printf("Game debug: %s\n", response.substring(0, 200).c_str());
+    
+    // Quick check for arcade indicators in debug response
+    if (response.indexOf("arcade") > 0) {
+      Serial.println("DEBUG: Arcade activity detected despite Menu core!");
+    }
+    
+    if (response.indexOf("\"game\":\"\"") < 0 && response.indexOf("game") > 0) {
+      Serial.println("DEBUG: Game activity detected despite Menu core!");
+    }
+  } else {
+    Serial.printf("Debug endpoint failed: HTTP %d\n", code);
+  }
+  
+  http.end();
+  Serial.println("=== DEBUG CHECK COMPLETE ===");
+}
+
+void checkServerErrorState() {
+  /**
+   * Check server error state using the new endpoint
+   * ONLY executes if there's successful connection (doesn't add load on errors)
+   */
+  
+  // Only check occasionally to avoid overload
+  static unsigned long lastErrorCheck = 0;
+  unsigned long now = millis();
+  if (now - lastErrorCheck < 30000) { // Every 30 seconds
+    return;
+  }
+  lastErrorCheck = now;
+  
+  HTTPClient http;
+  String url = String("http://") + misterIP + ":8081/status/error_state";
+  
+  http.begin(url);
+  http.setTimeout(3000); // Short timeout
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+  
+  int code = http.GET();
+  
+  if (code == 200) {
+    String response = http.getString();
+    
+    // ULTRA SIMPLE JSON PARSING - Only look for specific fields
+    if (response.indexOf("\"has_error\":true") > 0) {
+      serverHasError = true;
+      
+      // Extract error type (simple parsing without libraries)
+      int errorStart = response.indexOf("\"error_state\":\"") + 15;
+      if (errorStart > 14) {
+        int errorEnd = response.indexOf("\"", errorStart);
+        if (errorEnd > errorStart && errorEnd - errorStart < 50) {
+          serverErrorType = response.substring(errorStart, errorEnd);
+          Serial.printf("Server reports error: %s\n", serverErrorType.c_str());
+        }
+      }
+    } else {
+      serverHasError = false;
+      serverErrorType = "";
+    }
+  }
+  
+  http.end();
+}
+
+void showGameImageScreen(String coreName, String gameName) {
+  Serial.printf("\n=== GAME IMAGE SCREEN (REDIRECT TO STREAMING-SAFE) ===\n");
+  Serial.printf("Core: '%s' | Game: '%s'\n", coreName.c_str(), gameName.c_str());
+
+
+
+  Serial.printf("Redirecting to streaming-safe version...\n");
+  
+  // Redirect to the improved streaming-safe version
+  showGameImageScreenCorrected(coreName, gameName);
+  
+  Serial.printf("=== REDIRECT COMPLETE ===\n");
+}
+
+
+bool findCoreImage(String coreName, String &imagePath) {
+  Serial.printf("=== ENHANCED CORE IMAGE FINDER ===\n");
+  Serial.printf("Core: '%s'\n", coreName.c_str());
+  Serial.printf("lastArcadeSystemeId: '%s' (length: %d)\n", lastArcadeSystemeId.c_str(), lastArcadeSystemeId.length());
+  
+  // prioritize subsystem image if available and confirmed
+  String coreNameLower = coreName;
+  coreNameLower.toLowerCase();
+  if (coreNameLower == "arcade" && lastArcadeSystemeId.length() > 0) {
+    // Try subsystem-specific image first
+    String subsystemCoreName = "Arcade_" + lastArcadeSystemeId;
+    String safeSubsystemName = sanitizeCoreFilename(subsystemCoreName);
+    String subsystemPath;
+    
+    if (ENABLE_ALPHABETICAL_FOLDERS) {
+      String alphabetPath = getAlphabeticalPath(subsystemCoreName);
+      subsystemPath = alphabetPath + "/" + safeSubsystemName + ".jpg";
+    } else {
+      subsystemPath = String(CORE_IMAGES_PATH) + "/" + safeSubsystemName + ".jpg";
+    }
+    
+    Serial.printf("Checking subsystem-specific image: %s\n", subsystemPath.c_str());
+    
+    if (SD.exists(subsystemPath)) {
+      imagePath = subsystemPath;
+      Serial.printf("Found subsystem-specific image: %s\n", imagePath.c_str());
+      return true;
+    } else {
+      Serial.printf("Subsystem-specific image not found: %s\n", subsystemPath.c_str());
+      
+      // Emergency download: lastArcadeSystemeId present means ScreenScraper
+      // already validated this subsystem — attempt download immediately.
+      if (ENABLE_AUTO_DOWNLOAD && WiFi.status() == WL_CONNECTED && !downloadInProgress) {
+        Serial.printf("Attempting emergency download of subsystem image...\n");
+        
+        // Force download of subsystem image
+        if (downloadCoreImageFromScreenScraper("arcade", true)) {
+          Serial.printf("Emergency download successful!\n");
+          
+          // Check if it exists now
+          if (SD.exists(subsystemPath)) {
+            imagePath = subsystemPath;
+            Serial.printf("Now using downloaded subsystem image: %s\n", imagePath.c_str());
+            return true;
+          }
+        } else {
+          Serial.printf("Emergency download failed\n");
+        }
+      }   // if (ENABLE_AUTO_DOWNLOAD)
+    }     // else (SD.exists)
+  }       // if (coreNameLower == "arcade")
+  
+  // Search for generic image (original logic)
+  // Sanitize coreName so '/' in friendly names like "Nintendo NES/Famicom"
+  // does not turn into a phantom subdirectory.
+  String safeCoreName = sanitizeCoreFilename(coreName);
+  if (ENABLE_ALPHABETICAL_FOLDERS) {
+    String alphabetPath = getAlphabeticalPath(safeCoreName);
+    imagePath = alphabetPath + "/" + safeCoreName + ".jpg";
+  } else {
+    imagePath = String(CORE_IMAGES_PATH) + "/" + safeCoreName + ".jpg";
+  }
+  
+  Serial.printf("Checking generic image: %s\n", imagePath.c_str());
+  
+  if (SD.exists(imagePath)) {
+    Serial.printf("Found generic image: %s\n", imagePath.c_str());
+    return true;
+  }
+  
+  Serial.printf("No image found for core: %s\n", coreName.c_str());
+  return false;
+}
+
+String getAlphabeticalPath(String coreName) {
+  if (coreName.length() == 0) return String(CORE_IMAGES_PATH) + "/A";
+  
+  char firstChar = coreName.charAt(0);
+  
+  // If starts with number (0-9), use "#" folder
+  if (firstChar >= '0' && firstChar <= '9') {
+    return String(CORE_IMAGES_PATH) + "/#";
+  }
+  // If starts with lowercase letter, convert to uppercase
+  else if (firstChar >= 'a' && firstChar <= 'z') {
+    return String(CORE_IMAGES_PATH) + "/" + String((char)(firstChar - 32));
+  }
+  // If starts with uppercase letter, use as is
+  else if (firstChar >= 'A' && firstChar <= 'Z') {
+    return String(CORE_IMAGES_PATH) + "/" + String(firstChar);
+  }
+  // For other characters, use "#" folder
+  else {
+    return String(CORE_IMAGES_PATH) + "/#";
+  }
+}
+
+// Callback for JPEG decoder
+int jpegDrawCallback(JPEGDRAW *pDraw) {
+  // Debug: log first call to verify callback is being invoked
+  static bool firstCall = true;
+  if (firstCall) {
+    Serial.printf("jpegDrawCallback: First block at (%d,%d) size %dx%d\n", 
+                  pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight);
+    Serial.printf("  Applying global offset: (%d,%d)\n", g_jpegOffsetX, g_jpegOffsetY);
+    firstCall = false;
+  }
+  
+  // Apply global offset for centering (JPEGDEC doesn't accept large offsets in decode())
+  // Fine path: this block carries SOURCE pixels of the predecoded image, and
+  // the destination is smaller. Emit only the destination rows and columns
+  // whose source sample falls inside this block, so the blocks tile exactly.
+  if (g_fineActive) {
+    const int blockX = pDraw->x, blockY = pDraw->y;
+    const int blockW = pDraw->iWidth, blockH = pDraw->iHeight;
+
+    int dyFirst = (int)((((uint64_t)blockY << 16) + g_fineYStep - 1) / g_fineYStep);
+    int dyLast  = (int)((((uint64_t)(blockY + blockH) << 16) + g_fineYStep - 1)
+                        / g_fineYStep) - 1;
+    int dxFirst = (int)((((uint64_t)blockX << 16) + g_fineXStep - 1) / g_fineXStep);
+    int dxLast  = (int)((((uint64_t)(blockX + blockW) << 16) + g_fineXStep - 1)
+                        / g_fineXStep) - 1;
+
+    if (dyFirst < 0) dyFirst = 0;
+    if (dxFirst < 0) dxFirst = 0;
+    if (dyLast > g_fineDstH - 1) dyLast = g_fineDstH - 1;
+    if (dxLast > g_fineDstW - 1) dxLast = g_fineDstW - 1;
+    if (dyFirst > dyLast || dxFirst > dxLast) return 1;   // nothing lands here
+
+    const int runLen = dxLast - dxFirst + 1;
+    const int rowCnt = dyLast - dyFirst + 1;
+    const int outX   = dxFirst + g_jpegOffsetX;
+    const int outY   = dyFirst + g_jpegOffsetY;
+
+    if (outX < 0 || outY < 0 || outX + runLen > TARGET_WIDTH ||
+        outY + rowCnt > TARGET_HEIGHT) {
+      return 1;
+    }
+
+    // Resolve the source column for each destination column ONCE per block
+    // rather than once per row: the mapping does not change down the block.
+    if (runLen <= FINE_BLOCK_MAX) {
+      for (int i = 0; i < runLen; i++) {
+        int sx = (int)(((uint64_t)(dxFirst + i) * g_fineXStep) >> 16) - blockX;
+        if (sx < 0) sx = 0;
+        if (sx > blockW - 1) sx = blockW - 1;
+        g_fineCol[i] = (uint16_t)sx;
+      }
+    }
+
+    // One push for the whole block. Emitting a row at a time cost ~13x the
+    // display transactions, which the DSI panel felt badly.
+    if (runLen <= FINE_BLOCK_MAX && rowCnt <= FINE_BLOCK_MAX) {
+      uint16_t *dst = g_fineBlock;
+      for (int dy = dyFirst; dy <= dyLast; dy++) {
+        int srcY = (int)(((uint64_t)dy * g_fineYStep) >> 16) - blockY;
+        if (srcY < 0) srcY = 0;
+        if (srcY > blockH - 1) srcY = blockH - 1;
+        const uint16_t *srcRow = pDraw->pPixels + (srcY * blockW);
+        for (int i = 0; i < runLen; i++) *dst++ = srcRow[g_fineCol[i]];
+      }
+      Lcd.pushImage(outX, outY, runLen, rowCnt, g_fineBlock);
+      return 1;
+    }
+
+    // Fallback: a block wider or taller than one MCU. Should not happen with
+    // setMaxOutputSize(1), but guessing wrong here would write past the buffer,
+    // so fall back to the row-at-a-time path instead of trusting the decoder.
+    for (int dy = dyFirst; dy <= dyLast; dy++) {
+      int srcY = (int)(((uint64_t)dy * g_fineYStep) >> 16) - blockY;
+      if (srcY < 0) srcY = 0;
+      if (srcY > blockH - 1) srcY = blockH - 1;
+      const uint16_t *srcRow = pDraw->pPixels + (srcY * blockW);
+      for (int i = 0; i < runLen; i++) {
+        int srcX = (int)(((uint64_t)(dxFirst + i) * g_fineXStep) >> 16) - blockX;
+        if (srcX < 0) srcX = 0;
+        if (srcX > blockW - 1) srcX = blockW - 1;
+        g_fineRow[i] = srcRow[srcX];
+      }
+      Lcd.pushImage(outX, dy + g_jpegOffsetY, runLen, 1, g_fineRow);
+    }
+    return 1;
+  }
+
+  int finalX = pDraw->x + g_jpegOffsetX;
+  int finalY = pDraw->y + g_jpegOffsetY;
+  
+  // Verify data is within screen bounds and doesn't overlap footer
+  if (finalX >= 0 && finalY >= 0 && 
+      finalX + pDraw->iWidth <= TARGET_WIDTH && 
+      finalY + pDraw->iHeight <= g_artBoxH) {
+    // Use Board.Display directly (not Lcd) for image rendering
+    Lcd.pushImage(finalX, finalY, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels);
+  } else if (finalY + pDraw->iHeight > g_artBoxH &&
+             finalX >= 0 && finalX + pDraw->iWidth <= TARGET_WIDTH) {
+    // Expected: block clips into the footer band. Silenced — not an error.
+  } else {
+    // True out-of-bounds (wrong X or negative Y): log for diagnosis.
+    Serial.printf("jpegDrawCallback: Block out of bounds at (%d,%d) size %dx%d\n",
+                  finalX, finalY, pDraw->iWidth, pDraw->iHeight);
+  }
+  
+  return 1; // Continue decoding
+}
+
+// Helper function to reset callback state for new image
+void resetJpegCallback() {
+  // Can't directly access firstCall, so we'll set a flag
+  // Actually, firstCall is static inside the function, we can't reset it
+  // This is fine - first block logging happens once per session
+}
+
+bool displayCoreImage(String imagePath) {
+  // Use displayCoreImageCentered which now implements callback-based centering
+  // (JPEGDEC doesn't accept large offsets in decode(), so we apply them in the callback)
+  return displayCoreImageCentered(imagePath);
+}
+
+void showCoreImageScreen(String coreName) {
+  // backgroundLoaded = false;
+  String imagePath;
+  
+  Serial.printf("\n=== CORE SCREEN: %s ===\n", coreName.c_str());
+  
+  if (!sdCardAvailable) {
+    Serial.println("SD not available, showing SD error");
+    showSDCardError();
+    return;
+  }
+  
+  if (coreName.length() == 0 || coreName == "NO SERVER" || coreName == "TIMEOUT" || coreName.startsWith("ERROR")) {
+    Serial.printf("Special state detected: '%s' - showing menu with overlay\n", coreName.c_str());
+    showMenuImageWithCoreOverlay(coreName);
+    return;
+  }
+  
+  Serial.printf("Trying to find image for: '%s'\n", coreName.c_str());
+  
+  if (findCoreImage(coreName, imagePath)) {
+    Serial.printf("Image found: %s\n", imagePath.c_str());
+    
+    // Show core image
+    if (displayCoreImage(imagePath)) {
+      Serial.println(imageFooterSuppressed()
+                     ? "Image displayed correctly, footer suppressed (kiosk)"
+                     : "Image displayed correctly, adding footer");
+      
+      // Only add footer with instructions (no header or top overlay)
+      drawCoreImageFooter();
+      
+      Serial.println(imageFooterSuppressed() ? "Footer skipped (kiosk)"
+                                             : "Footer added successfully");
+      return;
+    } else {
+      Serial.println("Error displaying image, fallback to menu image");
+    }
+  } else {
+    Serial.println("No image found for core, showing menu image with overlay");
+  }
+  
+  // Show menu image with core overlay instead of "image not found"
+  showMenuImageWithCoreOverlay(coreName);
+}
+
+void showMenuImageWithCoreOverlay(String coreName) {
+  // backgroundLoaded = false;
+  String menuImagePath;
+  bool menuImageFound = false;
+  
+  Serial.printf("Showing menu image with core overlay for: '%s'\n", coreName.c_str());
+  
+  // ========== SPECIAL CASE: MENU STATE - EARLY DETECTION ==========
+  if (coreName.equalsIgnoreCase("MENU")) {
+    Serial.println("MENU state detected - showing simple menu interface");
+    
+    // Try to find and display menu image
+    String menuPaths[] = {
+      "/cores/menu.jpg",
+      "/cores/MENU.jpg", 
+      "/cores/Menu.jpg",
+      "/cores/main.jpg",
+      "/cores/MAIN.jpg"
+    };
+    
+    // Find menu image
+    for (String path : menuPaths) {
+      if (SD.exists(path)) {
+        File testFile = SD.open(path);
+        if (testFile && testFile.size() > 0) {
+          menuImagePath = path;
+          testFile.close();
+          menuImageFound = true;
+          Serial.printf("Menu image found: %s\n", path.c_str());
+          break;
+        }
+        if (testFile) testFile.close();
+      }
+    }
+    
+    // Display menu image or fallback
+    if (menuImageFound && displayCoreImage(menuImagePath)) {
+      Serial.println("Menu image displayed successfully");
+    } else {
+      // Fallback: show basic menu screen
+      Lcd.fillScreen(THEME_BLACK);
+      Lcd.setTextColor(THEME_CYAN);
+      Lcd.setTextSize(2);
+      Lcd.setCursor(10, 10);
+      Lcd.print("MiSTer Monitor");
+      
+      Lcd.setTextColor(THEME_WHITE);
+      Lcd.setTextSize(1);
+      Lcd.setCursor(10, 50);
+      Lcd.print("Menu Mode");
+    }
+    
+    // CYD: delegate to the shared 320x240-native footer.
+    drawCoreImageFooter();
+    
+    Serial.println("Menu interface displayed without active core overlay");
+    return; // IMPORTANT: Exit here to avoid executing core overlay logic
+  }
+  
+  // ========== MENU IMAGE SEARCH ==========
+  // Try to find menu image for core overlay cases
+  String menuPaths[] = {
+    "/cores/menu.jpg",
+    "/cores/MENU.jpg", 
+    "/cores/Menu.jpg",
+    "/cores/main.jpg",
+    "/cores/MAIN.jpg"
+  };
+  
+  for (String path : menuPaths) {
+    if (SD.exists(path)) {
+      File testFile = SD.open(path);
+      if (testFile && testFile.size() > 0) {
+        menuImagePath = path;
+        testFile.close();
+        menuImageFound = true;
+        Serial.printf("Menu image found: %s\n", path.c_str());
+        break;
+      }
+      if (testFile) testFile.close();
+    }
+  }
+  
+  // ========== IMAGE DISPLAY AND OVERLAY ==========
+  if (menuImageFound && displayCoreImage(menuImagePath)) {
+    Serial.println("Menu image displayed, adding enhanced overlay");
+    
+    // INTEGRATED LOGIC: Determine overlay type based on multiple sources
+    bool isLocalErrorState = (coreName == "NO SERVER" || coreName == "TIMEOUT" || coreName.startsWith("ERROR"));
+    bool shouldShowError = serverHasError || isLocalErrorState;
+    
+    if (shouldShowError) {
+      // ========== INTEGRATED ERROR OVERLAY ==========
+      Serial.println("Showing integrated error overlay");
+      
+      String displayError = "";
+      if (serverHasError && serverErrorType.length() > 0) {
+        displayError = serverErrorType;
+      } else if (isLocalErrorState) {
+        displayError = coreName;
+      } else {
+        displayError = "ERROR";
+      }
+      
+      Lcd.fillRect(1100, 20, 160, 40, THEME_BLACK);
+      Lcd.drawRect(1100, 20, 160, 40, THEME_RED);
+      Lcd.setTextColor(THEME_RED);
+      Lcd.setTextSize(2);
+      Lcd.setCursor(1115, 32);
+      
+      if (displayError == "NO SERVER") {
+        Lcd.print("NO SERVER");
+      } else if (displayError == "TIMEOUT") {
+        Lcd.print("TIMEOUT");
+      } else if (displayError == "OFFLINE") {
+        Lcd.print("OFFLINE");
+      } else if (displayError == "DISCONNECTED") {
+        Lcd.print("DISCONN.");
+      } else if (displayError.startsWith("ERROR")) {
+        Lcd.print("ERROR");
+      } else {
+        Lcd.print(displayError.substring(0, 10));
+      }
+      
+      Serial.printf("Error overlay displayed: %s\n", displayError.c_str());
+    }
+    
+  } else {
+    // ========== FALLBACK IF THERE IS NO MENU IMAGE ==========
+    Serial.println("No menu image found, showing main HUD");
+    displayMainHUD();
+  }
+
+  // ========== FOOTER FOR NON-MENU CORES ==========
+  // CYD: delegate to the shared 320x240-native footer. drawCoreImageFooter()
+  // already handles the hasGame case (GAME: scrolling line) vs the no-game
+  // case (single touch hint).
+  drawCoreImageFooter();
+}
+
+void showCoreNotFoundScreen(String coreName) {
+  /**
+   * Fallback screen when no menu image is available
+   * Shows basic information and error status
+   */
+  Lcd.fillScreen(THEME_BLACK);
+  
+  // Header
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(10, 10);
+  Lcd.print("MiSTer Monitor");
+  
+  // Core info
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(10, 50);
+  Lcd.print("Current Core:");
+  
+  Lcd.setTextColor(THEME_YELLOW);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(10, 70);
+  String displayCore = coreName.length() > 20 ? 
+                      coreName.substring(0, 20) + "..." : coreName;
+  String coreDisplay = displayCore;
+    if (coreDisplay.equalsIgnoreCase("arcade")) {
+      coreDisplay = "Arcade";
+    }
+    Lcd.print(coreDisplay);
+  
+  // Error indicator if needed
+  bool shouldShowError = serverHasError || isErrorCore(coreName);
+  if (shouldShowError) {
+    Lcd.setTextColor(THEME_RED);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(10, 110);
+    Lcd.print("System Status: ERROR");
+    
+    // Show error in absolute top-right corner
+    Lcd.fillRect(1100, 20, 160, 40, THEME_BLACK);
+    Lcd.drawRect(1100, 20, 160, 40, THEME_RED);
+    Lcd.setTextColor(THEME_RED);
+    Lcd.setTextSize(2);
+    Lcd.setCursor(1115, 32);
+    Lcd.print("ERROR");
+  } else {
+    Lcd.setTextColor(THEME_GREEN);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(10, 110);
+    Lcd.print("System Status: ACTIVE");
+  }
+  
+  // Instructions
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(10, 150);
+  Lcd.print("No menu image found");
+  Lcd.setCursor(10, 165);
+  Lcd.print("Check SD card: /cores/menu.jpg");
+  
+  // Footer in PHYSICAL coordinates
+  Lcd.fillRect(0, 621, 1280, 99, THEME_BLACK);
+  Lcd.drawFastHLine(0, 620, 1280, THEME_GREEN);
+  Lcd.setTextColor(THEME_GREEN);
+  Lcd.setTextSize(3);
+  if (!imageFooterSuppressed()) {
+    Lcd.setCursor(350, 660);
+    Lcd.print("Press any button for interface");
+    noteImageFooterShown();
+  }
+  }
+
+/**
+ * Load and display full screen frame image (frame01.jpg)
+ * This serves as the base cyberpunk frame for the entire interface
+ * Returns true if successful
+ */
+bool loadFullScreenFrame(const char* framePath) {
+  if (!sdCardAvailable || !SD.exists(framePath)) {
+    Serial.printf("Frame image not found: %s\n", framePath);
+    return false;
+  }
+  
+  File frameFile = SD.open(framePath);
+  if (!frameFile) {
+    Serial.println("Failed to open frame file");
+    return false;
+  }
+  
+  size_t fileSize = frameFile.size();
+  Serial.printf("Frame image size: %d bytes\n", fileSize);
+  
+  if (fileSize == 0 || fileSize > 500000) {
+    Serial.println("Invalid frame file size");
+    frameFile.close();
+    return false;
+  }
+  
+  // Allocate buffer for frame image
+  uint8_t* buffer = (uint8_t*)malloc(fileSize);
+  if (!buffer) {
+    Serial.println("No memory for frame image");
+    frameFile.close();
+    return false;
+  }
+  
+  size_t bytesRead = frameFile.read(buffer, fileSize);
+  frameFile.close();
+  
+  if (bytesRead != fileSize) {
+    Serial.println("Error reading frame file");
+    free(buffer);
+    return false;
+  }
+  
+  // Verify JPEG signature
+  if (buffer[0] != 0xFF || buffer[1] != 0xD8) {
+    Serial.println("Frame file is not a valid JPEG");
+    free(buffer);
+    return false;
+  }
+  
+  // Callback for full screen frame - no offset, just raw display
+  auto frameCallback = [](JPEGDRAW *pDraw) -> int {
+    Lcd.pushImage(pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels);
+    return 1;
+  };
+  
+  // Decode frame image at position (0,0) - full screen
+  if (jpeg.openRAM(buffer, fileSize, frameCallback)) {
+    jpeg.setPixelType(RGB565_BIG_ENDIAN);
+    bool success = jpeg.decode(0, 0, 0);  // Display at origin (0,0)
+    jpeg.close();
+    free(buffer);
+    
+    if (success) {
+      Serial.println("Full screen frame loaded successfully");
+      return true;
+    } else {
+      Serial.println("Error decoding frame image");
+      return false;
+    }
+  }
+  
+  free(buffer);
+  Serial.println("Failed to open frame JPEG decoder");
+  return false;
+}
+
+/**
+ * Load and display MiSTer logo from SD card
+ * Returns true if successful
+ */
+bool loadMisterLogo(int x, int y) {
+  String logoPath = "/cores/logo_mister.jpg";
+  
+  if (!sdCardAvailable || !SD.exists(logoPath)) {
+    Serial.printf("Logo not found: %s\n", logoPath.c_str());
+    return false;
+  }
+  
+  File logoFile = SD.open(logoPath);
+  if (!logoFile) {
+    Serial.println("Failed to open logo file");
+    return false;
+  }
+  
+  size_t fileSize = logoFile.size();
+  if (fileSize == 0 || fileSize > 100000) {
+    Serial.println("Invalid logo file size");
+    logoFile.close();
+    return false;
+  }
+  
+  uint8_t* buffer = (uint8_t*)malloc(fileSize);
+  if (!buffer) {
+    Serial.println("No memory for logo");
+    logoFile.close();
+    return false;
+  }
+  
+  logoFile.read(buffer, fileSize);
+  logoFile.close();
+  
+  // Verify JPEG signature
+  if (buffer[0] != 0xFF || buffer[1] != 0xD8) {
+    Serial.println("Logo must be JPG format");
+    free(buffer);
+    return false;
+  }
+  
+  // Simple callback for logo
+  auto logoCallback = [](JPEGDRAW *pDraw) -> int {
+    Lcd.pushImage(pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels);
+    return 1;
+  };
+  
+  if (jpeg.openRAM(buffer, fileSize, logoCallback)) {
+    jpeg.setPixelType(RGB565_BIG_ENDIAN);
+    bool success = jpeg.decode(x, y, 0);
+    jpeg.close();
+    free(buffer);
+    return success;
+  }
+  
+  free(buffer);
+  return false;
+}
+
+/**
+ * Draw MiSTer logo in the right panel, above the buttons
+ * Optimized position for frame02.jpg layout
+ * Returns true if logo was loaded from SD, false if text fallback was used
+ */
+void drawMisterLogoRightPanel() {
+  // Draw MiSTer logo in the correct position when frame02.jpg is shown
+  // Logo positioned at (75, 100) - top left corner
+  String logoPath = "/cores/logo_mister.jpg";
+  
+  if (SD.exists(logoPath)) {
+    File logoFile = SD.open(logoPath);
+    if (logoFile) {
+      size_t fileSize = logoFile.size();
+      uint8_t *buffer = (uint8_t*)malloc(fileSize);
+      
+      if (buffer) {
+        size_t bytesRead = logoFile.read(buffer, fileSize);
+        logoFile.close();
+        
+        if (bytesRead == fileSize) {
+          if (jpeg.openRAM(buffer, fileSize, jpegDrawCallback)) {
+            int imgW = jpeg.getWidth();
+            int imgH = jpeg.getHeight();
+            
+            // Position logo at (75, 100)
+            int logoX = 75;
+            int logoY = 100;
+            
+            jpeg.setPixelType(RGB565_BIG_ENDIAN);
+            jpeg.decode(logoX, logoY, 0);
+            jpeg.close();
+            
+            Serial.printf("MiSTer logo drawn at (%d, %d) size %dx%d\n", logoX, logoY, imgW, imgH);
+          }
+        }
+        free(buffer);
+      } else {
+        logoFile.close();
+      }
+    }
+  } else {
+    Serial.println("Warning: logo_mister.jpg not found at /cores/logo_mister.jpg");
+  }
+}
+
+/**
+ * Play button feedback sounds
+ * Each button has a distinct tone for better UX
+ */
+
+// PREV button sound - lower pitch (800 Hz)
+void playPrevButtonSound() {
+  Board.Speaker.tone(800, 80);
+  Serial.println("PREV sound");
+}
+
+void playScanButtonSound() {
+  Board.Speaker.tone(1200, 80);
+  Serial.println("SCAN sound");
+}
+
+void playNextButtonSound() {
+  Board.Speaker.tone(1600, 80);
+  Serial.println("NEXT sound");
+}
+
+/**
+ * Generic button press feedback
+ * Provides visual and audio feedback when a button is pressed
+ * Changes text to white, plays sound, then restores original color
+ */
+void buttonPressFeedback(TouchButton* btn, void (*soundFunction)()) {
+  // Visual feedback: change the label color to white briefly.
+  btn->draw(THEME_WHITE);
+  
+  // Audio feedback
+  soundFunction();
+  
+  // Hold long enough for the user to register the press
+  delay(200);
+  
+  // Restore original label color
+  btn->draw(THEME_CYAN);
+}
+
+/**
+ * Draw cyberpunk frame - now just loads frame01.jpg
+ * If frame image fails, falls back to drawing frame programmatically
+ * Uses bootFrameLoaded flag to avoid reloading
+ */
+void drawCyberpunkFrame() {
+  // If frame already loaded, skip loading
+  if (bootFrameLoaded) {
+    Serial.println("Boot frame already loaded, skipping reload");
+    return;
+  }
+  // Try to load full screen frame image first
+  bool frameLoaded = loadFullScreenFrame("/cores/frame01.jpg");
+  
+  if (frameLoaded) {
+    Serial.println("Using frame01.jpg as frame");
+    bootFrameLoaded = true;  // Mark as loaded
+    return;  // Frame loaded successfully, nothing else needed
+  }
+  
+  // FALLBACK: If frame image not found, draw frame programmatically
+  Serial.println("Frame image not found, drawing programmatic fallback");
+  
+  // Clear screen with black background
+  Lcd.fillScreen(THEME_BLACK);
+  
+  // Draw simple frame as fallback
+  int cornerCut = 30;
+  int frameThick = 3;
+  int margin = 5;
+  
+  int left = margin;
+  int right = 1280 - margin;
+  int top = margin;
+  int bottom = 720 - margin;
+  
+  // Main frame outline
+  for (int t = 0; t < frameThick; t++) {
+    // Top edge
+    Lcd.drawLine(left + cornerCut, top + t, right - cornerCut, top + t, THEME_CYAN);
+    // Bottom edge
+    Lcd.drawLine(left + cornerCut, bottom - t, right - cornerCut, bottom - t, THEME_CYAN);
+    // Left edge
+    Lcd.drawLine(left + t, top + cornerCut, left + t, bottom - cornerCut, THEME_CYAN);
+    // Right edge
+    Lcd.drawLine(right - t, top + cornerCut, right - t, bottom - cornerCut, THEME_CYAN);
+  }
+  
+  // Corner diagonal cuts
+  for (int t = 0; t < frameThick; t++) {
+    Lcd.drawLine(left + t, top + cornerCut, left + cornerCut, top + t, THEME_CYAN);
+    Lcd.drawLine(right - cornerCut, top + t, right - t, top + cornerCut, THEME_CYAN);
+    Lcd.drawLine(left + t, bottom - cornerCut, left + cornerCut, bottom - t, THEME_CYAN);
+    Lcd.drawLine(right - cornerCut, bottom - t, right - t, bottom - cornerCut, THEME_CYAN);
+  }
+  
+  // Center divider line
+  int dividerX = 640;
+  for (int t = 0; t < 2; t++) {
+    Lcd.drawFastVLine(dividerX + t, top + 50, bottom - top - 100, THEME_CYAN);
+  }
+  bootFrameLoaded = true;  // Mark as loaded even if using fallback
+}
+
+/**
+ * Draw progress squares (5 squares that turn from blue to green)
+ * Position: (470, 170) - repositioned for new layout
+ */
+void drawProgressSquares(int completedCount) {
+  int startX = 790;
+  int startY = 320;
+  int squareSize = 60;
+  int spacing = 20;
+  
+  for (int i = 0; i < 5; i++) {
+    int x = startX + i * (squareSize + spacing);
+    uint16_t color = (i < completedCount) ? THEME_GREEN : THEME_BLUE;
+    
+    // Filled square
+    Lcd.fillRect(x, startY, squareSize, squareSize, color);
+    
+    // Border
+    Lcd.drawRect(x - 2, startY - 2, squareSize + 4, squareSize + 4, THEME_CYAN);
+    
+    // Inner detail
+    if (i < completedCount) {
+      // Checkmark pattern for completed
+      Lcd.drawLine(x + 15, startY + 30, x + 25, startY + 40, THEME_WHITE);
+      Lcd.drawLine(x + 25, startY + 40, x + 45, startY + 15, THEME_WHITE);
+    }
+  }
+}
+
+void showBootSequence() {
+  Lcd.fillScreen(THEME_BLACK);
+
+  // Terminal-style boot header
+  Lcd.setTextColor(THEME_GREEN);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(80, 40);
+  Lcd.print("SYSTEM");
+
+  Lcd.setTextColor(THEME_YELLOW);
+  Lcd.setCursor(70, 65);
+  Lcd.print("INITIALIZE");
+
+  // Boot lines with typing effect
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(1);
+  String bootLines[] = {
+    "> Loading MiSTer interface...",
+    "> Initializing SD card system...",
+    "> Loading core image decoder...",
+    "> Establishing connection protocols...",
+    "> System ready - ONLINE"
+  };
+
+  for (int i = 0; i < 5; i++) {
+    Lcd.setCursor(10, 110 + i * 15);
+    for (int j = 0; j < (int)bootLines[i].length(); j++) {
+      Lcd.print(bootLines[i].charAt(j));
+      delay(20);
+    }
+    delay(100);
+  }
+
+  // Firmware version on the boot screen: always visible, so a user can
+  // report it without any tooling.
+  Lcd.setTextSize(1);
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setCursor(10, 225);
+  Lcd.print("FW ");
+  Lcd.print(FIRMWARE_VERSION);
+
+  const int barX = 40, barY = 200, barW = 240, barH = 12;
+  Lcd.drawRect(barX, barY, barW, barH, THEME_WHITE);
+  Lcd.fillRect(barX + 1, barY + 1, barW - 2, barH - 2, THEME_BLACK);
+
+  for (int p = 0; p <= 100; p += 2) {
+    int fillW = (p * (barW - 4)) / 100;
+    if (fillW > 0) {
+      Lcd.fillRect(barX + 2, barY + 2, fillW, barH - 4, THEME_GREEN);
+      Lcd.drawFastHLine(barX + 2, barY + 2, fillW, THEME_WHITE);
+    }
+    delay(8);   // 51 steps × 8ms ≈ 400ms total — snappy but visible
+  }
+  delay(500);   // brief pause at 100% before WiFi screen
+}
+
+/**
+ * Draw WiFi connection progress circles
+ * Shows blue circles for attempts, turns all green on success
+ * Position: right panel, where progress squares were in boot sequence
+ * @param currentAttempt - Current connection attempt (1-30)
+ * @param connected - true when connection successful
+ * @param maxAttempts - Maximum attempts to show (default 30)
+ */
+void drawWiFiProgressCircles(int currentAttempt, bool connected, int maxAttempts = 30) {
+  int startX = 670;      // Start position X (right panel)
+  int startY = 320;      // Start position Y (same as progress squares)
+  int circleRadius = 12; // Radius of each circle
+  int spacing = 15;      // Space between circles
+  int circlesPerRow = 10; // 10 circles per row
+  
+  // Calculate how many circles to draw
+  int circlesToDraw = min(currentAttempt, maxAttempts);
+  // Clear progress squares area in right panel
+  Lcd.fillRect(780, 310, 400, 80, THEME_BLACK);
+  // Draw circles in rows of 10
+  for (int i = 0; i < circlesToDraw; i++) {
+    int row = i / circlesPerRow;
+    int col = i % circlesPerRow;
+    
+    int x = startX + col * (circleRadius * 2 + spacing);
+    int y = startY + row * (circleRadius * 2 + spacing);
+    
+    // Choose color based on connection status
+    uint16_t fillColor = connected ? THEME_GREEN : THEME_BLUE;
+    uint16_t borderColor = THEME_CYAN;
+    
+    // Draw filled circle
+    Lcd.fillCircle(x, y, circleRadius, fillColor);
+    
+    // Draw border
+    Lcd.drawCircle(x, y, circleRadius + 1, borderColor);
+    
+    // Add inner highlight for 3D effect
+    if (connected) {
+      Lcd.fillCircle(x - 3, y - 3, 3, THEME_WHITE);
+    }
+  }
+  
+  // Draw attempt counter text below circles
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(startX, startY + 100);
+  
+  if (connected) {
+    Lcd.setTextColor(THEME_GREEN);
+    Lcd.setTextSize(3);
+    Lcd.print("CONNECTED");
+  } else {
+    Lcd.printf("ATTEMPT %02d/%02d", currentAttempt, maxAttempts);
+  }
+}
+
+void connectWithAnimation() {
+  Lcd.fillScreen(THEME_BLACK);
+
+  // Header: text logo + "CONNECTING"
+  drawMiSTerLogo(10, 5);
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(120, 15);
+  Lcd.print("CONNECTING");
+
+  // WiFi scan diagnostic
+  Serial.println("=== SCANNING NETWORKS ===");
+  int n = WiFi.scanNetworks();
+  for (int i = 0; i < n; i++) {
+    Serial.printf("  [%d] SSID: %s  RSSI: %d  Auth: %d\n",
+      i, WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.encryptionType(i));
+  }
+  Serial.println("=== END SCAN ===");
+
+  Serial.println("=== STARTING WiFi CONNECTION ===");
+  Serial.printf("SSID: %s\n", ssid);
+  Serial.printf("MiSTer IP configured: %s\n", misterIP);
+
+  WiFi.begin(ssid, password);
+
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+    // Radar animation. Centre raised from y=120 to y=105: at radius 60 the old
+    // circle reached y=180, the exact first row of the fillRect that clears the
+    // result area, so its outer ring was clipped and "CONNECTED" sat flush
+    // against it. Now the radar spans y 45..165 — 14 px below the header, 15 px
+    // above the text.
+    drawRadarScan(160, 105, 60, attempts * 12);
+
+    Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(120, 190);
+    Lcd.printf("SCAN %02d/30", attempts + 1);
+
+    Serial.printf("WiFi attempt %d/30...\n", attempts + 1);
+    delay(500);
+    attempts++;
+  }
+
+  // Clear result area
+  Lcd.fillRect(0, 180, 320, 60, THEME_BLACK);
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Lcd.setTextColor(THEME_GREEN);
+    Lcd.setTextSize(2);
+    Lcd.setCursor(90, 190);
+    Lcd.print("CONNECTED");
+
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(60, 215);
+    Lcd.printf("IP: %s", WiFi.localIP().toString().c_str());
+
+    Serial.printf("WiFi connected successfully!\n");
+    Serial.printf("Assigned IP: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("Gateway: %s\n", WiFi.gatewayIP().toString().c_str());
+
+    drawStatusIndicator(280, 195, THEME_GREEN, true);
+
+    // Test MiSTer connectivity (visual feedback inside)
+    delay(1000);
+    Lcd.fillRect(0, 180, 320, 60, THEME_BLACK);
+    Lcd.setTextColor(THEME_YELLOW);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(90, 190);
+    Lcd.print("Testing MiSTer...");
+
+    // Auto-discover the MiSTer server IP.
+    // Blank ip=: adopts the first server that replies.
+    // Pinned ip=: only confirms that server is up; misterIP never changes.
+    Serial.println("=== DISCOVERING MiSTer SERVER ===");
+    bool discovered = discoverMister();
+
+    Serial.println("=== TESTING MiSTer CONNECTIVITY ===");
+    testMiSTerConnectivity(discovered);
+  } else {
+    Lcd.setTextColor(THEME_RED);
+    Lcd.setTextSize(2);
+    Lcd.setCursor(70, 190);
+    Lcd.print("WIFI FAILED");
+
+    Serial.printf("Error connecting WiFi!\n");
+    drawStatusIndicator(280, 195, THEME_RED, false);
+  }
+
+  delay(2000);
+}
+
+void testMiSTerConnectivity(bool discovered) {
+  // No IP available: UDP discovery failed AND no ip= was set in config.ini.
+  // Don't probe http://:8081 — give the user an actionable message instead.
+  if (strlen(misterIP) == 0) {
+    Serial.println("MiSTer IP unknown: discovery failed and no ip= in config.ini");
+    Lcd.fillRect(0, 180, 320, 60, THEME_BLACK);
+    Lcd.setTextColor(THEME_RED);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(70, 190);
+    Lcd.print("MiSTer NOT FOUND");
+    Lcd.setTextColor(THEME_YELLOW);
+    Lcd.setCursor(45, 205);
+    Lcd.print("Set ip= in config.ini");
+    connected = false;
+    delay(2000);
+    return;
+  }
+  
+  HTTPClient http;
+  String url = String("http://") + misterIP + ":8081/status/core";
+
+  Serial.printf("Testing connectivity to: %s\n", url.c_str());
+
+  http.begin(url);
+  http.setTimeout(5000);
+
+  int code = http.GET();
+
+  // Clear result area (bottom 60px)
+  Lcd.fillRect(0, 180, 320, 60, THEME_BLACK);
+
+  if (code == 200) {
+    Serial.printf("MiSTer responds correctly!\n");
+    Lcd.setTextColor(THEME_GREEN);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(80, 190);
+    Lcd.print("MiSTer: ONLINE");
+    Lcd.setCursor(80, 205);
+    Lcd.printf("Server: %s:8081", misterIP);
+    connected = true;
+  } else {
+    Serial.printf("MiSTer not responding (code: %d)\n", code);
+    Lcd.setTextColor(THEME_RED);
+    Lcd.setTextSize(1);
+    if (discovered) {
+      // The discovery process found the MiSTer, but :8081 is not responding:
+      // The HTTP server (the Python script) is likely not running.
+      Lcd.setCursor(45, 190);
+      Lcd.print("MiSTer FOUND, no reply");
+      Lcd.setTextColor(THEME_YELLOW);
+      Lcd.setCursor(50, 205);
+      Lcd.print("Is the script running?");
+    } else {
+      // We are using the fallback IP from config.ini, and it is not responding:
+      // The IP address is probably incorrect.
+      Lcd.setCursor(70, 190);
+      Lcd.print("MiSTer: OFFLINE");
+      Lcd.setCursor(60, 205);
+      Lcd.printf("Check IP: %s", misterIP);
+    }
+  }
+
+  http.end();
+  delay(2000);
+}
+
+void showReconnectBanner() {
+  // Footer-style banner in the image footer band (Y=200..240). Drawn inside the
+  // band so the footer restore below fully covers it (no leftover over the image).
+  const char* msg = "CONNECTED TO MiSTer";
+  int tw = (int)strlen(msg) * 12;            // 12 px/char at size 2
+  Lcd.fillRect(0, 200, 320, 40, THEME_GREEN);
+  Lcd.setTextSize(2);
+  Lcd.setTextColor(THEME_BLACK, THEME_GREEN);
+  Lcd.setCursor((320 - tw) / 2, 212);        // centered in the 40px band
+  Lcd.print(msg);
+
+  delay(2400);                               // hold long enough to read
+
+  // Restore the image footer over the banner.
+  repaintImageFooterBand();
+}
+
+void showRAReadyBanner() {
+  // Same footer band (Y=200..240) and hold-then-restore shape as
+  // showReconnectBanner(), so the image footer restore below fully covers it.
+  // "READY FOR RETROACHIEVEMENTS!" is 28 chars = 336 px at size 2, wider than
+  // the 320 px panel, so it goes on two centred lines: 2 x 16 px fits the
+  // 40 px band with room to breathe (204..220 and 222..238).
+  // Same two-line geometry either way. View-only fires when the server
+  // resolved the game but the fork could not: the set is real and worth
+  // reading, it just cannot be earned on this core.
+  const bool viewOnly = raStatus.forkLoadFailed || raStatus.forkGameMismatch;
+  const char* l1 = viewOnly ? "VIEW ONLY"         : "READY FOR";
+  const char* l2 = viewOnly ? "CORE CANNOT AWARD" : "RETROACHIEVEMENTS!";
+  int w1 = (int)strlen(l1) * 12;             // 12 px/char at size 2
+  int w2 = (int)strlen(l2) * 12;
+
+  Lcd.fillRect(0, 200, 320, 40, THEME_YELLOW);
+  Lcd.setTextWrap(false);
+  Lcd.setTextSize(2);
+  Lcd.setTextColor(THEME_BLUE, THEME_YELLOW);
+  Lcd.setCursor((320 - w1) / 2, 204);
+  Lcd.print(l1);
+  Lcd.setCursor((320 - w2) / 2, 222);
+  Lcd.print(l2);
+
+  delay(3400);                               // hold long enough to read
+
+  // Restore the image footer over the banner. In page mode the caller's
+  // needsRedraw repaints the real footer (PRV/SCAN/NXT) instead, so only the
+  // image path is restored here.
+  if (showingCoreImage) {
+    repaintImageFooterBand();
+  }
+}
+
+// Version mismatch banner. Same footer band and hold-then-restore shape as
+// showRAReadyBanner(), so the footer restore below fully covers it. Two centred
+// lines: the label, then "S:x.y.z F:x.y.z" (12 px/char at size 2).
+void showVersionMismatchBanner() {
+  char line2[48];
+  snprintf(line2, sizeof(line2), "S:%s F:%s",
+           serverVersion.c_str(), FIRMWARE_VERSION);
+
+  const char* l1 = "VERSION MISMATCH";
+  int w1 = (int)strlen(l1)    * 12;
+  int w2 = (int)strlen(line2) * 12;
+
+  Lcd.fillRect(0, 200, 320, 40, THEME_RED);
+  Lcd.setTextWrap(false);
+  Lcd.setTextSize(2);
+  Lcd.setTextColor(THEME_WHITE, THEME_RED);
+  Lcd.setCursor((320 - w1) / 2, 204);
+  Lcd.print(l1);
+  Lcd.setCursor((320 - w2) / 2, 222);
+  Lcd.print(line2);
+
+  delay(4000);                               // longer than RA: it is actionable
+
+  if (showingCoreImage) {
+    repaintImageFooterBand();
+  }
+}
+
+// Update offer banner. Same footer band and two-line geometry as the mismatch
+// banner it replaces, but green and a button: it polls the touch for a few
+// seconds and a tap anywhere starts the update. With [update] ota_auto=true it
+// holds just long enough to be read, then starts by itself. Declining costs
+// nothing: the HUD version panel turns into an orange UPDATE button that
+// stays until tapped, the /update page keeps its button, and the next boot
+// offers again.
+void showUpdateOfferBanner() {
+  char line1[40];
+  snprintf(line1, sizeof(line1), "UPDATE TO %s", firmwareOffer.version.c_str());
+  const char* l2 = appConfig.updateAuto ? "INSTALLING..." : "TAP TO INSTALL";
+  int w1 = (int)strlen(line1) * 12;
+  int w2 = (int)strlen(l2)    * 12;
+
+  Lcd.fillRect(0, 200, 320, 40, THEME_GREEN);
+  Lcd.setTextWrap(false);
+  Lcd.setTextSize(2);
+  Lcd.setTextColor(THEME_BLACK, THEME_GREEN);
+  Lcd.setCursor((320 - w1) / 2, 204);
+  Lcd.print(line1);
+  Lcd.setCursor((320 - w2) / 2, 222);
+  Lcd.print(l2);
+
+  bool start = false;
+  if (appConfig.updateAuto) {
+    delay(1500);
+    start = true;
+  } else {
+    const unsigned long OFFER_HOLD_MS   = 12000;
+    const unsigned long OFFER_SETTLE_MS = 400;   // ignore the bounce of the tap that opened it
+    unsigned long t0 = millis();
+    while (millis() - t0 < OFFER_HOLD_MS) {
+      Board.update();
+      if (Board.Touch.getDetail().wasPressed() && millis() - t0 > OFFER_SETTLE_MS) { start = true; break; }
+      screenshotServer.handleClient();
+      delay(20);
+    }
+  }
+
+  if (start) {
+    runFirmwareUpdate(appConfig.updateAuto ? "auto" : "tap");
+    return;                                  // runFirmwareUpdate restored the screen
+  }
+  firmwareOffer.declined = true;
+  Serial.println("[OTA] Offer not taken; still available at /update");
+  if (showingCoreImage) {
+    repaintImageFooterBand();
+  }
+}
+
+// Full-screen progress for the updater: a title, the version jump, a bar
+// and the current phase. Called from FirmwareUpdate.h on every flash write,
+// so it only repaints when the percentage changes (or every 500 ms when the
+// total is unknown, i.e. a browser upload). "Connecting" is the first call
+// of a run and clears the screen.
+void drawFirmwareProgress(const char* phase, size_t done, size_t total) {
+  static int           lastPct  = -1;
+  static unsigned long lastDraw = 0;
+  bool first  = (strcmp(phase, "Connecting") == 0) ||
+                (strcmp(phase, "Receiving") == 0 && done == 0);
+  // Only the two streaming phases arrive in bursts; everything else is a
+  // one-off that must always land (Verifying, Done, FAILED).
+  bool stream = (strcmp(phase, "Writing") == 0) || (strcmp(phase, "Receiving") == 0);
+  int pct = (total > 0) ? (int)((uint64_t)done * 100 / total) : -1;
+
+  if (stream && !first) {
+    if (pct >= 0 && pct == lastPct) return;
+    if (pct <  0 && millis() - lastDraw < 500) return;
+  }
+  lastPct  = pct;
+  lastDraw = millis();
+  if (strcmp(phase, "Failed") == 0) needsRedraw = true;   // browser upload failed: back to normal UI
+
+  if (first) {
+    Lcd.fillScreen(THEME_BLACK);
+    Lcd.setTextWrap(false);
+    Lcd.setTextSize(2);
+    Lcd.setTextColor(THEME_CYAN, THEME_BLACK);
+    const char* title = "FIRMWARE UPDATE";
+    Lcd.setCursor((320 - (int)strlen(title) * 12) / 2, 36);
+    Lcd.print(title);
+    char line[40];
+    if (firmwareOffer.version.length() > 0 && strcmp(phase, "Receiving") != 0) {
+      snprintf(line, sizeof(line), "%s -> %s", FIRMWARE_VERSION, firmwareOffer.version.c_str());
+    } else {
+      snprintf(line, sizeof(line), "from browser upload");
+    }
+    Lcd.setTextSize(2);
+    Lcd.setTextColor(THEME_WHITE, THEME_BLACK);
+    Lcd.setCursor((320 - (int)strlen(line) * 12) / 2, 64);
+    Lcd.print(line);
+    Lcd.drawRect(40, 118, 240, 22, THEME_CYAN);
+    Lcd.setTextSize(1);
+    Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+    const char* warn = "Keep the display powered until it restarts";
+    Lcd.setCursor((320 - (int)strlen(warn) * 6) / 2, 210);
+    Lcd.print(warn);
+  }
+
+  // Bar + percentage (or a byte count when the total is unknown).
+  if (pct >= 0) {
+    Lcd.fillRect(42, 120, (236 * pct) / 100, 18, THEME_GREEN);
+  }
+  if (pct >= 0 || stream) {
+    char stat[48];
+    if (pct >= 0) snprintf(stat, sizeof(stat), "%3d%%", pct);
+    else          snprintf(stat, sizeof(stat), "%u KB", (unsigned)(done / 1024));
+    Lcd.setTextSize(2);
+    Lcd.setTextColor(THEME_WHITE, THEME_BLACK);
+    Lcd.fillRect(0, 150, 320, 18, THEME_BLACK);
+    Lcd.setCursor((320 - (int)strlen(stat) * 12) / 2, 150);
+    Lcd.print(stat);
+  }
+
+  // Phase line, always rewritten: it is short and changes rarely.
+  Lcd.setTextSize(1);
+  Lcd.setTextColor(THEME_CYAN, THEME_BLACK);
+  Lcd.fillRect(0, 180, 320, 10, THEME_BLACK);
+  Lcd.setCursor((320 - (int)strlen(phase) * 6) / 2, 180);
+  Lcd.print(phase);
+}
+
+// Runs the update from the MiSTer, blocking, with the progress screen. On
+// success the new image is already the boot target and the display restarts
+// from here. On failure the reason stays on screen for a while and the
+// running firmware carries on untouched; the attempt is not repeated this
+// boot (the cause will not change by itself) but /update can retry on demand.
+void runFirmwareUpdate(const char* trigger) {
+  Serial.printf("[OTA] Starting update (%s): %s -> %s\n",
+                trigger, FIRMWARE_VERSION, firmwareOffer.version.c_str());
+  display.setBrightness(DISPLAY_BRIGHTNESS_NORMAL);   // may be coming from standby
+  drawFirmwareProgress("Connecting", 0, firmwareOffer.size);
+
+  bool ok = firmwareApplyOffer(drawFirmwareProgress);
+
+  if (ok) {
+    drawFirmwareProgress("Done - restarting", firmwareOffer.size, firmwareOffer.size);
+    delay(1500);
+    ESP.restart();
+  }
+
+  Serial.printf("[OTA] Update failed: %s\n", firmwareOffer.reason.c_str());
+  drawFirmwareProgress("FAILED", 0, 0);
+  Lcd.setTextWrap(true);
+  Lcd.setTextSize(1);
+  Lcd.setTextColor(THEME_RED, THEME_BLACK);
+  Lcd.setCursor(10, 190);
+  Lcd.print(firmwareOffer.reason);
+  Lcd.setTextWrap(false);
+  delay(6000);
+  needsRedraw = true;
+}
+
+void updateMiSTerData() {
+  Serial.println("=== Updating MiSTer data ===");
+  if (!getStateSnapshot()) {   // atomic path (server >= 2.6)
+    getCurrentCore();          // legacy fallback (server <= 2.5.x)
+    getCurrentGame();
+  }
+  getSystemData();
+  getStorageData();
+  getUSBData();
+  getNetworkAndSession();
+  Serial.println("=== Update complete ===");
+}
+
+// Atomic state fetch: ONE request returns core+game from a single server-side
+// lock acquisition (/status/snapshot, server >= 2.6). Eliminates the split-brain
+// where core and game were read in two separate requests that a core switch
+// could land between (the "searching Doom on the C64 core" bug).
+// Returns false on any HTTP/parse problem so the caller can fall back to the
+// legacy two-request path, whose error handling remains authoritative.
+bool getStateSnapshot() {
+  HTTPClient http;
+  String url = String("http://") + misterIP + ":8081/status/snapshot";
+
+  http.begin(url);
+  http.setTimeout(8000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+
+  int code = http.GET();
+  if (code != 200) {
+    http.end();
+    Serial.printf("Snapshot unavailable (HTTP %d) - using legacy path\n", code);
+    return false;
+  }
+
+  String response = http.getString();
+  http.end();
+
+  String newCore = extractStringValue(response, "core");
+  String newGame = extractStringValue(response, "game");
+  // Absent on older servers -> empty -> the mapping falls back to the
+  // friendly name, i.e. exactly today's behavior.
+  String newCoreRaw = extractStringValue(response, "core_raw");
+  newCore.trim();
+  newGame.trim();
+  newCoreRaw.trim();
+
+  // Version check. Absent on servers older than this feature -> stays empty,
+  // and we say nothing rather than crying wolf. Reported once per boot: the
+  // condition is level, not edge, so without the flag every poll would warn.
+  String newServerVersion = extractStringValue(response, "server_version");
+  newServerVersion.trim();
+  if (newServerVersion.length() > 0) {
+    // A server that changes version under a running display (Update All, then
+    // a server restart) is a new situation: judge it afresh, so an update that
+    // arrives mid-session is offered rather than left to the next boot.
+    if (serverVersion.length() > 0 && newServerVersion != serverVersion) {
+      versionMismatchReported = false;
+    }
+    serverVersion = newServerVersion;
+    if (serverVersion != FIRMWARE_VERSION && !versionMismatchReported) {
+      versionMismatchReported = true;
+      versionMismatchPending  = true;
+      Serial.printf("[VERSION] MISMATCH  server=%s  firmware=%s\n",
+                    serverVersion.c_str(), FIRMWARE_VERSION);
+      // A newer server arrived with the Downloader, and so did its firmware
+      // images. Ask for the manifest here, where we are already talking to
+      // it, so the banner in loop() can offer the update instead of just
+      // reporting the mismatch. One small GET, once per boot.
+      if (fwCompareVersions(serverVersion, FIRMWARE_VERSION) > 0) {
+        firmwareCheckOffer();
+      }
+    } else if (serverVersion == FIRMWARE_VERSION && !versionMismatchReported) {
+      versionMismatchReported = true;   // matched: never warn this boot
+      Serial.printf("[VERSION] OK  server=%s  firmware=%s\n",
+                    serverVersion.c_str(), FIRMWARE_VERSION);
+    }
+  }
+
+  // "Console (autoboot)" runs a splash animation, not a game. Blanking the name
+  // HERE — at the single point where the snapshot enters the firmware — is what
+  // makes the whole rest of the system behave: artwork, footers, GAME INFO and
+  // the CRC search all already have a correct "no game loaded" path, and this
+  // hands them that state instead of teaching each one about boot ROMs.
+  if (isBootRomName(newGame)) {
+    Serial.printf("Boot ROM '%s' detected - presenting core only\n", newGame.c_str());
+    newGame = "";
+  }
+
+  if (newCore.length() == 0) {
+    // /status/snapshot always carries "core"; an empty value means a
+    // malformed body, not a Menu state. Let the legacy path decide.
+    Serial.println("Snapshot missing 'core' - using legacy path");
+    return false;
+  }
+
+  bool coreDidChange = false;   // set below; used by the cross-core rekey
+  bool gameDidChange = false;
+
+  // ---- CORE side effects (ported from getCurrentCore's 200-handler) ----
+  previousCore   = currentCore;
+  currentCore    = newCore;
+  currentCoreRaw = newCoreRaw;   // always assigned: empty overwrite is the
+                                 // fallback signal, stale carry-over is a bug
+
+  if (currentCore == "Menu" || currentCore == "MENU") {
+    Serial.println("Server reports Menu state - checking debug endpoint");
+    checkMisterDebugState();
+  }
+
+  if (!isErrorCore(currentCore)) {
+    lastValidCore = currentCore;
+  }
+
+  if (previousCore != currentCore && previousCore != "") {
+    coreChanged = true;
+    coreDidChange = true;
+    Serial.printf("Core changed: '%s' -> '%s'\n", previousCore.c_str(), currentCore.c_str());
+  }
+
+  connected = true;
+  Serial.printf("Core: '%s' (snapshot)\n", currentCore.c_str());
+  checkServerErrorState();
+
+  // ---- GAME side effects (ported from getCurrentGame's 200-handler) ----
+  previousGame = currentGame;
+  currentGame  = newGame;
+
+  if (previousGame != currentGame && currentGame.length() > 0) {
+    gameChanged = true;
+    gameDidChange = true;
+    Serial.printf("Game changed: '%s' -> '%s'\n", previousGame.c_str(), currentGame.c_str());
+    // core+game come from ONE atomic server read: coherent by construction
+    startCrcRecurrentForGame(currentGame, currentCore);
+  } else if (currentGame.length() == 0 && previousGame.length() > 0) {
+    gameChanged = true;
+    gameDidChange = true;
+    Serial.println("Game unloaded, returning to core image");
+    stopCrcRecurrent();
+  }
+
+  // Cross-core launch transient: main-menu launches (MGL/MRA) announce the
+  // game 1-2 s BEFORE the new CORENAME lands, so one poll can pair the new
+  // game with the OLD core (field evidence: Aero Fighters' SNES CRC searched
+  // under the Amiga systemeid, 404 twice, exhausted flag poisoned). When the
+  // corrective core commit arrives the game string is unchanged, gameChanged
+  // never fires, and every per-game search flag built under the wrong system
+  // would survive. Re-key the search to the corrected pairing —
+  // startCrcRecurrentForGame resets exhausted/no-media/attempt state.
+  if (coreDidChange && !gameDidChange && currentGame.length() > 0) {
+    Serial.printf("Core corrected under same game - rekeying search: '%s' on '%s'\n",
+                  currentGame.c_str(), currentCore.c_str());
+    lastSearchedGame = "";           // a wrong-core success must not block the redo
+    startCrcRecurrentForGame(currentGame, currentCore);
+  }
+
+  return true;
+}
+
+void getCurrentCore() {
+  HTTPClient http;
+  String url = String("http://") + misterIP + ":8081/status/core";
+  
+  Serial.printf("Connecting to: %s\n", url.c_str());
+  
+  http.begin(url);
+  http.setTimeout(8000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+  
+  int code = http.GET();
+  Serial.printf("HTTP code: %d\n", code);
+  
+  if (code == 200) {
+    String response = http.getString();
+    Serial.printf("Raw response: '%s' (length: %d)\n", response.c_str(), response.length());
+
+    previousCore = currentCore;
+    currentCore = response;
+    // Legacy endpoint: no raw travels with it. Clear rather than carry — a
+    // raw left over from a previous snapshot belongs to a previous core, and
+    // the raw-first mapping must not key this one with it.
+    currentCoreRaw = "";
+    currentCore.trim();
+    currentCore.replace("\n", "");
+    currentCore.replace("\r", "");
+    currentCore.replace("\"", "");
+
+    Serial.printf("After cleaning: '%s' (length: %d)\n", currentCore.c_str(), currentCore.length());
+
+    if (currentCore.length() == 0) {
+      currentCore = "MENU";
+      Serial.println("Empty response - setting to MENU");
+    }
+
+    if (currentCore == "Menu" || currentCore == "MENU") {
+      Serial.println("Server reports Menu state - checking debug endpoint");
+      checkMisterDebugState();
+    }
+
+    if (!isErrorCore(currentCore)) {
+      lastValidCore = currentCore;
+    }
+
+    if (previousCore != currentCore && previousCore != "") {
+      coreChanged = true;
+      Serial.printf("Core changed: '%s' -> '%s'\n", previousCore.c_str(), currentCore.c_str());
+    }
+
+    connected = true;
+    Serial.printf("Core: '%s'\n", currentCore.c_str());
+    
+    // Check server error state
+    checkServerErrorState();
+    
+  } else {
+    // ERROR HANDLING: Use last valid local core
+    String errorType = "";
+    if (code == -1) {
+      Serial.printf("Cannot connect to server\n");
+      errorType = "NO SERVER";
+    } else if (code == -11) {
+      Serial.printf("Timeout\n");
+      errorType = "TIMEOUT";
+    } else {
+      Serial.printf("HTTP error: %d\n", code);
+      errorType = "CONNECTION ERROR";
+    }
+    
+    // Use last valid local core as fallback
+    if (lastValidCore.length() > 0) {
+      currentCore = lastValidCore;
+      serverHasError = true;
+      serverErrorType = errorType;
+      Serial.printf("Connection error, using local last valid core: '%s'\n", lastValidCore.c_str());
+    } else {
+      currentCore = "Menu";
+      serverHasError = true;
+      serverErrorType = errorType;
+    }
+    
+    connected = false;
+  }
+  
+  http.end();
+}
+
+// -----------------------------------------------------------------------------
+// isBootRomName() — true for the auto-boot animation ROMs behind the
+// "Console (autoboot)" menu category (uberyoji's mister-boot-roms, installed
+// by update_all). Those .mgl entries load a ROM whose only job is to play a
+// MiSTer splash animation before handing the console over, so the MiSTer
+// reports a loaded "game" that is not one. Left alone it costs a guaranteed
+// ScreenScraper miss, a footer naming a file instead of the console that was
+// actually booted, a GAME INFO button with nothing behind it, and a CRC hunt
+// for a ROM no database will ever list.
+//
+// Every asset in that project shares one base name — mister-boot.<ext>
+// (.nes .sfc .md .sms .gb .gba .pce .32x .chd …) — with mister-demo.chd kept
+// as the older PSX boot disc. Matching the BASE NAME therefore also covers the
+// cores that project adds later, with no further firmware change. Hyphen and
+// underscore fold together because both spellings circulate in the wild.
+// -----------------------------------------------------------------------------
+bool isBootRomName(const String& gameName) {
+  String n = gameName;
+  n.trim();
+  n.toLowerCase();
+  n.replace('_', '-');
+
+  // Drop a trailing extension if the server sent a filename rather than a bare
+  // title. Only a short tail counts, so a real title carrying a dot
+  // ("Dr. Robotnik's Mean Bean Machine") is left intact.
+  int dot = n.lastIndexOf('.');
+  if (dot > 0 && (int)(n.length() - dot) <= 5) n = n.substring(0, dot);
+
+  return (n == "mister-boot" || n == "mister-demo");
+}
+
+bool isErrorCore(String core) {
+  /**
+   * Helper function to check if a core name represents an error state
+   * Used for backward compatibility with local error detection
+   */
+  return (core == "NO SERVER" || core == "TIMEOUT" || core == "OFFLINE" || 
+          core == "DISCONNECTED" || core.startsWith("ERROR") || 
+          core == "CONNECTION ERROR" || core == "NETWORK ERROR");
+}
+
+void getCurrentGame() {
+  Serial.printf("DEBUG: getCurrentGame() called\n");
+  Serial.printf("DEBUG: previousGame='%s', currentGame='%s'\n", previousGame.c_str(), currentGame.c_str());
+  
+  HTTPClient http;
+  String url = String("http://") + misterIP + ":8081/status/game";
+  
+  Serial.printf("Checking for active game: %s\n", url.c_str());
+  
+  http.begin(url);
+  http.setTimeout(5000);
+  
+  int code = http.GET();
+  
+  Serial.printf("DEBUG: HTTP response code: %d\n", code);
+  
+  if (code == 200) {
+    String response = http.getString();
+    response.trim();
+    
+    Serial.printf("DEBUG: Raw response: '%s'\n", response.c_str());
+
+    // Same boot-ROM filter as the snapshot path: this legacy endpoint writes
+    // currentGame directly, so it needs the guard too or a server old enough to
+    // lack /status/snapshot would still show the animation as a game.
+    if (isBootRomName(response)) {
+      Serial.printf("Boot ROM '%s' detected - presenting core only\n", response.c_str());
+      response = "";
+    }
+
+    previousGame = currentGame;
+    currentGame = response;
+    
+    Serial.printf("DEBUG: After update - previousGame='%s', currentGame='%s'\n", 
+                  previousGame.c_str(), currentGame.c_str());
+    
+    // Detect game change
+    if (previousGame != currentGame && currentGame.length() > 0) {
+      gameChanged = true;
+      Serial.printf("Game changed: '%s' -> '%s'\n", previousGame.c_str(), currentGame.c_str());
+      
+      startCrcRecurrentForGame(currentGame, currentCore);
+      
+    } else if (currentGame.length() == 0 && previousGame.length() > 0) {
+      gameChanged = true;
+      Serial.println("Game unloaded, returning to core image");
+      
+      stopCrcRecurrent();
+    }
+    
+  } else {
+    // Network error - DON'T assume game unloaded
+    Serial.printf("Network error (HTTP %d) - keeping current game state\n", code);
+    Serial.printf("Current game preserved: '%s'\n", currentGame.c_str());
+    
+    // DON'T change currentGame or stop CRC recurrent on network errors
+    // The CRC recurrent will keep trying every 10 seconds
+    
+    // Only log the error, don't change game state
+  }
+  
+  http.end();
+}
+
+void startCrcRecurrentForGame(String gameName, String coreName) {
+  Serial.printf("DEBUG: startCrcRecurrentForGame() called with game='%s', core='%s'\n", 
+                gameName.c_str(), coreName.c_str());
+  if (gameName.length() == 0 || coreName.length() == 0) {
+    Serial.println("Invalid game/core for CRC recurrent");
+    return;
+  }
+  
+  // Reset per-game state regardless of whether the recurrent will run
+  currentGameForCrc = gameName;
+  currentCoreForCrc = coreName;
+  lastRomHasCrc            = false;
+  lastRomCrcChecked        = false;
+  lastGameImageOK          = false;
+  lastGameFoundNoMedia     = false;
+  
+  // Short-circuit: if the core is not in ScreenScraper's DB, do not activate
+  // the recurrent. ScreenScraper requires a system ID, and asking MiSTer for
+  // ROM details (which calculates CRC32 over the file) is wasted work.
+  if (getScreenScraperSystemId(coreName).length() == 0) {
+    Serial.printf("Core '%s' not mapped to ScreenScraper — recurrent NOT started\n",
+                  coreName.c_str());
+    lastGameSearchExhausted = true;
+    crcRecurrentActive      = false;
+    crcRecurrentAttempts    = 0;
+    return;
+  }
+  
+  // Normal start
+  crcRecurrentActive       = true;
+  lastCrcRecurrentTime     = 0;     // Force immediate check
+  crcRecurrentAttempts     = 0;
+  lastGameSearchExhausted  = false;
+  g_currentGameIsContainer = false; // re-decided from rom details on next download
+  
+  Serial.printf("CRC recurrent started: '%s' core '%s'\n", gameName.c_str(), coreName.c_str());
+  Serial.printf("DEBUG: crcRecurrentActive=%s\n", crcRecurrentActive ? "true" : "false");
+}
+
+void stopCrcRecurrent() {
+  /**
+   * Stops recurring CRC search
+   */
+  if (crcRecurrentActive) {
+    Serial.printf("CRC recurrent stopped for: '%s'\n", currentGameForCrc.c_str());
+  }
+  
+  crcRecurrentActive = false;
+  currentGameForCrc = "";
+  currentCoreForCrc = "";
+  lastCrcRecurrentTime = 0;
+  crcRecurrentAttempts = 0;
+}
+
+void processCrcRecurrent() {
+  /**
+   * Processes recurrent CRC every 10 seconds
+   * CALL FROM YOUR MAIN LOOP
+   */
+  
+  static unsigned long lastDebugLog = 0;
+  if (millis() - lastDebugLog > 5000) {  // Log every 5 seconds
+    Serial.printf("DEBUG processCrcRecurrent(): active=%s, game='%s', downloadInProgress=%s, exhausted=%s\n", 
+                  crcRecurrentActive ? "YES" : "NO", 
+                  currentGameForCrc.c_str(),
+                  downloadInProgress ? "YES" : "NO",
+                  lastGameSearchExhausted ? "YES" : "NO");
+    lastDebugLog = millis();
+  }
+  
+  // Do nothing if it is not active
+  if (!crcRecurrentActive || currentGameForCrc.length() == 0) {
+    return;
+  }
+  
+  // CRITICAL: Do not interfere with your downloadInProgress system
+  if (downloadInProgress) {
+    Serial.printf("DEBUG: Skipping CRC recurrent - download in progress\n");
+    return;
+  }
+  
+  // Verify that the game is still the same
+  if (currentGameForCrc != currentGame) {
+    Serial.printf("Game changed during recurrent, stopping\n");
+    stopCrcRecurrent();
+    return;
+  }
+  
+  // If the core isn't mapped to any ScreenScraper system, no number of retries
+  // will produce a hit. Mark search exhausted and stop.
+  if (getScreenScraperSystemId(currentCoreForCrc).length() == 0) {
+    Serial.printf("Core '%s' not in ScreenScraper DB — stopping CRC recurrent\n",
+                  currentCoreForCrc.c_str());
+    lastGameSearchExhausted = true;
+    stopCrcRecurrent();
+    return;
+  }
+  
+  // if a previous attempt already confirmed the game isn't in
+  // ScreenScraper's DB, also stop.
+  if (lastGameSearchExhausted) {
+    Serial.printf("Search already exhausted for '%s' — stopping CRC recurrent\n",
+                  currentGameForCrc.c_str());
+    stopCrcRecurrent();
+    return;
+  }
+  
+  unsigned long now = millis();
+  
+  // Verify exactly 10 seconds
+  if (now - lastCrcRecurrentTime < 10000) {
+    return;
+  }
+  
+  // Check if it already has an image (avoids unnecessary searches)
+  String imagePath;
+  if (findGameImage(currentCoreForCrc, currentGameForCrc, imagePath, nullptr)) {
+    Serial.printf("Image found for '%s', stopping CRC recurrent\n", currentGameForCrc.c_str());
+    stopCrcRecurrent();
+    return;
+  }
+  
+  // Attempt limit (optional, prevents infinite loops)
+  if (crcRecurrentAttempts >= 30) {  // 30 attempts = 5 minutes maximum
+    Serial.printf("Max recurrent attempts reached for '%s'\n", currentGameForCrc.c_str());
+    stopCrcRecurrent();
+    return;
+  }
+  
+  // RUN RECURRENT SEARCH
+  Serial.printf("CRC recurrent attempt #%d for: '%s'\n", 
+                crcRecurrentAttempts + 1, currentGameForCrc.c_str());
+  
+  lastCrcRecurrentTime = now;
+  crcRecurrentAttempts++;
+
+  // USE YOUR EXISTING FUNCTION WITHOUT CHANGES
+  bool success = downloadGameBoxartStreamingSafeJSON(currentCoreForCrc, currentGameForCrc);
+  
+  if (success) {
+    Serial.printf("CRC recurrent SUCCESS for: '%s'\n", currentGameForCrc.c_str());
+    stopCrcRecurrent();
+    
+    // Trigger screen update if necessary
+    if (currentGameForCrc == currentGame) {
+      gameChanged = true;  // Force image refresh
+    }
+  } else {
+    Serial.printf("CRC recurrent attempt #%d failed, retry in 10s\n", crcRecurrentAttempts);
+  }
+}
+
+void getSystemData() {
+  HTTPClient http;
+  http.begin(String("http://") + misterIP + ":8081/status/system");
+  
+  int code = http.GET();
+  if (code == 200) {
+    String payload = http.getString();
+    
+    cpuUsage = extractFloatValue(payload, "cpu_usage");
+    memoryUsage = extractFloatValue(payload, "memory_usage");
+    
+    int uptimeSeconds = extractIntValue(payload, "uptime_seconds");
+    int hours = uptimeSeconds / 3600;
+    int minutes = (uptimeSeconds % 3600) / 60;
+    int secs = uptimeSeconds % 60;
+    
+    uptimeFormatted = String(hours < 10 ? "0" : "") + String(hours) + ":" +
+                     String(minutes < 10 ? "0" : "") + String(minutes) + ":" +
+                     String(secs < 10 ? "0" : "") + String(secs);
+  }
+  http.end();
+}
+
+void getStorageData() {
+  HTTPClient http;
+  http.begin(String("http://") + misterIP + ":8081/status/storage");
+  
+  int code = http.GET();
+  if (code == 200) {
+    String payload = http.getString();
+    
+    int sdStart = payload.indexOf("\"sd_card\":");
+    if (sdStart != -1) {
+      String sdSection = payload.substring(sdStart, payload.indexOf("}", sdStart) + 1);
+      
+      sdTotalGB = extractFloatValue(sdSection, "total_gb");
+      sdUsedGB = extractFloatValue(sdSection, "used_gb");
+      sdUsagePercent = extractFloatValue(sdSection, "usage_percent");
+    }
+  }
+  http.end();
+}
+
+void getUSBData() {
+  HTTPClient http;
+  http.begin(String("http://") + misterIP + ":8081/status/usb");
+  
+  int code = http.GET();
+  if (code == 200) {
+    String payload = http.getString();
+    
+    usbDeviceCount = 0;
+    serialPortCount = 0;
+    
+    Serial.printf("=== USB DETECTION DEBUG ===\n");
+    Serial.printf("Raw USB Response: %s\n", payload.c_str());
+    
+    // Count real USB devices (hybrid: blacklist + whitelist of types)
+    int pos = 0;
+    int totalFound = 0;
+    
+    while ((pos = payload.indexOf("\"name\":", pos)) != -1) {
+      int nameStart = payload.indexOf("\"", pos + 7) + 1;
+      int nameEnd = payload.indexOf("\"", nameStart);
+      
+      if (nameStart > 0 && nameEnd > nameStart) {
+        String deviceName = payload.substring(nameStart, nameEnd);
+        String deviceNameLower = deviceName;
+        deviceNameLower.toLowerCase();
+        
+        totalFound++;
+        Serial.printf("[%d] Device: '%s'\n", totalFound, deviceName.c_str());
+        
+        // STEP 1: Strict blacklist for system devices
+        bool isSystemDevice = false;
+        
+        // USB hubs and controllers
+        if (deviceNameLower.indexOf("hub") != -1 ||
+            deviceNameLower.indexOf("root hub") != -1 ||
+            deviceNameLower.indexOf("linux foundation") != -1 ||
+            deviceNameLower.indexOf("dwc") != -1 ||
+            deviceNameLower.indexOf("ehci") != -1 ||
+            deviceNameLower.indexOf("ohci") != -1 ||
+            deviceNameLower.indexOf("xhci") != -1 ||
+            deviceNameLower.indexOf("vhci") != -1 ||
+            deviceNameLower.indexOf("otg") != -1) {
+          isSystemDevice = true;
+        }
+        
+        // Common specific hubs
+        if (deviceNameLower.indexOf("terminus") != -1 ||
+            deviceNameLower.indexOf("fe 2.1") != -1 ||
+            deviceNameLower.indexOf("7-port") != -1 ||
+            deviceNameLower.indexOf("usb 2.0 hub") != -1 ||
+            deviceNameLower.indexOf("usb 3.0 hub") != -1 ||
+            deviceNameLower.indexOf("usb hub") != -1) {
+          isSystemDevice = true;
+        }
+        
+        // System controllers and virtual devices
+        if (deviceNameLower.indexOf("virtual") != -1 ||
+            deviceNameLower.indexOf("host controller") != -1 ||
+            (deviceNameLower.indexOf("controller") != -1 && 
+             (deviceNameLower.indexOf("host") != -1 || deviceNameLower.indexOf("otg") != -1))) {
+          isSystemDevice = true;
+        }
+        
+        // MiSTer internal devices
+        if (deviceNameLower.indexOf("terasic") != -1 ||
+            deviceNameLower.indexOf("de10") != -1 ||
+            deviceNameLower.indexOf("altera") != -1 ||
+            deviceNameLower.indexOf("mister") != -1) {
+          isSystemDevice = true;
+        }
+        
+        // Specific vendor IDs for hubs/system
+        if (deviceNameLower.indexOf("1d6b:") != -1 ||  // Linux Foundation
+            deviceNameLower.indexOf("1a40:0201") != -1) {  // Specific Terminus Hub
+          isSystemDevice = true;
+        }
+        
+        // Additional filters for generic/suspicious devices
+        if (deviceName.length() < 4 ||                    
+            deviceNameLower.indexOf("unknown") != -1 ||   
+            deviceNameLower.indexOf("generic") != -1) {   
+          isSystemDevice = true;
+        }
+        
+        // If system device, filter immediately
+        if (isSystemDevice) {
+          Serial.printf("FILTERED OUT (system/internal device)\n");
+          pos = nameEnd;
+          continue;
+        }
+        
+        // STEP 2: Whitelist of device TYPES (not specific brands)
+        bool isRealDevice = false;
+        
+        // Input peripherals (by type, not brand)
+        if (deviceNameLower.indexOf("keyboard") != -1 ||
+            deviceNameLower.indexOf("mouse") != -1 ||
+            deviceNameLower.indexOf("gamepad") != -1 ||
+            deviceNameLower.indexOf("joystick") != -1) {
+          isRealDevice = true;
+        }
+        
+        // Game controllers (by type/function)
+        if (deviceNameLower.indexOf("controller") != -1 ||
+            deviceNameLower.indexOf("pad") != -1 ||
+            deviceNameLower.indexOf("stick") != -1) {
+          isRealDevice = true;
+        }
+        
+        // USB-Serial adapters (by function)
+        if (deviceNameLower.indexOf("usb serial") != -1 ||
+            deviceNameLower.indexOf("serial adapter") != -1 ||
+            deviceNameLower.indexOf("usb-serial") != -1 ||
+            deviceNameLower.indexOf("hl-340") != -1) {
+          isRealDevice = true;
+        }
+        
+        // USB storage (by type)
+        if (deviceNameLower.indexOf("mass storage") != -1 ||
+            deviceNameLower.indexOf("usb drive") != -1 ||
+            deviceNameLower.indexOf("flash") != -1 ||
+            deviceNameLower.indexOf("storage") != -1) {
+          isRealDevice = true;
+        }
+        
+        // USB audio/video devices
+        if (deviceNameLower.indexOf("audio") != -1 ||
+            deviceNameLower.indexOf("webcam") != -1 ||
+            deviceNameLower.indexOf("camera") != -1) {
+          isRealDevice = true;
+        }
+        
+        // Known peripheral brands (extensive but not exhaustive list)
+        if (deviceNameLower.indexOf("trust") != -1 ||
+            deviceNameLower.indexOf("8bitdo") != -1 ||
+            deviceNameLower.indexOf("microsoft") != -1 ||
+            deviceNameLower.indexOf("logitech") != -1 ||
+            deviceNameLower.indexOf("razer") != -1 ||
+            deviceNameLower.indexOf("corsair") != -1 ||
+            deviceNameLower.indexOf("steelseries") != -1 ||
+            deviceNameLower.indexOf("roccat") != -1 ||
+            deviceNameLower.indexOf("cooler master") != -1 ||
+            deviceNameLower.indexOf("hyperx") != -1 ||
+            deviceNameLower.indexOf("sony") != -1 ||
+            deviceNameLower.indexOf("nintendo") != -1 ||
+            deviceNameLower.indexOf("qinheng") != -1 ||
+            deviceNameLower.indexOf("ftdi") != -1 ||
+            deviceNameLower.indexOf("prolific") != -1) {
+          isRealDevice = true;
+        }
+        
+        // Final logic: count only if real device
+        if (isRealDevice) {
+          usbDeviceCount++;
+          Serial.printf("COUNTED as external device (%d total) - Real device\n", usbDeviceCount);
+        } else {
+          Serial.printf("  ? UNKNOWN TYPE - not counted (might be internal)\n");
+        }
+      }
+      pos = nameEnd;
+    }
+    
+    // Count serial ports (ttyUSB, ttyACM)
+    pos = 0;
+    while ((pos = payload.indexOf("\"tty", pos)) != -1) {
+      int nameStart = pos + 1;
+      int nameEnd = payload.indexOf("\"", nameStart);
+      
+      if (nameStart > 0 && nameEnd > nameStart) {
+        String portName = payload.substring(nameStart, nameEnd);
+        
+        if (portName.startsWith("ttyUSB") || portName.startsWith("ttyACM")) {
+          serialPortCount++;
+          Serial.printf("Serial port: %s (%d total)\n", portName.c_str(), serialPortCount);
+        }
+      }
+      pos = nameEnd;
+    }
+    
+    Serial.printf("=== USB SUMMARY ===\n");
+    Serial.printf("Total devices found: %d\n", totalFound);
+    Serial.printf("External devices: %d\n", usbDeviceCount);
+    Serial.printf("Serial ports: %d\n", serialPortCount);
+    Serial.printf("==================\n");
+  } else {
+    Serial.printf("Error getting USB data: %d\n", code);
+    usbDeviceCount = 0;
+    serialPortCount = 0;
+  }
+  http.end();
+}
+
+void getNetworkAndSession() {
+  HTTPClient http;
+  http.begin(String("http://") + misterIP + ":8081/status/all");
+  
+  int code = http.GET();
+  if (code == 200) {
+    String payload = http.getString();
+    
+    networkIP = extractStringValue(payload, "ip_address");
+    networkConnected = (payload.indexOf("\"connected\":true") != -1);
+    sessionDuration = extractStringValue(payload, "session_duration_formatted");
+    requestsCount = extractIntValue(payload, "requests_count");
+  }
+  http.end();
+}
+
+// =============================================================================
+// RETROACHIEVEMENTS (page 6)
+// =============================================================================
+
+// Single-shot fetch of /status/retroachievements. Unlike getCurrentRomDetails()
+// there is no retry loop: the server resolves and caches everything in its own
+// thread, so the endpoint answers immediately. Arms the unlock popup when the
+// monotonic event_counter advances (first value is absorbed silently so a
+// reboot never pops a stale unlock).
+// -----------------------------------------------------------------------------
+// raCoreRecordsUnlocks() — can the running core actually bank an achievement?
+//
+// The RetroAchievements toolkit (odelot's Main_MiSTer fork) loads its adapted
+// cores through MGLs whose <setname> prefixes the stock name with 'RA_'
+// (RA_SNES, RA_MegaDrive, ...), and the server forwards CORENAME verbatim in
+// core_raw, so the prefix is the signal. On a stock core the panel still shows
+// the set and your account's progress — that is a cloud lookup keyed on the
+// ROM hash, true wherever you play — but nothing new will ever unlock.
+//
+// An empty core_raw (the legacy /status/core path, which clears it on purpose)
+// reads as "cannot tell", and cannot-tell is treated as NO: the banner is a
+// promise, and a promise that cannot be verified should not be made.
+// -----------------------------------------------------------------------------
+bool raCoreRecordsUnlocks() {
+  // The server owns the verdict: only it can see whether odelot's fork is
+  // installed and whether its debug log is beating right now, and that
+  // heartbeat is written by the FORK, so it holds for both installation
+  // routes. The prefix check survives underneath it for the one case the
+  // server cannot see — a toolkit install whose fork runs without debug=1,
+  // where there is no log at all — and it also keeps this working against a
+  // server that predates the field (absent -> false -> previous behaviour).
+  return raStatus.unlocksTracked || currentCoreRaw.startsWith("RA_");
+}
+
+void getRAStatus() {
+  if (ESP.getFreeHeap() < 45000) {
+    Serial.printf("[RA] Low memory (%d), skipping fetch\n", ESP.getFreeHeap());
+    return;
+  }
+
+  String url = String("http://") + misterIP + ":8081/status/retroachievements";
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(8000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+
+  int code = http.GET();
+  if (code != 200) {
+    Serial.printf("[RA] HTTP %d\n", code);
+    http.end();
+    raStatus.valid = false;
+    return;
+  }
+
+  String response = http.getString();
+  http.end();
+
+  if (response.length() > 4000) {
+    response = response.substring(0, 4000);  // flat JSON is <1KB; safety cap
+  }
+
+  raStatus.enabled            = extractBoolValue(response, "enabled");
+  raStatus.supported          = extractBoolValue(response, "supported");
+  raStatus.gameMatched        = extractBoolValue(response, "game_matched");
+  raStatus.status             = extractStringValue(response, "status");
+  raStatus.matchMethod        = extractStringValue(response, "match_method");
+  raStatus.gameTitle          = extractStringValue(response, "game_title");
+  raStatus.total              = extractIntValue(response, "total");
+  raStatus.unlocked           = extractIntValue(response, "unlocked");
+  raStatus.unlockedHardcore   = extractIntValue(response, "unlocked_hardcore");
+  raStatus.pointsEarned       = extractIntValue(response, "points_earned");
+  raStatus.pointsTotal        = extractIntValue(response, "points_total");
+  raStatus.pointsHardcore     = extractIntValue(response, "points_hardcore");
+  raStatus.core               = extractStringValue(response, "core");
+  raStatus.unlocksTracked     = extractBoolValue(response, "unlocks_tracked");
+  raStatus.forkLoadFailed     = extractBoolValue(response, "fork_load_failed");
+  raStatus.forkGameMismatch   = extractBoolValue(response, "fork_game_mismatch");
+  raStatus.eventCounter       = extractIntValue(response, "event_counter");
+  raStatus.lastUnlockTitle    = extractStringValue(response, "last_unlock_title");
+  raStatus.lastUnlockPoints   = extractIntValue(response, "last_unlock_points");
+  raStatus.lastUnlockHardcore = extractBoolValue(response, "last_unlock_hardcore");
+  raLastUnlockDesc            = extractStringValue(response, "last_unlock_description");
+  if (raLastUnlockDesc == "N/A") raLastUnlockDesc = "";
+
+  // New game resolved: the trophy-list buffer belongs to the old one.
+  int gid = extractIntValue(response, "game_id");
+  if (gid != raGameId) {
+    // A new game: reset the per-game view state. The banner is handled apart,
+    // below, since whether it may fire does not depend only on this edge.
+    raGameId    = gid;
+    raSubPage   = 0;
+    raListValid = false;
+    raDetailShown = false;
+  }
+
+  // READY banner: fire the first time a game both is a real, playable RA set
+  // AND runs on a core that can actually bank the unlock. Two independent facts
+  // with different timing — the game resolves on the first fetch, but the fork
+  // heartbeat proving the core can record often only goes live a fetch or two
+  // later — so this is deliberately NOT gated on the game_id edge above.
+  // raBannerShownFor makes it fire once per game and re-arm on the next. gid 0
+  // and 0-achievement sets stay silent; a stock core stays silent too, with the
+  // panel saying why in its place.
+  if (gid != 0 && gid != raBannerShownFor &&
+      raStatus.status == "ok" && raStatus.total > 0 &&
+      raCoreRecordsUnlocks()) {
+    raBannerPending  = true;
+    raBannerShownFor = gid;
+  }
+
+  raStatus.valid = true;
+
+  response = "";
+
+  Serial.printf("[RA] status=%s matched=%d %d/%d pts=%d/%d hc=%d evt=%d\n",
+                raStatus.status.c_str(), raStatus.gameMatched,
+                raStatus.unlocked, raStatus.total,
+                raStatus.pointsEarned, raStatus.pointsTotal,
+                raStatus.unlockedHardcore, raStatus.eventCounter);
+
+  if (raLastSeenEventCounter < 0) {
+    raLastSeenEventCounter = raStatus.eventCounter;      // boot: absorb
+  } else if (raStatus.eventCounter > raLastSeenEventCounter) {
+    raLastSeenEventCounter = raStatus.eventCounter;
+    raPopupUntil = millis() + 5000;                      // arm the popup
+    Serial.printf("[RA] Unlock popup armed: %s\n",
+                  raStatus.lastUnlockTitle.c_str());
+  }
+}
+
+// Full-panel status message helper (title + one-line subtitle).
+void drawRAMessage(const String &title, const String &subtitle, uint16_t color) {
+  Lcd.setTextColor(color);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(20, 70);
+  Lcd.print(title);
+
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(20, 100);
+  Lcd.print(subtitle);
+}
+
+// Page 6 renderer. Clears the same content band as displayMainHUD() and
+// branches on the endpoint's status field. unlocked==0 with status "ok" is a
+// legitimate "not started yet" state, not an error.
+void displayRetroAchievements() {
+  Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
+
+  if (!raStatus.valid) {
+    drawRAMessage("CONNECTING...", "Fetching achievement data", THEME_CYAN);
+    return;
+  }
+
+  if (raStatus.status == "not_configured") {
+    // The page is always present, so it must teach its own setup.
+    Lcd.setTextColor(THEME_YELLOW);
+    Lcd.setTextSize(2);
+    Lcd.setCursor(20, 44);
+    Lcd.print("RA NOT SET UP");
+
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(20, 76);   Lcd.print("To enable RetroAchievements:");
+    Lcd.setTextColor(THEME_WHITE);
+    Lcd.setCursor(20, 96);   Lcd.print("1. Get a Web API key at");
+    Lcd.setCursor(32, 108);  Lcd.print("retroachievements.org");
+    Lcd.setCursor(20, 124);  Lcd.print("2. On the MiSTer edit");
+    Lcd.setCursor(32, 136);  Lcd.print("ra_credentials.ini");
+    Lcd.setCursor(20, 152);  Lcd.print("3. Add username + api_key");
+    Lcd.setCursor(20, 168);  Lcd.print("4. Restart the monitor server");
+    return;
+  }
+
+  if (raStatus.status == "core_not_supported") {
+    String sub = raStatus.core.length() > 0 ? raStatus.core : "this core";
+    if (sub.length() > 34) sub = sub.substring(0, 34);
+    drawRAMessage("NO RA SUPPORT", "No achievements for " + sub, THEME_GRAY);
+    return;
+  }
+
+  if (raStatus.status == "no_game_loaded") {
+    drawRAMessage("NO GAME LOADED", "Load a game to see trophies", THEME_GRAY);
+    return;
+  }
+
+  if (raStatus.status == "rom_not_recognized") {
+    // Nothing resolved: not the hash index (which by construction lists only
+    // games that HAVE a set), not the fork's logged hash, not the corroborated
+    // LastGameID. Two causes are indistinguishable from here — the game may
+    // carry no set at all, or this dump may not be one of the linked ones — so
+    // the copy asserts neither. The previous text promised achievements that
+    // may not exist and blamed the dump, which is especially misleading on CD
+    // systems, where a non-standard image is rarely the reason.
+    Lcd.setTextColor(THEME_YELLOW);
+    Lcd.setTextSize(2);
+    Lcd.setCursor(20, 50);
+    Lcd.print("GAME NOT IDENTIFIED");
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(20, 82);   Lcd.print("RetroAchievements could not");
+    Lcd.setCursor(20, 96);   Lcd.print("identify this game from its");
+    Lcd.setCursor(20, 110);  Lcd.print("ROM or disc contents.");
+    Lcd.setTextColor(THEME_WHITE);
+    Lcd.setCursor(20, 134);  Lcd.print("Either no set exists for it,");
+    Lcd.setCursor(20, 148);  Lcd.print("or this dump is not linked.");
+    return;
+  }
+
+  if (raStatus.status != "ok") {
+    // hash_error / progress_unavailable / anything unexpected
+    drawRAMessage("RA UNAVAILABLE", "Could not read progress", THEME_RED);
+    return;
+  }
+
+  // The game resolved on RetroAchievements but carries no published set.
+  // Without this the panel would render POINTS 0/0 next to MATCHED and the
+  // subpage cycler would refuse to advance (listPages = 0 collapses the
+  // modulo to 0), which reads as a malfunction rather than as the stated
+  // outcome it is. Common on CD systems, where many titles are catalogued
+  // long before anyone writes achievements for them.
+  if (raStatus.total == 0) {
+    drawRAMessage("SET NOT PUBLISHED YET",
+                  "No achievements exist for this game yet", THEME_YELLOW);
+    return;
+  }
+
+  // ---- status == "ok": full progress panel ---------------------------------
+
+  // Game title, size 2, truncated to the 25 chars that fit from x=10.
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(10, 44);
+  {
+    // Leave room for the tappable subpage indicator when a trophy list
+    // exists (17 chars end at x=214; the indicator right-aligns to x=310).
+    unsigned int cap = (raStatus.total > 0) ? 17 : 25;
+    String t = raStatus.gameTitle;
+    if (t.length() > cap) t = t.substring(0, cap);
+    Lcd.print(t);
+  }
+  drawRAPageIndicator(false);
+
+  // Progress bar: unlocked/total. Guard divide-by-zero.
+  float pct = (raStatus.total > 0)
+              ? (100.0f * raStatus.unlocked / raStatus.total) : 0.0f;
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(10, 74);
+  Lcd.printf("PROGRESS  %d/%d", raStatus.unlocked, raStatus.total);
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setCursor(250, 74);
+  Lcd.printf("%d%%", (int)pct);
+  drawProgressBar(10, 88, 300, 16, pct);
+
+  // Mini-panels row: POINTS + (HARDCORE | MATCHED)
+  char pointsVal[24];
+  snprintf(pointsVal, sizeof(pointsVal), "%d/%d",
+           raStatus.pointsEarned, raStatus.pointsTotal);
+  drawMiniPanel(10, 112, 145, 40, "POINTS", String(pointsVal), THEME_GREEN);
+
+  // Top priority in this slot: on a stock core nothing here will ever
+  // move, and that single fact changes how the whole panel reads. The
+  // hardcore tally and the match method are diagnostics by comparison.
+  if (raStatus.forkLoadFailed || raStatus.forkGameMismatch) {
+    // Highest priority: the fork IS running here, it just never
+    // resolved this game, so nothing on this page can be earned.
+    // Without this the panel would read as if the set were live.
+    drawMiniPanel(165, 112, 145, 40, "UNLOCKS", "VIEW ONLY", THEME_ORANGE);
+  } else if (!raCoreRecordsUnlocks()) {
+    drawMiniPanel(165, 112, 145, 40, "UNLOCKS", "NOT RECORDED", THEME_YELLOW);
+  } else if (raStatus.unlockedHardcore > 0) {
+    char hcVal[24];
+    snprintf(hcVal, sizeof(hcVal), "%d (%dpt)",
+             raStatus.unlockedHardcore, raStatus.pointsHardcore);
+    drawMiniPanel(165, 112, 145, 40, "HARDCORE", String(hcVal), THEME_RED);
+  } else {
+    String mm = (raStatus.matchMethod == "lastgame") ? "LIVE (fork)" : "BY HASH";
+    drawMiniPanel(165, 112, 145, 40, "MATCHED", mm, THEME_CYAN);
+  }
+
+  // Last unlocked achievement (scrolling), or the "not started" line.
+  if (raStatus.lastUnlockTitle.length() > 0) {
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(10, 162);
+    Lcd.print("LAST:");
+
+    const int raVisibleChars = 40;   // x=46 + 40*6 = 286, inside the band
+    if (raUnlockScroll.fullText != raStatus.lastUnlockTitle ||
+        raUnlockScroll.maxChars != raVisibleChars) {
+      initScrollText(&raUnlockScroll, raStatus.lastUnlockTitle, raVisibleChars);
+    }
+    String shown = getScrolledText(&raUnlockScroll);
+    while ((int)shown.length() < raUnlockScroll.maxChars) shown += ' ';
+    Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+    Lcd.setCursor(46, 162);
+    Lcd.print(shown);
+  } else if (raStatus.unlocked == 0) {
+    Lcd.setTextColor(THEME_GRAY);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(10, 162);
+    Lcd.print("No achievements earned yet");
+  }
+
+  // Fixed advisory, stock cores only: the mini-panel above states that unlocks
+  // are not being recorded, this line says what to do about it. Everything else
+  // on the page stays valid — the set and your progress are a cloud read keyed
+  // on the ROM hash, true wherever the game is played — so this informs rather
+  // than warns. Guarded on total > 0 because a set with no achievements has
+  // nothing to record in the first place.
+  if (!raCoreRecordsUnlocks() && raStatus.total > 0) {
+    Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(10, 182);
+    Lcd.print("Use an RA-enabled core to record unlocks");
+  }
+}
+
+// Unlock popup overlay. Follows the showDownloadProgress() contract: paints a
+// framed band without a full-screen wipe, so it sits on top of whatever is up
+// (page or fullscreen image). loop() holds it 5 s and restores underneath.
+void showAchievementUnlock() {
+  // Card grew from 96 to 132 px tall so the title and the FULL description
+  // fit word-wrapped instead of being chopped at one 42-char line. Content
+  // width bw-24 = 256 px = 42 chars at size 1, and 3 wrapped lines hold 126
+  // chars >= the server's 120-char description cap, so nothing is lost.
+  // Card spans y 52..184, clear of the footer band (y >= 205).
+  const int bx = 20, by = 52, bw = 280, bh = 132;
+  const int tx = bx + 12;
+  const int CHARS = 42;
+
+  Lcd.fillRect(bx, by, bw, bh, THEME_BLACK);
+  Lcd.drawRect(bx, by, bw, bh, THEME_YELLOW);
+  Lcd.drawRect(bx + 1, by + 1, bw - 2, bh - 2, THEME_YELLOW);
+
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(THEME_YELLOW);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(tx, by + 10);
+  Lcd.print("ACHIEVEMENT!");
+
+  // Title: up to 2 wrapped lines.
+  int y = drawWrappedText(raStatus.lastUnlockTitle, tx, by + 34, CHARS, 2,
+                          THEME_WHITE, 1.0f, 11);
+
+  // Description — the server's log tailer fills it instantly (title AND
+  // description travel in the fork's log line); cloud-poll-only unlocks
+  // leave it empty and the block is simply skipped.
+  if (raLastUnlockDesc.length() > 0) {
+    y = drawWrappedText(raLastUnlockDesc, tx, y + 3, CHARS, 3, THEME_CYAN,
+                        1.0f, 11);
+  }
+
+  // A log-fired popup reaches the screen before the cloud confirms the
+  // points, so 0 means "pending", not "worthless". Pinned to the bottom of
+  // the card so it never collides with a short or a full-length description.
+  Lcd.setTextWrap(false);
+  Lcd.setTextSize(1);
+  Lcd.setTextColor(raStatus.lastUnlockHardcore ? THEME_RED : THEME_GREEN);
+  Lcd.setCursor(tx, by + bh - 16);
+  if (raStatus.lastUnlockPoints > 0) {
+    Lcd.printf("+%d pts%s", raStatus.lastUnlockPoints,
+               raStatus.lastUnlockHardcore ? "  [HARDCORE]" : "");
+  } else {
+    Lcd.print(raStatus.lastUnlockHardcore ? "UNLOCKED  [HARDCORE]" : "UNLOCKED");
+  }
+
+  playNextButtonSound();
+}
+
+// Micro-poll of /status/retroachievements/event (~60 B payload). This is the
+// latency tier between the server's log tailer (<1 s) and the full 30/60 s
+// status fetch: when the monotonic counter moves, the full fetch runs at
+// once and arms the popup. Baseline absorption stays in getRAStatus(), so a
+// reboot never pops a stale unlock through this path either.
+// Schedules the two RA polls (full status fetch + 5 s event micro-poll). No
+// drawing, so it is safe to call from any mode; used by both the screensaver
+// path and the page path. getRAStatus()/pollRAEvent() arm the popup inside.
+void pollRA() {
+  unsigned long raInterval = (currentPage == 6 && !showingCoreImage)
+                             ? RA_FETCH_INTERVAL_ACTIVE
+                             : RA_FETCH_INTERVAL_IDLE;
+  if (connected && millis() - lastRAFetch > raInterval) {
+    getRAStatus();
+    lastRAFetch = millis();
+    if (currentPage == 6 && !showingCoreImage) needsRedraw = true;
+  }
+  if (connected && millis() - lastRAEventPoll > RA_EVENT_POLL_INTERVAL) {
+    pollRAEvent();
+    lastRAEventPoll = millis();
+  }
+}
+
+// Services the unlock popup lifecycle: paints the armed popup as an overlay
+// (no full-screen wipe) and, after 5 s, restores whatever was underneath — a
+// page via needsRedraw, the fullscreen artwork via the same idiom the 30 s
+// rotation uses. Called from TWO sites in loop(): the screensaver path ABOVE
+// the `if (showingCoreImage) return;` early-return (so it can paint over the
+// image) and the page path AFTER the page render. The raPopupDrawn guard
+// means each arming paints exactly once, and every loop reaches only one of
+// the two sites.
+void serviceRAPopup() {
+  if (raPopupUntil == 0) return;
+  if (millis() < raPopupUntil) {
+    if (!raPopupDrawn) {
+      showAchievementUnlock();
+      raPopupDrawn = true;
+      coreImageStartTime = millis(); // hold the slide clock while the popup is up
+    }
+  } else {
+    raPopupUntil = 0;
+    raPopupDrawn = false;
+    if (showingCoreImage) {
+      if (showingGameImage && currentGame.length() > 0) {
+        showGameSlide();
+      } else {
+        showCoreImageScreenWithAutoDownload(currentCore);
+      }
+      coreImageStartTime = millis();
+    } else {
+      needsRedraw = true;
+    }
+  }
+}
+
+void pollRAEvent() {
+  if (ESP.getFreeHeap() < 40000) return;
+
+  String url = String("http://") + misterIP + ":8081/status/retroachievements/event";
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(3000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+
+  int code = http.GET();
+  if (code != 200) { http.end(); return; }
+  String response = http.getString();
+  http.end();
+  if (response.length() > 300) response = response.substring(0, 300);
+
+  int counter = extractIntValue(response, "event_counter");
+  if (raLastSeenEventCounter < 0 || counter > raLastSeenEventCounter) {
+    getRAStatus();               // owns popup arming + baseline absorption
+    lastRAFetch = millis();
+    if (currentPage == 6 && !showingCoreImage) needsRedraw = true;
+  }
+}
+
+// Fetch one page of the trophy list (flat a{i}_* fields, <= RA_LIST_PER_PAGE
+// rows). Called from the touch handler right before the redraw, so by the
+// time displayRAList() runs the buffer matches raSubPage. The server answers
+// from its progress cache: zero extra RA API calls, tens of ms locally.
+void getRAList(int listPage) {
+  raListValid = false;
+  if (ESP.getFreeHeap() < 45000) {
+    Serial.printf("[RA] Low memory (%d), skipping list fetch\n", ESP.getFreeHeap());
+    return;
+  }
+
+  String url = String("http://") + misterIP +
+               ":8081/status/retroachievements/achievements?page=" +
+               String(listPage) + "&per=" + String(RA_LIST_PER_PAGE);
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(5000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+
+  int code = http.GET();
+  if (code != 200) {
+    Serial.printf("[RA] list HTTP %d\n", code);
+    http.end();
+    return;
+  }
+  String response = http.getString();
+  http.end();
+  if (response.length() > 8000) response = response.substring(0, 8000);
+
+  if (extractStringValue(response, "status") != "ok") return;
+
+  raListPages = extractIntValue(response, "pages");
+  raListCount = extractIntValue(response, "count");
+  if (raListCount > RA_LIST_PER_PAGE) raListCount = RA_LIST_PER_PAGE;
+  if (raListCount < 0) raListCount = 0;
+
+  for (int i = 0; i < raListCount; i++) {
+    String p = "a" + String(i);
+    raListTitle[i]    = extractStringValue(response, p + "_title");
+    raListDesc[i]     = extractStringValue(response, p + "_desc");
+    raListPoints[i]   = extractIntValue(response,    p + "_points");
+    raListUnlocked[i] = extractBoolValue(response,   p + "_unlocked");
+    raListHardcore[i] = extractBoolValue(response,   p + "_hardcore");
+    if (raListTitle[i] == "N/A") raListTitle[i] = "";
+    if (raListDesc[i]  == "N/A") raListDesc[i]  = "";
+  }
+  raListPage  = listPage;
+  raListValid = true;
+  Serial.printf("[RA] list page %d/%d: %d rows\n",
+                listPage, raListPages, raListCount);
+}
+
+// Word-wraps `text` into at most maxLines lines of ~charsPerLine chars,
+// printed downward from (x, y) at `size` (6*size px/char), advancing `pitch`
+// px per line. Breaks on spaces where possible; the last allowed line gets an
+// ellipsis if text remains. Returns the y just below the last line drawn.
+//
+// size/pitch are parameters rather than the old hardcoded 1/11 because this
+// wrapper serves two very different surfaces: the unlock popup, a 5-second
+// toast that must stay compact, and the detail card, which is the reading
+// view and wants a larger face. charsPerLine is NOT derived from size here —
+// the caller knows its own box width, and deriving it would silently
+// invalidate every existing call site's hand-measured value.
+int drawWrappedText(const String& text, int x, int y, int charsPerLine,
+                    int maxLines, uint16_t color, float size, int pitch) {
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(color, THEME_BLACK);
+  Lcd.setTextSize(size);
+  String rest = text;
+  rest.trim();
+  int lines = 0;
+  while (rest.length() > 0 && lines < maxLines) {
+    String line;
+    if ((int)rest.length() <= charsPerLine) {
+      line = rest;
+      rest = "";
+    } else {
+      int cut = rest.lastIndexOf(' ', charsPerLine);
+      if (cut <= 0) cut = charsPerLine;      // no space: hard break
+      line = rest.substring(0, cut);
+      rest = rest.substring(cut);
+      rest.trim();
+    }
+    if (lines == maxLines - 1 && rest.length() > 0) {
+      if ((int)line.length() > charsPerLine - 3)
+        line = line.substring(0, charsPerLine - 3);
+      line += "...";
+    }
+    Lcd.setCursor(x, y);
+    Lcd.print(line);
+    y += pitch;
+    lines++;
+  }
+  return y;
+}
+
+// Description overlay for the achievement at raDetailRow: title, full
+// description, points and state, drawn over the content band. Dismissed by
+// any tap (handleTouch clears raDetailShown). Guards the row index in case
+// the buffer changed under it.
+void displayRADetail() {
+  Lcd.fillRect(0, 35, 320, 170, THEME_BLACK);
+  const int bx = 8, by = 40, bw = 304, bh = 162;
+  Lcd.drawRect(bx, by, bw, bh, THEME_YELLOW);
+  Lcd.drawRect(bx + 1, by + 1, bw - 2, bh - 2, THEME_YELLOW);
+
+  int i = raDetailRow;
+  if (!raListValid || i < 0 || i >= raListCount) {
+    drawRAMessage("NO DETAIL", "Tap to go back", THEME_GRAY);
+    return;
+  }
+
+  uint16_t stateColor;
+  const char* stateLabel;
+  if (raListHardcore[i])      { stateColor = THEME_RED;   stateLabel = "UNLOCKED - HARDCORE"; }
+  else if (raListUnlocked[i]) { stateColor = THEME_GREEN; stateLabel = "UNLOCKED"; }
+  else                        { stateColor = THEME_GRAY;  stateLabel = "LOCKED"; }
+
+  const int tx = bx + 10;
+  int y = by + 12;
+
+  // Title (up to 2 lines, 284/9 = 31 chars per line at 1.5x)
+  y = drawWrappedText(raListTitle[i], tx, y, 31, 2, THEME_YELLOW, 1.5f, 14);
+  y += 4;
+
+  // Points + state. The longest form, "1000 pts   UNLOCKED - HARDCORE", is
+  // 30 chars = 270 px at 1.5x, inside the 284 px interior.
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(stateColor, THEME_BLACK);
+  Lcd.setTextSize(1.5f);
+  Lcd.setCursor(tx, y);
+  Lcd.printf("%d pts   %s", raListPoints[i], stateLabel);
+  y += 20;
+
+  // Separator rule
+  Lcd.drawFastHLine(tx, y, bw - 20, THEME_GRAY);
+  y += 8;
+
+  // Description (up to 5 lines of 31 chars = 155, over the server's cap)
+  String d = raListDesc[i];
+  d.trim();
+  if (d.length() == 0) d = "(No description provided.)";
+  drawWrappedText(d, tx, y, 31, 5, THEME_CYAN, 1.5f, 14);
+
+  // Close hint, bottom-right inside the card
+  Lcd.setTextColor(THEME_GRAY, THEME_BLACK);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(bx + bw - 78, by + bh - 14);
+  Lcd.print("tap to close");
+}
+
+// Subpage indicator, top-right of the page-6 title row — same affordance and
+// hitbox contract as the GAME INFO "1/2>>" toggle. Shows "k/N>>" where k=1
+// is the progress panel and 2..N are the list pages; tapping the content
+// band advances and wraps. Drawn white as the press feedback, cyan at rest.
+void drawRAPageIndicator(bool pressed) {
+  if (!raStatus.valid || raStatus.status != "ok" || raStatus.total <= 0) return;
+  int listPages = (raStatus.total + RA_LIST_PER_PAGE - 1) / RA_LIST_PER_PAGE;
+  String ind = String(raSubPage + 1) + "/" + String(listPages + 1) + ">>";
+  int x = 310 - (int)ind.length() * 12;    // right-aligned, size 2 = 12 px/char
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(pressed ? THEME_WHITE : THEME_CYAN, THEME_BLACK);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(x, 44);
+  Lcd.print(ind);
+}
+
+// Page-6 subpage renderer: one page of the trophy list. Row format:
+//   [H] title ......................... 25p   hardcore unlock (red mark)
+//   [*] title ......................... 10p   softcore unlock (green mark)
+//   [ ] title .........................  5p   locked (gray, dim title)
+// Rows y = 81..171 step 30 (4 per page); the footer band (y>=205) stays
+// untouched. The last row's glyphs end at 179, leaving 26 px of air above the
+// footer — it used to be 17, which read as crowded, and only 4 px of that
+// cleared the point where this panel's touch starts behaving as footer.
+// Changing this layout means recomputing RA_ROW_TOUCH_TOP/PITCH through this
+// board's touch transform (see their declaration) — the two are NOT in the
+// same coordinate space here.
+void displayRAList() {
+  Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
+
+  // Same title-row geometry as the progress panel, so the indicator sits in
+  // exactly the same spot while cycling through subpages.
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(10, 44);
+  {
+    String t = raStatus.gameTitle;
+    if (t.length() > 17) t = t.substring(0, 17);
+    Lcd.print(t);
+  }
+  drawRAPageIndicator(false);
+
+  if (!raListValid || raListPage != raSubPage) {
+    drawRAMessage("LIST UNAVAILABLE", "Tap to advance and retry", THEME_GRAY);
+    return;
+  }
+
+  Lcd.setTextSize(1);
+  for (int i = 0; i < raListCount; i++) {
+    int y = 81 + i * 30;   // 4 rows, wider pitch for finger use
+
+    const char* mark;
+    uint16_t markColor;
+    if (raListHardcore[i])      { mark = "[H]"; markColor = THEME_RED;   }
+    else if (raListUnlocked[i]) { mark = "[*]"; markColor = THEME_GREEN; }
+    else                        { mark = "[ ]"; markColor = THEME_GRAY;  }
+
+    Lcd.setTextColor(markColor, THEME_BLACK);
+    Lcd.setCursor(10, y);
+    Lcd.print(mark);
+
+    String t = raListTitle[i];
+    if (t.length() > 36) t = t.substring(0, 36);   // 40 + 36*6 = 256 < 268
+    Lcd.setTextColor(raListUnlocked[i] ? THEME_WHITE : THEME_GRAY, THEME_BLACK);
+    Lcd.setCursor(40, y);
+    Lcd.print(t);
+
+    Lcd.setTextColor(raListUnlocked[i] ? THEME_CYAN : THEME_GRAY, THEME_BLACK);
+    Lcd.setCursor(268, y);
+    Lcd.printf("%3dp", raListPoints[i]);
+  }
+}
+
+void updateDisplay() {
+  Lcd.fillScreen(THEME_BLACK);
+
+  drawHeader(getPageTitle(), getPageSubtitle());
+
+  switch (currentPage) {
+    case 0: displayMainHUD();         break;
+    case 1: displaySystemMonitor();   break;
+    case 2: displayStorageArray();    break;
+    case 3: displayNetworkTerminal(); break;
+    case 4: displayDeviceScanner();   break;
+    case 5: displayGameInfo();        break;
+    case 6: if (raSubPage == 0)      displayRetroAchievements();
+            else if (raDetailShown)  displayRADetail();
+            else                     displayRAList();
+            break;
+  }
+
+  drawFooter();
+}
+
+void displayMainHUD() {
+  // ========== CLEAR CONTENT AREA ONLY ==========
+  // Clear area where original 320x240 content was drawn (Y=35 to Y=205)
+  Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
+  
+  // ========== ORIGINAL 320x240 CONTENT (auto-scaled 2x by Lcd) ==========
+  uint16_t panelColor = connected ? THEME_GREEN : THEME_YELLOW;
+  drawPanel(10, 50, 300, 70, panelColor);
+  
+  Lcd.setTextColor(THEME_BLACK);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(20, 60);
+  Lcd.print("ACTIVE CORE");
+  
+  // Core name with scroll for long names. Window of 14 chars at size 3 fits
+  // comfortably between x=20 and x=290 logical (plenty of margin).
+  String coreNormalized = foldForDisplay(currentCore);   // display-only fold; currentCore stays raw
+  if (coreNormalized.equalsIgnoreCase("arcade")) {
+    coreNormalized = "Arcade";
+  }
+  
+  if (mainHUDCoreScroll.fullText != coreNormalized) {
+    initScrollText(&mainHUDCoreScroll, coreNormalized, 14);
+  }
+  String coreDisplay = getScrolledText(&mainHUDCoreScroll);
+  // Pad to 14 chars for stable pixel width (avoids stale glyphs to the right)
+  while ((int)coreDisplay.length() < 14) coreDisplay += ' ';
+  
+  // Use setTextColor(fg, bg) for flicker-free repaint when this function
+  // is called repeatedly (which it is, from updateDisplay()).
+  Lcd.setTextColor(THEME_BLACK, panelColor);
+  Lcd.setTextSize(3);
+  Lcd.setCursor(20, 80);
+  Lcd.print(coreDisplay);
+  
+  if (!connected) {
+    Lcd.setTextColor(THEME_BLACK);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(20, 105);
+    Lcd.print("CHECK CONNECTION");
+  } else if (sdCardAvailable) {
+    Lcd.setTextColor(THEME_BLACK);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(20, 105);
+    Lcd.print("CORE IMAGES: READY");
+  }
+  
+  // Digital uptime clock
+  drawDigitalClock(10, 130, uptimeFormatted, "UPTIME");
+  
+  // Metrics in small panels
+  drawMiniPanel(10, 170, 90, 30, "CPU", String(cpuUsage, 1) + "%", cpuUsage > 80 ? THEME_RED : THEME_GREEN);
+  drawMiniPanel(115, 170, 90, 30, "RAM", String(memoryUsage, 1) + "%", memoryUsage > 80 ? THEME_RED : THEME_GREEN);
+  // Versions replace the old USB device count here: this row is system status,
+  // not core status, so it belongs beside CPU/RAM rather than inside the core
+  // panel. The USB count is not lost — the DEVICE SCANNER page still shows it,
+  // in more detail. drawMiniPanel's two text rows map exactly onto server over
+  // firmware. serverVersion is empty until the first snapshot (and on a server
+  // too old to report it), so "?" is shown instead of a blank slot.
+  //
+  // This panel fits 13 chars; "SERVER:2.7.0" is 12, so normal x.y.z versions
+  // fit. A suffixed version ("2.7.0-rc1") would not, so the labels shorten to
+  // S:/F: rather than spilling past the border.
+  {
+    String sv = serverVersion.length() ? serverVersion : String("?");
+    String sLine = "SERVER:" + sv;
+    String fLine = "FIRMW:"  + String(FIRMWARE_VERSION);
+    if (sLine.length() > 13 || fLine.length() > 13) {
+      sLine = "S:" + sv;
+      fLine = "F:" + String(FIRMWARE_VERSION);
+    }
+    // Live comparison, not the one-shot banner flags: the HUD must keep showing
+    // the warning for as long as the mismatch lasts, not just once per boot.
+    bool vMismatch = (serverVersion.length() > 0 && serverVersion != FIRMWARE_VERSION);
+    drawVersionPanel(220, 170, 90, 30, sLine, fLine, vMismatch);
+  }
+  
+  if (!connected) {
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(10, 155);
+    Lcd.print("Reconnecting to MiSTer...");
+  } else if (sdCardAvailable) {
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(10, 155);
+    Lcd.print("Core changes show images automatically");
+  }
+  
+}
+
+void displaySystemMonitor() {
+  // ========== CLEAR CONTENT AREA ONLY ==========
+  Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
+  
+  // ========== ORIGINAL 320x240 CONTENT (auto-scaled 2x by Lcd) ==========
+  drawPanel(10, 50, 300, 40, THEME_GREEN);
+  Lcd.setTextColor(THEME_BLACK);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(20, 57);
+  Lcd.print("CPU LOAD");
+  Lcd.setTextSize(2);
+  Lcd.setCursor(20, 72);
+  Lcd.printf("%.1f%%", cpuUsage);
+  
+  drawProgressBar(120, 65, 160, 15, cpuUsage);
+  
+  drawPanel(10, 100, 300, 40, THEME_CYAN);
+  Lcd.setTextColor(THEME_BLACK);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(20, 107);
+  Lcd.print("MEMORY");
+  Lcd.setTextSize(2);
+  Lcd.setCursor(20, 122);
+  Lcd.printf("%.1f%%", memoryUsage);
+  
+  drawProgressBar(120, 115, 160, 15, memoryUsage);
+  
+  Lcd.setTextColor(THEME_YELLOW);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(10, 155);
+  Lcd.print("SYSTEM STATUS:");
+  
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setCursor(10, 170);
+  Lcd.printf("RUNTIME: %s", uptimeFormatted.c_str());
+  
+  Lcd.setCursor(10, 185);
+  Lcd.printf("CONNECTION: %s", connected ? "ACTIVE" : "LOST");
+  
+}
+
+void displayStorageArray() {
+  // ========== CLEAR CONTENT AREA ONLY ==========
+  Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
+  
+  // ========== ORIGINAL 320x240 CONTENT (auto-scaled 2x by Lcd) ==========
+  drawPanel(10, 50, 300, 80, THEME_ORANGE);
+  
+  Lcd.setTextColor(THEME_BLACK);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(20, 60);
+  Lcd.print("STORAGE ARRAY - SD CARD");
+  
+  Lcd.setTextSize(2);
+  Lcd.setCursor(20, 80);
+  Lcd.printf("%.1fGB", sdUsedGB);
+  
+  Lcd.setTextSize(1);
+  Lcd.setCursor(20, 100);
+  Lcd.printf("of %.1fGB total", sdTotalGB);
+  
+  Lcd.setCursor(20, 115);
+  Lcd.printf("Free: %.1fGB", sdTotalGB - sdUsedGB);
+  
+  drawStorageBar(10, 140, 300, 25, sdUsagePercent);
+  
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(10, 180);
+  Lcd.printf("USAGE: %.0f%% | LOCAL SD: %s", sdUsagePercent, sdCardAvailable ? "OK" : "ERROR");
+  
+}
+
+void displayNetworkTerminal() {
+  // ========== CLEAR CONTENT AREA ONLY ==========
+  Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
+  
+  // ========== ORIGINAL 320x240 CONTENT (auto-scaled 2x by Lcd) ==========
+  drawPanel(10, 50, 300, 60, connected ? THEME_GREEN : THEME_RED);
+  
+  Lcd.setTextColor(THEME_BLACK);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(20, 60);
+  Lcd.print("DISPLAY <-> MISTER");
+  
+  Lcd.setTextSize(2);
+  Lcd.setCursor(20, 75);
+  Lcd.print(connected ? "CONNECTED" : "DISCONNECTED");
+  
+  Lcd.setTextColor(THEME_BLACK);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(20, 95);
+  Lcd.printf("Target: %s:8081", misterIP);
+  
+  // Detailed network info
+  Lcd.setTextColor(THEME_YELLOW);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(10, 125);
+  Lcd.print("NETWORK INFO:");
+  
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setCursor(10, 140);
+  Lcd.printf("MiSTer IP: %s", connected && networkIP != "N/A" ? networkIP.c_str() : misterIP);
+  
+  Lcd.setCursor(10, 155);
+  Lcd.printf("Monitor IP: %s", WiFi.localIP().toString().c_str());
+  
+  // Only show MiSTer network status if we have data
+  if (connected && networkConnected) {
+    Lcd.setCursor(10, 170);
+    Lcd.setTextColor(THEME_GREEN);
+    Lcd.printf("MiSTer Network: ONLINE");
+  } else if (connected) {
+    Lcd.setCursor(10, 170);
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.printf("MiSTer Network: Unknown");
+  }
+  
+  // Server statistics
+  if (connected) {
+    Lcd.setCursor(10, 185);
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.printf("Session: %s | Requests: %d", sessionDuration.c_str(), requestsCount);
+  } else {
+    Lcd.setCursor(10, 185);
+    Lcd.setTextColor(THEME_RED);
+    Lcd.print("Check server & network settings");
+  }
+  
+}
+
+void displayDeviceScanner() {
+  // ========== CLEAR CONTENT AREA ONLY ==========
+  Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
+  
+  // ========== ORIGINAL 320x240 CONTENT (auto-scaled 2x by Lcd) ==========
+  drawPanel(10, 50, 300, 50, THEME_BLUE);
+  
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(20, 60);
+  Lcd.print("DEVICE SCANNER");
+  
+  Lcd.setTextSize(2);
+  Lcd.setCursor(20, 75);
+  Lcd.printf("USB: %d | SERIAL: %d", usbDeviceCount, serialPortCount);
+  
+  drawPortArray(10, 105, usbDeviceCount, serialPortCount);
+  
+}
+
+void drawHeader(String title, String subtitle) {
+  Lcd.fillRect(0, 0, 320, 35, THEME_BLACK);
+  
+  drawMiSTerLogo(10, 5);
+  
+  Lcd.drawFastHLine(0, 32, 320, THEME_YELLOW);
+  Lcd.drawFastHLine(0, 33, 320, THEME_YELLOW);
+  
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(120, 8);
+  Lcd.print(title);
+  
+  Lcd.setTextColor(THEME_GREEN);
+  Lcd.setCursor(120, 20);
+  Lcd.print(subtitle);
+  
+  for (int i = 0; i < totalPages; i++) {
+    uint16_t color = (i == currentPage) ? THEME_YELLOW : THEME_GRAY;
+    // Shifted 8px left of the original 250: with 7 pages the last dot would
+    // reach x=304 and collide with the connection circle (centre 307, r=8).
+    Lcd.fillRect(242 + i * 8, 8, 6, 6, color);
+    if (i == currentPage) {
+      Lcd.drawRect(241 + i * 8, 7, 8, 8, THEME_YELLOW);
+    }
+  }
+  
+  drawStatusIndicator(307, 15, connected ? THEME_GREEN : THEME_RED, connected);
+}
+
+void drawPageIndicators() {
+  // Draw page indicators showing which screen is active
+  // Position: using physical coordinates (not scaled)
+  for (int i = 0; i < totalPages; i++) {
+    uint16_t color = (i == currentPage) ? THEME_YELLOW : THEME_GRAY;
+    
+    int indicatorX = 410 + i * 50;  // Positioned in right panel
+    int indicatorY = 210;
+    int indicatorSize = 30;
+    
+    // Filled square
+    Lcd.fillRect(indicatorX, indicatorY, indicatorSize, indicatorSize, color);
+    
+    // Border for active page
+    if (i == currentPage) {
+      Lcd.drawRect(indicatorX - 2, indicatorY - 2, 
+                         indicatorSize + 4, indicatorSize + 4, THEME_YELLOW);
+    } else {
+      Lcd.drawRect(indicatorX, indicatorY, 
+                         indicatorSize, indicatorSize, THEME_CYAN);
+    }
+  }
+}
+
+void drawMiSTerLogo(int x, int y) {
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(x, y);
+  Lcd.print("MiSTer");
+  
+  Lcd.setTextColor(THEME_YELLOW);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(x, y + 18);
+  Lcd.print("FPGA");
+  
+  for (int i = 0; i < 8; i++) {
+    Lcd.fillCircle(x + 45 + i * 4, y + 22, 1, THEME_CYAN);
+  }
+}
+
+void drawPanel(int x, int y, int w, int h, uint16_t color) {
+  Lcd.fillRect(x, y, w, h, color);
+  Lcd.drawRect(x, y, w, h, THEME_WHITE);
+  Lcd.drawRect(x + 1, y + 1, w - 2, h - 2, THEME_WHITE);
+  
+  Lcd.drawLine(x, y, x + 8, y, THEME_BLACK);
+  Lcd.drawLine(x, y, x, y + 8, THEME_BLACK);
+  Lcd.drawLine(x + w - 8, y, x + w, y, THEME_BLACK);
+  Lcd.drawLine(x + w, y, x + w, y + 8, THEME_BLACK);
+}
+
+// Version panel: drawMiniPanel's geometry, but a mismatch flips the whole box
+// to red with white text instead of the usual coloured-on-black. Red text on a
+// black fill is legible but easy to miss; a filled box is not. Kept separate
+// from drawMiniPanel because that one always fills black, and every other
+// caller depends on that.
+void drawVersionPanel(int x, int y, int w, int h, String sLine, String fLine, bool mismatch) {
+  // Three states. Orange: the MiSTer holds a newer image for this board, and
+  // a tap on the HUD reopens the offer banner (see handleTouch). Red:
+  // a mismatch the MiSTer cannot fix (server older than us, no image for this
+  // board, single-slot layout). Cyan: versions match.
+  const bool offer = mismatch && firmwareOffer.available && firmwareOtaCapable();
+  uint16_t border = offer ? THEME_ORANGE : mismatch ? THEME_RED   : THEME_CYAN;
+  uint16_t fill   = offer ? THEME_ORANGE : mismatch ? THEME_RED   : THEME_BLACK;
+  uint16_t fg     = offer ? THEME_BLACK  : mismatch ? THEME_WHITE : THEME_CYAN;
+  if (offer) {
+    sLine = "UPDATE";
+    fLine = "TAP:" + firmwareOffer.version;
+  }
+
+  Lcd.drawRect(x, y, w, h, border);
+  Lcd.fillRect(x + 1, y + 1, w - 2, h - 2, fill);
+
+  // Explicit background colour on the text keeps repaints flicker-free:
+  // displayMainHUD() runs on every refresh, not just on change.
+  Lcd.setTextColor(fg, fill);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(x + 5, y + 5);
+  Lcd.print(sLine);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(x + 5, y + 18);
+  Lcd.print(fLine);
+}
+
+void drawMiniPanel(int x, int y, int w, int h, String label, String value, uint16_t color) {
+  Lcd.drawRect(x, y, w, h, color);
+  Lcd.fillRect(x + 1, y + 1, w - 2, h - 2, THEME_BLACK);
+  
+  Lcd.setTextColor(color);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(x + 5, y + 5);
+  Lcd.print(label);
+  
+  Lcd.setTextSize(1);
+  Lcd.setCursor(x + 5, y + 18);
+  Lcd.print(value);
+}
+
+void drawProgressBar(int x, int y, int w, int h, float percent) {
+  Lcd.drawRect(x, y, w, h, THEME_WHITE);
+  Lcd.fillRect(x + 1, y + 1, w - 2, h - 2, THEME_BLACK);
+  
+  int fillW = (percent / 100.0) * (w - 4);
+  if (fillW > 0) {
+    uint16_t barColor = (percent > 80) ? THEME_RED : 
+                       (percent > 60) ? THEME_YELLOW : THEME_GREEN;
+    
+    Lcd.fillRect(x + 2, y + 2, fillW, h - 4, barColor);
+    Lcd.drawFastHLine(x + 2, y + 2, fillW, THEME_WHITE);
+  }
+}
+
+void drawStorageBar(int x, int y, int w, int h, float percent) {
+  drawProgressBar(x, y, w, h, percent);
+  
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(2);
+  int textX = x + (w / 2) - 20;
+  Lcd.setCursor(textX, y + 5);
+  Lcd.printf("%.0f%%", percent);
+}
+
+void drawDigitalClock(int x, int y, String time, String label) {
+  Lcd.setTextColor(THEME_GREEN);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(x, y);
+  Lcd.print(label + ":");
+  
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(x + 60, y - 3);
+  Lcd.print(time);
+}
+
+void drawStatusIndicator(int x, int y, uint16_t color, bool active) {
+  if (active) {
+    Lcd.fillCircle(x, y, 8, color);
+    Lcd.fillCircle(x, y, 4, THEME_WHITE);
+  } else {
+    Lcd.drawCircle(x, y, 8, color);
+    Lcd.drawCircle(x, y, 4, color);
+  }
+}
+
+void drawRadarScan(int centerX, int centerY, int radius, int angle) {
+  for (int r = 20; r <= radius; r += 20) {
+    Lcd.drawCircle(centerX, centerY, r, THEME_GREEN);
+  }
+  
+  float radAngle = angle * PI / 180.0;
+  int endX = centerX + radius * cos(radAngle);
+  int endY = centerY + radius * sin(radAngle);
+  
+  Lcd.drawLine(centerX, centerY, endX, endY, THEME_YELLOW);
+}
+
+void drawPortArray(int x, int y, int usbCount, int serialCount) {
+  // Show USB port information more informatively
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(x, y);
+  Lcd.printf("USB DEVICES CONNECTED: %d", usbCount);
+  
+  Lcd.setCursor(x, y + 15);
+  Lcd.printf("SERIAL PORTS ACTIVE: %d", serialCount);
+  
+  // Simplified graphical visualization of connected devices
+  int maxDisplay = min(usbCount, 8); // Display maximum 8 devices
+  for (int i = 0; i < 8; i++) {
+    uint16_t color = (i < maxDisplay) ? THEME_GREEN : THEME_GRAY;
+    int posX = x + (i % 4) * 35;
+    int posY = y + 35 + (i / 4) * 25;
+    
+    Lcd.drawRect(posX, posY, 30, 15, color);
+    if (i < maxDisplay) {
+      Lcd.fillRect(posX + 2, posY + 2, 26, 11, color);
+    }
+    
+    Lcd.setTextColor(THEME_WHITE);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(posX + 8, posY + 18);
+    Lcd.printf("U%d", i + 1);
+  }
+  
+  // Serial port indicators
+  for (int i = 0; i < 3; i++) {
+    uint16_t color = (i < serialCount) ? THEME_CYAN : THEME_GRAY;
+    int posX = x + 200 + i * 25;
+    int posY = y + 35;
+    
+    Lcd.drawRect(posX, posY, 20, 15, color);
+    if (i < serialCount) {
+      Lcd.fillRect(posX + 2, posY + 2, 16, 11, color);
+    }
+    
+    Lcd.setTextColor(THEME_WHITE);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(posX + 4, posY + 18);
+    Lcd.printf("S%d", i + 1);
+  }
+  
+  // Additional info if there are more devices
+  if (usbCount > 8) {
+    Lcd.setTextColor(THEME_YELLOW);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(x, y + 85);
+    Lcd.printf("+ %d more USB devices", usbCount - 8);
+  }
+}
+
+// =============================================================================
+// ============================ GAME INFO PANEL ================================
+// =============================================================================
+// Metadata (synopsis, year, publisher, developer, genre, players, rating) for
+// the game in play, extracted from ScreenScraper's jeuInfos.php and cached on
+// the microSD as a .meta sidecar next to the artwork.
+//
+// Design notes (see docs/propuesta-game-info-panel.md):
+//  - ONE extra jeuInfos call per NEW game, then cached forever on SD.
+//  - The response is read through a bounded SLIDING WINDOW so the huge
+//    multi-language synopsis[] never accumulates in heap (window <= ~6 KB).
+//  - Matching is whitespace-tolerant: the live API returns `"key": value`
+//    with a space after the colon (verified against real captures).
+//  - Extraction is ORDER-INDEPENDENT: each field is captured whenever its
+//    marker shows up, so field reordering on the API side cannot break it.
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Sidecar metadata path: same folder + base name as the artwork, ext .meta
+// "/cores/S/Game (USA).jpg" -> "/cores/S/Game (USA).meta"
+// -----------------------------------------------------------------------------
+String getMetaPathFromImagePath(const String &imagePath) {
+  int dot = imagePath.lastIndexOf('.');
+  if (dot <= 0) return imagePath + ".meta";
+  return imagePath.substring(0, dot) + ".meta";
+}
+
+// The GAME INFO sidecar of a game: in its cache directory, named after the
+// game, whether or not an image is cached there. Reading also accepts the
+// sidecar next to an image found in the other folder layout, so a cache made
+// under a different alphabetical_folders setting keeps its metadata. Writing
+// creates the directory when missing.
+String gameMetaPath(const String& coreName, const String& gameName, bool forWrite) {
+  String exact = getExactFileName(gameName);
+  String core = coreName;
+  core.toLowerCase();
+  if (forWrite) {
+    String imagePath = getSavePath(exact, core);
+    return getMetaPathFromImagePath(imagePath);
+  }
+  String path = gameCacheDir(exact, core) + "/" + exact + ".meta";
+  if (SD.exists(path)) return path;
+  String imagePath;
+  if (findGameImageExact(coreName, gameName, imagePath)) {
+    String beside = getMetaPathFromImagePath(imagePath);
+    if (SD.exists(beside)) return beside;
+  }
+  return path;
+}
+
+// =============================================================================
+// Game image cache: one file per category, described by a manifest
+// =============================================================================
+// <base> is gameCacheDir()/<game>. A game keeps at most one image per category:
+//   box   <base>.box.jpg      box3d, box2d, mix, mix1, mix2
+//   snap  <base>.snap.<ext>   screenshot
+//   title <base>.title.<ext>  titlescreen
+//   art   <base>.art.jpg      every other token
+// <base>.img says which one is shown and where each came from:
+//   mmimg 1
+//   main <category>
+//   <category> <source> <token> <order> <etag> <ext>
+// source is pack, ss or legacy. order stamps the media order an image was
+// chosen under ("game:<hash>" or "arcade:<hash>"), "-" when no order was
+// involved. etag is the server's tag for pack images, "-" otherwise.
+// A cache written by older firmware (<base>.jpg, no manifest) is adopted as
+// category "legacy", with no network traffic.
+// =============================================================================
+
+// GameImageEntry / GameImageManifest live in mister_types.h.
+
+static const char* gameImageCategory(const String& token) {
+  if (token == "box3d" || token == "box2d" || token == "mix" ||
+      token == "mix1" || token == "mix2") return "box";
+  if (token == "screenshot")  return "snap";
+  if (token == "titlescreen") return "title";
+  return "art";
+}
+
+static String gameCacheBase(const String& coreName, const String& gameName) {
+  String exact = getExactFileName(gameName);
+  String core = coreName;
+  core.toLowerCase();
+  return gameCacheDir(exact, core) + "/" + exact;
+}
+
+static String gameImagePath(const String& base, const GameImageEntry& e) {
+  if (e.cat == "legacy") return base + "." + e.ext;
+  return base + "." + e.cat + "." + e.ext;
+}
+
+// Which media order an image was chosen under, and its FNV-1a hash. Spaces are
+// ignored so reformatting the list in config.ini does not count as a change.
+String mediaOrderStamp(bool arcade) {
+  const String& order = arcade ? ARCADE_MEDIA_ORDER_STR : GAME_MEDIA_ORDER_STR;
+  uint32_t h = 2166136261u;
+  for (unsigned i = 0; i < order.length(); i++) {
+    char c = order.charAt(i);
+    if (c == ' ') continue;
+    h ^= (uint8_t)c;
+    h *= 16777619u;
+  }
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%s:%08lx", arcade ? "arcade" : "game", (unsigned long)h);
+  return String(buf);
+}
+
+static bool orderStampCurrent(const String& stamp) {
+  if (stamp == "-") return true;
+  return stamp == mediaOrderStamp(stamp.startsWith("arcade:"));
+}
+
+static bool loadGameImageManifest(const String& base, GameImageManifest& m) {
+  File f = SD.open(base + ".img");
+  if (!f) return false;
+  String head = f.readStringUntil('\n');
+  head.trim();
+  bool ok = (head == "mmimg 1");
+  while (ok && f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) continue;
+    if (line.startsWith("main ")) { m.main = line.substring(5); continue; }
+    String field[6];
+    int count = 0, from = 0;
+    while (count < 6 && from <= (int)line.length()) {
+      int sp = line.indexOf(' ', from);
+      if (sp < 0) sp = line.length();
+      field[count++] = line.substring(from, sp);
+      from = sp + 1;
+    }
+    if (count != 6 || from <= (int)line.length() || m.n >= 6) { ok = false; break; }
+    GameImageEntry& e = m.e[m.n++];
+    e.cat = field[0]; e.source = field[1]; e.token = field[2];
+    e.order = field[3]; e.etag = field[4]; e.ext = field[5];
+  }
+  f.close();
+  return ok && m.main.length() > 0 && m.find(m.main) != nullptr;
+}
+
+static bool saveGameImageManifest(const String& base, const GameImageManifest& m) {
+  File f = SD.open(base + ".img", FILE_WRITE);
+  if (!f) return false;
+  f.print("mmimg 1\nmain ");
+  f.print(m.main);
+  f.print("\n");
+  for (int i = 0; i < m.n; i++) {
+    const GameImageEntry& e = m.e[i];
+    f.printf("%s %s %s %s %s %s\n", e.cat.c_str(), e.source.c_str(), e.token.c_str(),
+             e.order.c_str(), e.etag.c_str(), e.ext.c_str());
+  }
+  f.close();
+  return true;
+}
+
+// Registers a freshly written image and makes it the one shown.
+void recordGameImage(const String& base, const String& cat, const String& source,
+                     const String& token, const String& order, const String& etag,
+                     const String& ext) {
+  GameImageManifest m;
+  if (!loadGameImageManifest(base, m)) m = GameImageManifest();
+
+  // An adopted image from older firmware is only ever the stand-in for a
+  // proper category; once one arrives the old file goes.
+  if (cat != "legacy") {
+    for (int i = 0; i < m.n; i++) {
+      if (m.e[i].cat != "legacy") continue;
+      String old = gameImagePath(base, m.e[i]);
+      if (SD.exists(old)) SD.remove(old);
+      m.e[i] = m.e[--m.n];
+      break;
+    }
+  }
+
+  GameImageEntry* e = m.find(cat);
+  if (!e) {
+    if (m.n >= 6) m.n = 0;      // cannot happen: five categories at most
+    e = &m.e[m.n++];
+  }
+  e->cat = cat;
+  e->source = source;
+  e->token = token.length() ? token : String("-");
+  e->order = order.length() ? order : String("-");
+  e->etag = etag.length() ? etag : String("-");
+  e->ext = ext;
+  m.main = cat;
+  if (!saveGameImageManifest(base, m))
+    Serial.printf("IMG: cannot write manifest for %s\n", base.c_str());
+}
+
+// The image to show for a game. stale, when not null, is set when that image
+// was chosen under a media order that has since changed.
+bool findGameImage(const String& coreName, const String& gameName, String& imagePath,
+                   bool* stale) {
+  if (stale) *stale = false;
+  if (!sdCardAvailable) return false;
+  String base = gameCacheBase(coreName, gameName);
+
+  GameImageManifest m;
+  if (loadGameImageManifest(base, m)) {
+    GameImageEntry* e = m.find(m.main);
+    String p = gameImagePath(base, *e);
+    if (SD.exists(p)) {
+      imagePath = p;
+      if (stale) *stale = !orderStampCurrent(e->order);
+      return true;
+    }
+  }
+
+  // Manifest missing or unreadable: any image of the current layout will do.
+  static const char* files[] = { ".box.jpg", ".art.jpg", ".snap.png", ".snap.jpg",
+                                  ".title.png", ".title.jpg" };
+  for (const char* tail : files) {
+    String p = base + tail;
+    if (SD.exists(p)) { imagePath = p; return true; }
+  }
+
+  // Cache from older firmware: adopt it under the order now configured, so
+  // only a later change to the list sends it back to ScreenScraper.
+  String legacy;
+  if (findGameImageExact(coreName, gameName, legacy)) {
+    imagePath = legacy;
+    String prefix = base + ".";
+    if (legacy.startsWith(prefix) && legacy.indexOf('.', prefix.length()) < 0) {
+      recordGameImage(base, "legacy", "legacy", "-", mediaOrderStamp(isArcadeCore(coreName)),
+                      "-", legacy.substring(prefix.length()));
+    }
+    return true;
+  }
+  return false;
+}
+
+// =============================================================================
+// Local pass: the MiSTer's packs, walked in media order
+// =============================================================================
+// Each token maps to what the server can serve for it from the installed
+// packs; screenshot falls back to the title screen, as it does on
+// ScreenScraper. The first token with a local image wins, ahead of any
+// ScreenScraper source: a pack is installed to be used.
+
+// fetchPackMedia() results.
+enum { PACK_NONE, PACK_SAME, PACK_NEW, PACK_ERROR };
+
+static int localSourcesFor(const String& token, const char* out[2]) {
+  if (strcmp(gameImageCategory(token), "box") == 0) { out[0] = "artwork"; return 1; }
+  if (token == "screenshot")  { out[0] = "snap"; out[1] = "title"; return 2; }
+  if (token == "titlescreen") { out[0] = "title"; return 1; }
+  return 0;
+}
+
+// Asks the server for one pack image of the loaded game. etagIn, when set, is
+// sent as If-None-Match: 304 means the cached copy is still current. A new
+// image is stored as <base>.<cat>.<ext> (ext from its signature) through a
+// temporary name, replacing whatever the category held, .565 included.
+static int fetchPackMedia(const char* kind, const String& base, const String& cat,
+                                const String& etagIn, uint32_t timeoutMs,
+                                String& extOut, String& etagOut) {
+  String url = String("http://") + misterIP + ":8081/media/" + kind;
+  HTTPClient http;
+  http.begin(url);
+  http.setConnectTimeout(timeoutMs);
+  http.setTimeout(timeoutMs);
+  const char* wanted[] = { "ETag" };
+  http.collectHeaders(wanted, 1);
+  if (etagIn.length() > 0) http.addHeader("If-None-Match", "\"" + etagIn + "\"");
+  int code = http.GET();
+  if (code == 304) { http.end(); return PACK_SAME; }
+  if (code == 404) { http.end(); return PACK_NONE; }
+  if (code != 200) {
+    Serial.printf("[LOCAL] /media/%s: HTTP %d\n", kind, code);
+    http.end();
+    return PACK_ERROR;
+  }
+  int len = http.getSize();
+  if (len <= 0 || len > MAX_IMAGE_SIZE) { http.end(); return PACK_NONE; }
+  etagOut = http.header("ETag");
+  etagOut.replace("\"", "");
+
+  String tmpPath = base + "." + cat + ".tmp";
+  File f = SD.open(tmpPath, FILE_WRITE);
+  if (!f) { http.end(); return PACK_ERROR; }
+  int written = http.writeToStream(&f);
+  f.close();
+  http.end();
+  if (written != len) { SD.remove(tmpPath); return PACK_ERROR; }
+
+  uint8_t sig[4] = {0, 0, 0, 0};
+  File r = SD.open(tmpPath);
+  if (r) { r.read(sig, 4); r.close(); }
+  bool jpeg = (sig[0] == 0xFF && sig[1] == 0xD8);
+  bool png  = (sig[0] == 0x89 && sig[1] == 'P' && sig[2] == 'N' && sig[3] == 'G');
+  if (!jpeg && !(png && pngIsSupported(SD, tmpPath.c_str()))) {
+    SD.remove(tmpPath);
+    return PACK_NONE;
+  }
+  extOut = png ? "png" : "jpg";
+  static const char* olds[] = { ".jpg", ".png", ".565" };
+  for (const char* o : olds) {
+    String old = base + "." + cat + o;
+    if (SD.exists(old)) SD.remove(old);
+  }
+  String finalPath = base + "." + cat + "." + extOut;
+  if (!SD.rename(tmpPath, finalPath)) { SD.remove(tmpPath); return PACK_ERROR; }
+  Serial.printf("[LOCAL] /media/%s -> %s (%d bytes)\n", kind, finalPath.c_str(), written);
+  return PACK_NEW;
+}
+
+// Walks the media order over the packs. Returns true when the image to show
+// changed: a new file was stored, or a cached pack image of another category
+// now leads. A cached pack image counts as available even when the server
+// answers 404 for it. False when no local image applies, nothing changed, or the
+// server could not be reached (the cache is then left exactly as it was).
+bool gameLocalPass(const String& base, bool arcade, uint32_t timeoutMs) {
+  if (strlen(misterIP) == 0) return false;
+  GameImageManifest m;
+  bool haveM = loadGameImageManifest(base, m);
+  String stamp = mediaOrderStamp(arcade);
+  const String& order = arcade ? ARCADE_MEDIA_ORDER_STR : GAME_MEDIA_ORDER_STR;
+
+  int start = 0;
+  while (start < (int)order.length()) {
+    int comma = order.indexOf(',', start);
+    String token = (comma == -1) ? order.substring(start) : order.substring(start, comma);
+    token.trim();
+    start = (comma == -1) ? order.length() : comma + 1;
+    const char* kinds[2];
+    int nk = localSourcesFor(token, kinds);
+    if (nk == 0) continue;
+    String cat = gameImageCategory(token);
+
+    for (int k = 0; k < nk; k++) {
+      // Only a pack image still on the card can be confirmed by its tag.
+      String etagIn;
+      GameImageEntry* e = haveM ? m.find(cat) : nullptr;
+      if (e && e->source == "pack" && e->etag != "-" && SD.exists(gameImagePath(base, *e)))
+        etagIn = e->etag;
+
+      String ext, etag;
+      int r = fetchPackMedia(kinds[k], base, cat, etagIn, timeoutMs, ext, etag);
+      if (r == PACK_ERROR) return false;
+      // A pack image already on the card is a local copy too: it still
+      // answers for its token when the server no longer has it (pack removed,
+      // or a moment when the server is between games).
+      if (r == PACK_NONE && etagIn.length() > 0) r = PACK_SAME;
+      if (r == PACK_NONE) continue;
+      if (r == PACK_NEW) {
+        recordGameImage(base, cat, "pack", token, stamp, etag, ext);
+        return true;
+      }
+      // PACK_SAME: the cached copy stands; make sure it is the one shown and
+      // carries the order it now answers to.
+      if (m.main == cat && e->order == stamp) return false;
+      recordGameImage(base, cat, "pack", token, stamp, e->etag, e->ext);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool saveGameMeta(const String &metaPath, const GameMeta &m) {
+  File f = SD.open(metaPath, FILE_WRITE);
+  if (!f) {
+    Serial.printf("META: cannot open %s for write\n", metaPath.c_str());
+    return false;
+  }
+  // synopsis goes LAST; values are single-line (whitespace already collapsed)
+  f.printf("v=1\nlang=%s\n", _info_lang_str.c_str());
+  f.printf("year=%s\n",      m.year.c_str());
+  f.printf("developer=%s\n", m.developer.c_str());
+  f.printf("publisher=%s\n", m.publisher.c_str());
+  f.printf("players=%s\n",   m.players.c_str());
+  f.printf("rating=%s\n",    m.rating.c_str());
+  f.printf("genre=%s\n",     m.genre.c_str());
+  f.printf("synopsis=%s\n",  m.synopsis.c_str());
+  f.close();
+  Serial.printf("META: saved %s\n", metaPath.c_str());
+  return true;
+}
+
+bool loadGameMeta(const String &metaPath, GameMeta &m) {
+  if (!SD.exists(metaPath)) return false;
+  File f = SD.open(metaPath, FILE_READ);
+  if (!f) return false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    int eq = line.indexOf('=');           // split on FIRST '=' only
+    if (eq < 1) continue;
+    String key = line.substring(0, eq);
+    String val = line.substring(eq + 1);
+    if      (key == "lang")      m.lang      = val;
+    else if (key == "year")      m.year      = val;
+    else if (key == "developer") m.developer = jsonUnescapeAndFold(val);
+    else if (key == "publisher") m.publisher = jsonUnescapeAndFold(val);
+    else if (key == "players")   m.players   = val;
+    else if (key == "rating")    m.rating    = val;
+    else if (key == "genre")     m.genre     = jsonUnescapeAndFold(val);
+    else if (key == "synopsis")  m.synopsis  = jsonUnescapeAndFold(val);
+    // Free-text fields are run through the decoder on load as well: it is
+    // idempotent on already-clean text, and it repairs sidecars written by
+    // earlier firmware that stored raw HTML entities such as &quot;.
+  }
+  f.close();
+  m.loaded = true;
+  Serial.printf("META: loaded %s\n", metaPath.c_str());
+  return true;
+}
+
+// -----------------------------------------------------------------------------
+// JSON scanning helpers — whitespace-tolerant (the live ScreenScraper API
+// returns `"key": "value"` with spaces after colons; verified on captures).
+// All of them operate on a partial window and return -1 / "" when the
+// pattern is not COMPLETELY inside the window yet, so callers simply retry
+// on the next chunk.
+// -----------------------------------------------------------------------------
+static inline bool metaIsWs(char c) {
+  return (c == ' ' || c == '\t' || c == '\r' || c == '\n');
+}
+
+// Index of `"key"` whose string value equals `value` (tolerating whitespace
+// around ':'), or -1.
+static int findKeyStringValue(const String &win, const char *key,
+                              const char *value, int from = 0) {
+  String kq = String("\"") + key + "\"";
+  String vq = String("\"") + value + "\"";
+  int p = win.indexOf(kq, from);
+  while (p >= 0) {
+    int i = p + kq.length();
+    while (i < (int)win.length() && metaIsWs(win[i])) i++;
+    if (i < (int)win.length() && win[i] == ':') {
+      i++;
+      while (i < (int)win.length() && metaIsWs(win[i])) i++;
+      if ((int)win.length() - i >= (int)vq.length() &&
+          win.substring(i, i + vq.length()) == vq) return p;
+    }
+    p = win.indexOf(kq, p + 1);
+  }
+  return -1;
+}
+
+// Index of the '[' that opens the array value of `"key"`, or -1.
+static int findKeyArrayStart(const String &win, const char *key, int from = 0) {
+  String kq = String("\"") + key + "\"";
+  int p = win.indexOf(kq, from);
+  while (p >= 0) {
+    int i = p + kq.length();
+    while (i < (int)win.length() && metaIsWs(win[i])) i++;
+    if (i < (int)win.length() && win[i] == ':') {
+      i++;
+      while (i < (int)win.length() && metaIsWs(win[i])) i++;
+      if (i < (int)win.length() && win[i] == '[') return i;
+    }
+    p = win.indexOf(kq, p + 1);
+  }
+  return -1;
+}
+
+// Index just past the opening quote of the FIRST `"text": "` at/after `from`,
+// or -1 when not fully in the window yet.
+static int findTextValueStart(const String &win, int from) {
+  int t = win.indexOf("\"text\"", from);
+  if (t < 0) return -1;
+  int i = t + 6;
+  while (i < (int)win.length() && metaIsWs(win[i])) i++;
+  if (i >= (int)win.length() || win[i] != ':') return -1;
+  i++;
+  while (i < (int)win.length() && metaIsWs(win[i])) i++;
+  if (i >= (int)win.length() || win[i] != '"') return -1;
+  return i + 1;
+}
+
+// Raw (still-escaped) value of the first `"text"` following `"marker"`.
+// "" until the closing unescaped quote is inside the window.
+static String extractTextAfterMarker(const String &win, const char *marker) {
+  int m = win.indexOf(String("\"") + marker + "\"");
+  if (m < 0) return "";
+  int q1 = findTextValueStart(win, m);
+  if (q1 < 0) return "";
+  int i = q1;
+  while (i < (int)win.length()) {
+    if (win[i] == '\\') { i += 2; continue; }
+    if (win[i] == '"') return win.substring(q1, i);
+    i++;
+  }
+  return "";
+}
+
+// -----------------------------------------------------------------------------
+// foldLatin1() / jsonUnescapeAndFold()
+// - Resolves JSON escapes: \" \\ \/ \n \r \t \uXXXX
+// - Folds common UTF-8 Latin characters to plain ASCII so the stock GLCD
+//   font can render synopsis text (a-acute -> a, n-tilde -> n, ...).
+// - Collapses whitespace runs to a single space.
+// -----------------------------------------------------------------------------
+static char foldLatin1(uint16_t cp) {
+  switch (cp) {
+    case 0xE1: case 0xE0: case 0xE2: case 0xE3: case 0xE4: case 0xE5: return 'a';
+    case 0xC1: case 0xC0: case 0xC2: case 0xC3: case 0xC4: case 0xC5: return 'A';
+    case 0xE9: case 0xE8: case 0xEA: case 0xEB: return 'e';
+    case 0xC9: case 0xC8: case 0xCA: case 0xCB: return 'E';
+    case 0xED: case 0xEC: case 0xEE: case 0xEF: return 'i';
+    case 0xCD: case 0xCC: case 0xCE: case 0xCF: return 'I';
+    case 0xF3: case 0xF2: case 0xF4: case 0xF5: case 0xF6: return 'o';
+    case 0xD3: case 0xD2: case 0xD4: case 0xD5: case 0xD6: return 'O';
+    case 0xFA: case 0xF9: case 0xFB: case 0xFC: return 'u';
+    case 0xDA: case 0xD9: case 0xDB: case 0xDC: return 'U';
+    case 0xF1: return 'n';  case 0xD1: return 'N';   // n-tilde
+    case 0xE7: return 'c';  case 0xC7: return 'C';   // c-cedilla
+    case 0xDF: return 's';                            // sharp s
+    case 0x2019: case 0x2018: return '\'';            // curly quotes
+    case 0x201C: case 0x201D: return '"';
+    case 0x2013: case 0x2014: return '-';             // en/em dash
+    case 0x2026: return '.';                          // ellipsis (approx)
+    case 0x00A0: return ' ';                          // nbsp
+    case 0x00A1: case 0x00BF: return 0;               // inverted !/? -> drop
+    default: return (cp < 0x80) ? (char)cp : '?';
+  }
+}
+
+// -----------------------------------------------------------------------------
+// foldForDisplay() — render-time fold of a RAW UTF-8 string to the ASCII the
+// stock GLCD font can draw. Used ONLY for the core/game name shown on screen
+// (ACTIVE CORE box, C:/G: footer). It must NEVER touch currentCore/currentGame
+// themselves: those stay raw UTF-8 so SD cache folders (sanitizeCoreFilename)
+// and ScreenScraper searches keep matching what the server sent. Folding the
+// stored value would fork the cache ('/cores/mgt sam coup?/' vs '.../coupe/').
+//
+// Unlike jsonUnescapeAndFold(), the input here is already-decoded UTF-8 bytes
+// (the server now emits ensure_ascii=false), not JSON \uXXXX escapes — so this
+// decodes the 2- and 3-byte UTF-8 sequences to a codepoint, then reuses
+// foldLatin1() for the actual glyph mapping. Malformed bytes are dropped.
+// -----------------------------------------------------------------------------
+String foldForDisplay(const String &in) {
+  String out;
+  out.reserve(in.length());
+  int i = 0, n = (int)in.length();
+  while (i < n) {
+    unsigned char c = (unsigned char)in[i];
+    uint16_t cp;
+    if (c < 0x80) {                       // plain ASCII
+      cp = c; i += 1;
+    } else if ((c & 0xE0) == 0xC0 && i + 1 < n) {   // 2-byte UTF-8
+      cp = ((c & 0x1F) << 6) | ((unsigned char)in[i + 1] & 0x3F);
+      i += 2;
+    } else if ((c & 0xF0) == 0xE0 && i + 2 < n) {   // 3-byte UTF-8 (curly quotes, dashes)
+      cp = ((c & 0x0F) << 12) | (((unsigned char)in[i + 1] & 0x3F) << 6)
+                              |  ((unsigned char)in[i + 2] & 0x3F);
+      i += 3;
+    } else {                              // stray/continuation byte: skip it
+      i += 1; continue;
+    }
+    char fc = foldLatin1(cp);
+    if (fc) out += fc;                    // foldLatin1 returns 0 to DROP (inverted !/?)
+  }
+  return out;
+}
+
+// -----------------------------------------------------------------------------
+// decodeHtmlEntity() — resolve one HTML entity starting at in[i] (which is '&').
+// On success writes the Unicode code point to `cp` and returns the index just
+// past the ';'. On failure returns -1 and the caller emits a literal '&'.
+// ScreenScraper synopses are HTML fragments, so they carry &quot; &amp; &eacute;
+// and friends on top of the JSON escaping.
+// -----------------------------------------------------------------------------
+static int decodeHtmlEntity(const String &in, int i, uint16_t &cp) {
+  int semi = in.indexOf(';', i + 1);
+  if (semi < 0 || semi - i > 10) return -1;          // not an entity
+  String name = in.substring(i + 1, semi);
+  if (name.length() == 0) return -1;
+
+  if (name[0] == '#') {                              // numeric: &#233; or &#xE9;
+    long v = (name.length() > 1 && (name[1] == 'x' || name[1] == 'X'))
+               ? strtol(name.c_str() + 2, nullptr, 16)
+               : strtol(name.c_str() + 1, nullptr, 10);
+    if (v <= 0 || v > 0xFFFF) return -1;
+    cp = (uint16_t)v;
+    return semi + 1;
+  }
+
+  struct Ent { const char *n; uint16_t cp; };
+  static const Ent TABLE[] = {
+    {"quot", 0x22}, {"apos", 0x27}, {"amp", 0x26}, {"lt", 0x3C}, {"gt", 0x3E},
+    {"nbsp", 0xA0}, {"iexcl", 0xA1}, {"iquest", 0xBF}, {"laquo", 0xAB},
+    {"raquo", 0xBB}, {"deg", 0xB0}, {"middot", 0xB7}, {"times", 0xD7},
+    {"copy", 0xA9}, {"reg", 0xAE}, {"trade", 0x2122},
+    {"lsquo", 0x2018}, {"rsquo", 0x2019}, {"ldquo", 0x201C}, {"rdquo", 0x201D},
+    {"ndash", 0x2013}, {"mdash", 0x2014}, {"hellip", 0x2026},
+    {"agrave", 0xE0}, {"aacute", 0xE1}, {"acirc", 0xE2}, {"auml", 0xE4},
+    {"ccedil", 0xE7}, {"egrave", 0xE8}, {"eacute", 0xE9}, {"ecirc", 0xEA},
+    {"euml", 0xEB}, {"igrave", 0xEC}, {"iacute", 0xED}, {"icirc", 0xEE},
+    {"ntilde", 0xF1}, {"ograve", 0xF2}, {"oacute", 0xF3}, {"ocirc", 0xF4},
+    {"ouml", 0xF6}, {"ugrave", 0xF9}, {"uacute", 0xFA}, {"ucirc", 0xFB},
+    {"uuml", 0xFC}, {"szlig", 0xDF},
+  };
+  for (unsigned k = 0; k < sizeof(TABLE) / sizeof(TABLE[0]); k++) {
+    if (name == TABLE[k].n) { cp = TABLE[k].cp; return semi + 1; }
+  }
+  return -1;
+}
+
+String jsonUnescapeAndFold(const String &in) {
+  String out;
+  out.reserve(in.length());
+  for (int i = 0; i < (int)in.length(); i++) {
+    unsigned char c = (unsigned char)in[i];
+    if (c == '\\' && i + 1 < (int)in.length()) {
+      char n = in[i + 1];
+      if      (n == 'n' || n == 'r' || n == 't') { out += ' '; i++; }
+      else if (n == '"' || n == '\\' || n == '/') { out += n;  i++; }
+      else if (n == 'u' && i + 5 < (int)in.length()) {
+        char hex[5];
+        in.substring(i + 2, i + 6).toCharArray(hex, 5);
+        uint16_t cp = (uint16_t)strtol(hex, nullptr, 16);
+        char fc = foldLatin1(cp);
+        if (fc) out += fc;
+        i += 5;
+      }
+      else { i++; }                                  // unknown escape: drop
+    }
+    else if (c == '&') {                             // HTML entity, e.g. &quot;
+      uint16_t cp = 0;
+      int next = decodeHtmlEntity(in, i, cp);
+      if (next > 0) {
+        char fc = foldLatin1(cp);
+        if (fc) out += fc;
+        i = next - 1;                                // loop's i++ lands on next
+      } else {
+        out += '&';                                  // a literal ampersand
+      }
+    }
+    else if (c < 0x80) out += (char)c;
+    else if ((c & 0xE0) == 0xC0 && i + 1 < (int)in.length()) {   // 2-byte UTF-8
+      uint16_t cp = ((c & 0x1F) << 6) | ((unsigned char)in[i + 1] & 0x3F);
+      char fc = foldLatin1(cp);
+      if (fc) out += fc;
+      i++;
+    }
+    else if ((c & 0xF0) == 0xE0 && i + 2 < (int)in.length()) {   // 3-byte UTF-8
+      uint16_t cp = ((c & 0x0F) << 12) |
+                    (((unsigned char)in[i + 1] & 0x3F) << 6) |
+                    ((unsigned char)in[i + 2] & 0x3F);
+      char fc = foldLatin1(cp);
+      if (fc) out += fc;
+      i += 2;
+    }
+    else out += '?';                                 // 4-byte or malformed
+  }
+  // Collapse whitespace runs
+  String clean;
+  clean.reserve(out.length());
+  bool prevSpace = false;
+  for (int i = 0; i < (int)out.length(); i++) {
+    char c = out[i];
+    if (c == ' ' || c == '\t') { if (!prevSpace) clean += ' '; prevSpace = true; }
+    else { clean += c; prevSpace = false; }
+  }
+  clean.trim();
+  return clean;
+}
+
+// -----------------------------------------------------------------------------
+// fetchGameMetadataJSON()
+//
+// One extra jeuInfos.php call per NEW game (then cached on SD forever).
+// gameId: ScreenScraper numeric game id when known ("" -> identify by ROM
+// hashes, exactly like searchWithJeuInfosPreciseJSON does).
+// Returns true if at least one field was captured (partial data is fine).
+//
+// Algorithm validated end-to-end against real API captures (meta_by_crc.json
+// and meta_by_gameid.json): typical read 4-8 KB of a 30-40 KB body, peak
+// window under 5 KB, early stop at "medias".
+// Flag discipline: metaFetchInProgress is cleared on EVERY return path.
+// -----------------------------------------------------------------------------
+bool fetchGameMetadataJSON(String gameId, String coreName,
+                           RomDetails romDetails, GameMeta &out) {
+  if (metaFetchInProgress) return false;
+  metaFetchInProgress = true;
+
+  if (ESP.getFreeHeap() < 100000) {
+    Serial.printf("META: insufficient heap (%d)\n", ESP.getFreeHeap());
+    metaFetchInProgress = false;
+    return false;
+  }
+
+  String url = "https://api.screenscraper.fr/api2/jeuInfos.php";
+  url += "?devid=" + String(SCREENSCRAPER_DEV_USER);
+  url += "&devpassword=" + String(SCREENSCRAPER_DEV_PASS);
+  url += "&softname=" + String(SCREENSCRAPER_SOFTWARE);
+  url += "&output=json";
+  url += "&ssid=" + urlEncode(String(SCREENSCRAPER_USER));
+  url += "&sspassword=" + urlEncode(String(SCREENSCRAPER_PASS));
+  if (gameId.length() > 0) {
+    url += "&gameid=" + gameId;
+  } else {
+    // Same extension-aware resolution as the artwork search: this CRC branch
+    // runs when GAME INFO is opened for a game whose artwork was already
+    // cached, so no search resolved a gameid for it. Asking under the core's
+    // own system would miss for a predecessor's title (see ssSystemForRom).
+    String systemId = ssSystemForRom(coreName, romDetails);
+    if (systemId.length() == 0) {
+      Serial.printf("META: core '%s' not mapped, skipping\n", coreName.c_str());
+      metaFetchInProgress = false;
+      return false;
+    }
+    url += "&systemeid=" + systemId;
+    url += "&romtype=rom";
+    url += "&romnom=" + urlEncode(ssRomnomFor(romDetails));
+    url += "&crc=" + romDetails.crc32;
+    url += "&romtaille=" + String(romDetails.filesize);
+    url += "&md5=" + romDetails.md5;
+    url += "&sha1=";
+  }
+  Serial.printf("META fetch URL: %s\n", redactScreenScraperUrl(url).c_str());
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(30000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+  http.addHeader("Accept", "application/json");
+
+  int httpCode = http.GET();
+  g_lastSSHttpCode = httpCode;
+  if (httpCode != 200) {
+    Serial.printf("META: HTTP %d\n", httpCode);
+    http.end();
+    metaFetchInProgress = false;
+    return false;
+  }
+
+  WiFiClient *stream = http.getStreamPtr();
+
+  // ---- sliding window state --------------------------------------------------
+  const size_t WIN_MAX   = 6144;   // window cap
+  const size_t TAIL_KEEP = 512;    // overlap kept when trimming
+  const size_t HARD_CAP  = 80000;  // absolute bytes read from the wire
+  String win;
+  win.reserve(WIN_MAX + 600);
+  size_t totalRead = 0;
+  unsigned long lastDataMs = millis();
+
+  bool gotPub = false, gotDev = false, gotPlayers = false, gotRating = false;
+  bool gotDates = false, gotGenres = false;
+
+  // synopsis: 0 = searching language, 1 = copying text, 2 = done
+  int  synState = 0;
+  bool synEsc = false, synTakingEN = false, inSynopsisBlock = false;
+  String synRaw, synRawEN;
+  synRaw.reserve(_info_synopsis_max + 8);
+
+  String datesBlock, genresBlock;
+  bool inDates = false, inGenres = false;
+  int  depth = 0;
+
+  // Capture one bracketed array block (bounded, bracket-depth tracked).
+  auto captureBlock = [&](const char *key, bool &inFlag, String &blk, bool &done) {
+    if (done) return;
+    if (!inFlag) {
+      int b = findKeyArrayStart(win, key);
+      if (b < 0) return;
+      inFlag = true;
+      depth = 0;
+      win.remove(0, b);                 // window now starts at '['
+    }
+    int i = 0;
+    while (i < (int)win.length()) {
+      char c = win[i];
+      i++;
+      if (c == '[') depth++;
+      if (c == ']') {
+        depth--;
+        if (depth == 0) { blk += c; done = true; inFlag = false; break; }
+      }
+      if ((int)blk.length() < 1500) blk += c;
+    }
+    win.remove(0, i);
+  };
+
+  char tmp[513];
+
+  while (totalRead < HARD_CAP) {
+    if (!http.connected() && stream->available() == 0) break;
+    if (ESP.getFreeHeap() < 60000) { Serial.println("META: low heap, stop"); break; }
+    if (millis() - lastDataMs > 8000) { Serial.println("META: read stall, stop"); break; }
+
+    int avail = stream->available();
+    if (avail <= 0) {
+      Board.update();
+      screenshotServer.handleClient();
+      delay(20);
+      continue;
+    }
+    int n = stream->readBytes(tmp, (avail > 512) ? 512 : avail);
+    if (n <= 0) continue;
+    tmp[n] = 0;
+    lastDataMs = millis();
+    totalRead += n;
+    win += tmp;
+
+    // ---- simple fields (early prefix of response.jeu) ------------------------
+    if (!gotPub) {
+      String v = extractTextAfterMarker(win, "editeur");
+      if (v.length()) { out.publisher = jsonUnescapeAndFold(v); gotPub = true; }
+    }
+    if (!gotDev) {
+      String v = extractTextAfterMarker(win, "developpeur");
+      if (v.length()) { out.developer = jsonUnescapeAndFold(v); gotDev = true; }
+    }
+    if (!gotPlayers) {
+      String v = extractTextAfterMarker(win, "joueurs");
+      if (v.length()) { out.players = jsonUnescapeAndFold(v); gotPlayers = true; }
+    }
+    if (!gotRating) {
+      String v = extractTextAfterMarker(win, "note");
+      if (v.length()) { out.rating = jsonUnescapeAndFold(v) + "/20"; gotRating = true; }
+    }
+
+    // ---- synopsis: preferred language, fallback English ----------------------
+    if (synState == 0) {
+      if (!inSynopsisBlock && findKeyArrayStart(win, "synopsis") >= 0)
+        inSynopsisBlock = true;
+      if (inSynopsisBlock) {
+        int lp = findKeyStringValue(win, "langue", _info_lang_str.c_str());
+        int le = findKeyStringValue(win, "langue", "en");
+        int use = (lp >= 0) ? lp
+                            : ((le >= 0 && synRawEN.length() == 0) ? le : -1);
+        if (use >= 0) {
+          synTakingEN = (lp < 0);
+          int q1 = findTextValueStart(win, use);
+          if (q1 >= 0) {
+            win.remove(0, q1);          // consume up to the opening quote
+            synState = 1;
+          }
+        }
+        // Synopsis region ended without a match -> give up on synopsis
+        if (synState == 0 && (findKeyArrayStart(win, "classifications") >= 0 ||
+                              findKeyArrayStart(win, "dates")  >= 0 ||
+                              findKeyArrayStart(win, "genres") >= 0 ||
+                              findKeyArrayStart(win, "medias") >= 0)) {
+          synState = 2;
+        }
+      }
+    }
+    if (synState == 1) {
+      // consume the whole window into the destination (window never grows)
+      String &dst = synTakingEN ? synRawEN : synRaw;
+      int i = 0;
+      while (i < (int)win.length()) {
+        char c = win[i];
+        i++;
+        if (synEsc) {
+          if ((int)dst.length() < _info_synopsis_max) { dst += '\\'; dst += c; }
+          synEsc = false;
+          continue;
+        }
+        if (c == '\\') { synEsc = true; continue; }
+        if (c == '"') {                 // synopsis text finished
+          synState = (synTakingEN && _info_lang_str != "en") ? 0 : 2;
+          break;
+        }
+        if ((int)dst.length() < _info_synopsis_max) dst += c;
+      }
+      win.remove(0, i);
+      if (synState == 1) continue;      // still copying: read next chunk
+    }
+
+    // ---- dates[] and genres[] mini-blocks (never while copying synopsis) -----
+    if (synState == 2 || !inSynopsisBlock) {
+      captureBlock("dates",  inDates,  datesBlock,  gotDates);
+      captureBlock("genres", inGenres, genresBlock, gotGenres);
+    }
+
+    // ---- stop / trim ----------------------------------------------------------
+    if (findKeyArrayStart(win, "medias") >= 0) break;   // all fields are behind us
+    if (gotPub && gotDev && gotPlayers && gotRating &&
+        synState == 2 && gotDates && gotGenres) break;
+    if (!inDates && !inGenres && synState != 1 && (size_t)win.length() > WIN_MAX)
+      win.remove(0, win.length() - TAIL_KEEP);
+  }
+  http.end();
+
+  // ---- post-process -----------------------------------------------------------
+  if (synRaw.length() == 0 && synRawEN.length() > 0) synRaw = synRawEN;
+  if (synRaw.length() > 0) {
+    out.synopsis = jsonUnescapeAndFold(synRaw);
+    if ((int)out.synopsis.length() >= _info_synopsis_max - 4) out.synopsis += "...";
+  }
+
+  // Year: region priority pref -> wor -> us -> eu -> jp (mirrors the artwork
+  // region ordering); take the first 4 chars ("1990-07-02" -> "1990").
+  if (datesBlock.length() > 0) {
+    const char *ORDER[5];
+    ORDER[0] = _boxart_region_str.c_str();
+    ORDER[1] = "wor"; ORDER[2] = "us"; ORDER[3] = "eu"; ORDER[4] = "jp";
+    for (int r = 0; r < 5 && out.year.length() == 0; r++) {
+      int p = findKeyStringValue(datesBlock, "region", ORDER[r]);
+      if (p < 0) continue;
+      String v = extractTextAfterMarker(datesBlock.substring(p), "region");
+      if (v.length() >= 4) out.year = v.substring(0, 4);
+    }
+    if (out.year.length() == 0) {       // any region at all
+      String v = extractTextAfterMarker(datesBlock, "region");
+      if (v.length() >= 4) out.year = v.substring(0, 4);
+    }
+  }
+
+  // Genre: up to two genre names in the preferred language, fallback English.
+  if (genresBlock.length() > 0) {
+    int from = 0, taken = 0;
+    while (taken < 2) {
+      int p = findKeyStringValue(genresBlock, "langue", _info_lang_str.c_str(), from);
+      if (p < 0 && taken == 0)
+        p = findKeyStringValue(genresBlock, "langue", "en", from);
+      if (p < 0) break;
+      String v = extractTextAfterMarker(genresBlock.substring(p), "langue");
+      if (v.length()) {
+        String g = jsonUnescapeAndFold(v);
+        if (out.genre.indexOf(g) < 0) {  // avoid duplicates across genres
+          if (out.genre.length()) out.genre += " / ";
+          out.genre += g;
+          taken++;
+        }
+      }
+      from = p + 10;
+    }
+  }
+
+  bool any = out.year.length() || out.developer.length() || out.publisher.length() ||
+             out.genre.length() || out.synopsis.length() || out.players.length();
+  out.loaded = any;
+  Serial.printf("META fetch done: read=%u heap=%d | y=%s dev='%s' pub='%s' pl=%s rt=%s gen='%s' syn=%d ch\n",
+                (unsigned)totalRead, ESP.getFreeHeap(),
+                out.year.c_str(), out.developer.c_str(), out.publisher.c_str(),
+                out.players.c_str(), out.rating.c_str(), out.genre.c_str(),
+                out.synopsis.length());
+  metaFetchInProgress = false;
+  return any;
+}
+
+// -----------------------------------------------------------------------------
+// wrapTextToLines() — greedy word wrap by character count.
+// ScaledDisplay does not expose textWidth(); the default GLCD font is a fixed
+// 6 px per character per size unit, so wrapping by character count is exact.
+// Words longer than a full line are hard-split (URLs, long romanised titles).
+// Returns the number of lines written to `out` (never more than maxOut).
+// -----------------------------------------------------------------------------
+int wrapTextToLines(const String &text, int maxChars, String *out, int maxOut) {
+  if (maxChars < 4 || maxOut < 1) return 0;
+  int n = 0;
+  String cur = "";
+  int from = 0;
+  while (from <= (int)text.length() && n < maxOut) {
+    int sp = text.indexOf(' ', from);
+    String word = (sp < 0) ? text.substring(from) : text.substring(from, sp);
+
+    // Hard-split any word that cannot fit on a line by itself
+    while ((int)word.length() > maxChars && n < maxOut) {
+      if (cur.length()) { out[n++] = cur; cur = ""; if (n >= maxOut) break; }
+      out[n++] = word.substring(0, maxChars);
+      word = word.substring(maxChars);
+    }
+    if (n >= maxOut) return n;
+
+    String cand = cur.length() ? cur + " " + word : word;
+    if ((int)cand.length() <= maxChars) {
+      cur = cand;
+    } else {
+      out[n++] = cur;
+      cur = word;
+    }
+    if (sp < 0) break;
+    from = sp + 1;
+  }
+  if (n < maxOut && cur.length()) out[n++] = cur;
+  return n;
+}
+
+// -----------------------------------------------------------------------------
+// drawWrappedText() — draw up to maxLines wrapped lines inside width w,
+// appending "..." to the last line when the text does not fit.
+// -----------------------------------------------------------------------------
+void drawWrappedText(int x, int y, int w, int lineH, int maxLines, const String &text) {
+  int maxChars = w / 6;                  // 6 px/char, default font, size 1
+  if (maxChars < 8 || maxLines < 1) return;
+
+  // One extra slot tells us whether the text overflowed the visible lines.
+  const int CAP = 64;
+  if (maxLines > CAP - 1) maxLines = CAP - 1;
+  static String lines[CAP];
+  int n = wrapTextToLines(text, maxChars, lines, maxLines + 1);
+
+  int shown = (n > maxLines) ? maxLines : n;
+  for (int i = 0; i < shown; i++) {
+    String l = lines[i];
+    if (i == shown - 1 && n > maxLines) {
+      if ((int)l.length() > maxChars - 4) l = l.substring(0, maxChars - 4);
+      l += " ...";
+    }
+    Lcd.setCursor(x, y + i * lineH);
+    Lcd.print(l);
+  }
+  for (int i = 0; i < CAP; i++) lines[i] = "";   // release heap
+}
+
+// =============================================================================
+// Synopsis subpage (2/2) — vertical line scroll
+// =============================================================================
+// At textSize(1.5) — the same size as the metadata grid — the GLCD font gives a
+// 9 px advance and a 12 px cap height, so 300 px is 33 chars/line and the
+// content band (y 82..190) fits 7 lines: ~231 visible characters against a
+// stored synopsis of up to 2000. The text is therefore wrapped ONCE into a
+// cached line array and a 7-line window scrolls down it, pausing at both ends.
+// -----------------------------------------------------------------------------
+// Line cache ceiling. info_synopsis_max clamps at 2000 chars; at 33 chars per
+// line that is ~61 lines before word breaks, so 100 leaves real headroom.
+#define GAMEINFO_SYN_MAX_LINES 100
+static String gameInfoSynLines[GAMEINFO_SYN_MAX_LINES];
+static int    gameInfoSynLineCount = 0;
+static String gameInfoSynCachedFor = "";
+
+static const int SYN_X      = 10;
+static const int SYN_TOP    = 82;
+static const int SYN_LINEH  = 16;   // 12 px glyph at size 1.5 + 4 px leading
+static const int SYN_VIS    = 7;    // visible lines: (194 - 82) / 16
+static const int SYN_CHARS  = 33;   // 300 px / (6 px * 1.5)
+
+// Wrap the current synopsis into the line cache (idempotent).
+static void buildGameInfoSynLines() {
+  if (gameInfoSynCachedFor == currentMeta.synopsis) return;
+  for (int i = 0; i < GAMEINFO_SYN_MAX_LINES; i++) gameInfoSynLines[i] = "";
+  gameInfoSynLineCount = wrapTextToLines(currentMeta.synopsis, SYN_CHARS,
+                                         gameInfoSynLines, GAMEINFO_SYN_MAX_LINES);
+  gameInfoSynCachedFor = currentMeta.synopsis;
+  Serial.printf("META: synopsis wrapped into %d lines\n", gameInfoSynLineCount);
+}
+
+// True when the synopsis is taller than the visible window.
+bool gameInfoSynNeedsScroll() {
+  buildGameInfoSynLines();
+  return gameInfoSynLineCount > SYN_VIS;
+}
+
+// Rewind to the top and pause there (called on every subpage/page entry).
+void resetGameInfoSynScroll() {
+  gameInfoSynScroll     = 0;
+  gameInfoSynScrollTime = millis();
+  gameInfoSynCycledTime = 0;
+  gameInfoSynPaused     = true;
+  gameInfoSynCycled     = false;
+  gameInfoForceExit     = false;
+}
+
+// -----------------------------------------------------------------------------
+// drawGameInfoSynopsis() — paint the visible window.
+// Every one of the SYN_VIS rows is printed padded to SYN_CHARS with an explicit
+// background colour, so a scroll step overwrites the previous frame exactly and
+// no fillRect (hence no flicker) is needed.
+// -----------------------------------------------------------------------------
+void drawGameInfoSynopsis() {
+  buildGameInfoSynLines();
+
+  int maxTop = gameInfoSynLineCount - SYN_VIS;
+  if (maxTop < 0) maxTop = 0;
+  if (gameInfoSynScroll > maxTop) gameInfoSynScroll = maxTop;
+
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(THEME_WHITE, THEME_BLACK);
+  Lcd.setTextSize(1.5);
+  for (int i = 0; i < SYN_VIS; i++) {
+    int li = gameInfoSynScroll + i;
+    String l = (li < gameInfoSynLineCount) ? gameInfoSynLines[li] : String("");
+    while ((int)l.length() < SYN_CHARS) l += ' ';
+    Lcd.setCursor(SYN_X, SYN_TOP + i * SYN_LINEH);
+    Lcd.print(l);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// tickGameInfoSynScroll() — advance one line per GAMEINFO_SYN_STEP_MS, holding
+// GAMEINFO_SYN_PAUSE_MS at the top and at the bottom.
+//
+// When the bottom hold expires the window FREEZES on the last lines and
+// gameInfoSynCycled is set (stamping gameInfoSynCycledTime). It deliberately
+// does not rewind: the loop then waits GAMEINFO_SYN_EXIT_MS more before leaving
+// the panel, and that extra time must be spent looking at the END of the text,
+// which is what the reader is still finishing.
+// -----------------------------------------------------------------------------
+void tickGameInfoSynScroll() {
+  if (gameInfoSynCycled) return;            // finished: frozen at the bottom
+
+  // Manual mode: the reader controls the pace, so never auto-advance. Freeze at
+  // the top immediately; the panel's exit logic then applies GAMEINFO_SYN_FIT_MS
+  // (15 s) — the same dwell used by a synopsis that needs no scrolling — before
+  // returning to the image.
+  if (!gameInfoSynAuto) {
+    gameInfoSynCycled     = true;
+    gameInfoSynCycledTime = millis();
+    return;
+  }
+
+  // The line cache MUST be current before maxTop is computed. handleTouch()
+  // runs earlier in the loop than this block, so a tap on the subpage toggle
+  // lands here in the same iteration — before any redraw has had the chance to
+  // build the lines. With a stale count (zero on the first game after boot)
+  // maxTop would come out negative, the scroll would be declared finished on
+  // the spot, and the panel would bounce back to the game image without ever
+  // scrolling. buildGameInfoSynLines() is idempotent, so this costs a string
+  // comparison on every other call.
+  buildGameInfoSynLines();
+
+  int maxTop = gameInfoSynLineCount - SYN_VIS;
+  if (maxTop < 1) {                         // fits entirely: nothing to scroll
+    gameInfoSynCycled     = true;
+    gameInfoSynCycledTime = millis();
+    return;
+  }
+
+  unsigned long now = millis();
+
+  if (gameInfoSynPaused) {
+    if (now - gameInfoSynScrollTime < GAMEINFO_SYN_PAUSE_MS) return;
+    if (gameInfoSynScroll >= maxTop) {      // the bottom hold just finished
+      gameInfoSynCycled     = true;         // stay on the last lines
+      gameInfoSynCycledTime = now;
+      return;
+    }
+    gameInfoSynPaused     = false;          // the top hold just finished
+    gameInfoSynScrollTime = now;
+    return;
+  }
+
+  if (now - gameInfoSynScrollTime >= GAMEINFO_SYN_STEP_MS) {
+    gameInfoSynScroll++;
+    gameInfoSynScrollTime = now;
+    if (gameInfoSynScroll >= maxTop) {      // reached the end: hold there
+      gameInfoSynScroll = maxTop;
+      gameInfoSynPaused = true;
+    }
+    drawGameInfoSynopsis();
+  }
+}
+
+// -----------------------------------------------------------------------------
+// displayGameInfo() — page 5 (GAME INFO / NOW PLAYING)
+//
+// Self-healing metadata resolution on every draw:
+//  1. game changed -> reset + try the .meta sidecar next to the artwork
+//  2. no sidecar -> ONE lazy fetch attempt per game (needs a valid CRC and
+//     no download in progress), then the sidecar is written for next time
+// updateDisplay() already draws header and footer; this only paints the
+// content area (y 35..215), like every other page on this board.
+// -----------------------------------------------------------------------------
+void displayGameInfo() {
+  // ========== CLEAR CONTENT AREA ONLY ==========
+  Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);
+
+  bool haveGame = (currentGame.length() > 0);
+
+  // ---- 1. game changed: reset and try the sidecar -----------------------------
+  if (haveGame && currentMeta.forGame != currentGame) {
+    currentMeta = GameMeta();
+    currentMeta.forGame = currentGame;
+    if (sdCardAvailable) {
+      loadGameMeta(gameMetaPath(currentCore, currentGame, false), currentMeta);
+    }
+
+    // Language mismatch: the sidecar was fetched in a different language than
+    // the one now configured. Drop it so the lazy-fetch block below re-queries
+    // ScreenScraper in the new language and overwrites the sidecar. A sidecar
+    // with no lang (written by pre-lang firmware) counts as a mismatch and is
+    // refreshed once. If that re-fetch cannot run (no CRC / no network), the
+    // block leaves currentMeta unloaded and the cached copy is reloaded just
+    // below — a synopsis in the wrong language beats no synopsis at all.
+    if (currentMeta.loaded && currentMeta.lang != _info_lang_str) {
+      Serial.printf("META: language changed (%s -> %s), refreshing\n",
+                    currentMeta.lang.c_str(), _info_lang_str.c_str());
+      GameMeta wrongLang = currentMeta;    // keep as fallback
+      currentMeta = GameMeta();
+      currentMeta.forGame = currentGame;
+      metaFetchAttemptedFor = "";          // allow the fetch below to run
+      g_metaLangFallback = wrongLang;      // stashed for the fallback step
+      g_metaLangFallbackValid = true;
+    }
+  }
+
+  // ---- 2. no sidecar: one lazy fetch attempt per game -------------------------
+  if (haveGame && !currentMeta.loaded &&
+      metaFetchAttemptedFor != currentGame &&
+      !downloadInProgress && !metaFetchInProgress) {
+    RomDetails rd = getCurrentRomDetails();
+
+    // This is the only place that queries ROM details for a game whose artwork
+    // came from the SD cache, so record the verdict for gameInfoAvailable().
+    lastRomHasCrc     = rd.available && rd.hashCalculated && rd.crc32.length() > 0;
+    lastRomCrcChecked = true;
+
+    if (rd.available && rd.hashCalculated && rd.crc32.length() > 0) {
+      metaFetchAttemptedFor = currentGame;
+      Lcd.setTextColor(THEME_CYAN);
+      Lcd.setTextSize(1);
+      Lcd.setCursor(10, 70);
+      Lcd.print("FETCHING GAME INFO...");
+      GameMeta m;
+      if (fetchGameMetadataJSON("", currentCore, rd, m)) {   // "" = identify by CRC
+        m.forGame = currentGame;
+        m.lang    = _info_lang_str;   // stamp language so sidecar and in-memory
+                                      // copy agree; else the next visit sees a
+                                      // mismatch and re-fetches in a loop
+        currentMeta = m;
+        g_metaLangFallbackValid = false;   // fresh copy in the right language wins
+        if (sdCardAvailable) {
+          saveGameMeta(gameMetaPath(currentCore, currentGame, true), m);
+        }
+      }
+      Lcd.fillRect(0, 35, 320, 180, THEME_BLACK);            // redraw clean
+    }
+  }
+
+  // ---- language re-fetch failed: fall back to the cached (wrong-language) copy
+  if (haveGame && !currentMeta.loaded && g_metaLangFallbackValid &&
+      g_metaLangFallback.forGame == currentGame) {
+    Serial.println("META: language re-fetch unavailable, keeping cached copy");
+    currentMeta = g_metaLangFallback;
+  }
+  if (g_metaLangFallbackValid && g_metaLangFallback.forGame != currentGame) {
+    g_metaLangFallbackValid = false;   // stale: user moved on to another game
+  }
+
+  // ---- header: game title (scrolls horizontally when too long) ----------------
+  // Scroll state is (re)initialised only when the underlying text changes, so
+  // the scroll position survives redraws (subpage flips, animation ticks).
+  // The visible window is padded to maxChars so the painted pixel width is
+  // constant, which is what makes setTextColor(fg, bg) flicker-free here.
+  String title = haveGame ? currentGame : String("NO GAME LOADED");
+  const int titleChars = 18;   // 216 px; the rest of the row is the indicator
+  if (gameInfoTitleScroll.fullText != title ||
+      gameInfoTitleScroll.maxChars != titleChars) {
+    initScrollText(&gameInfoTitleScroll, title, titleChars);
+  }
+  String titleShown = getScrolledText(&gameInfoTitleScroll);
+  while ((int)titleShown.length() < titleChars) titleShown += ' ';
+
+  Lcd.setTextWrap(false);
+  Lcd.setTextColor(THEME_YELLOW, THEME_BLACK);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(10, 40);
+  Lcd.print(titleShown);
+  Lcd.drawFastHLine(10, 58, 300, THEME_CYAN);
+
+  if (!haveGame || !currentMeta.loaded) {
+    gameInfoSubPage = 0;                 // no second subpage without metadata
+    Lcd.setTextColor(THEME_GRAY);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(10, 68);
+    Lcd.print(haveGame ? "NO METADATA AVAILABLE" : "LOAD A GAME ON THE MISTER");
+    if (haveGame) {
+      Lcd.setCursor(10, 82);
+      Lcd.print("(game not identified on ScreenScraper)");
+    }
+    return;
+  }
+
+  // Only offer a synopsis subpage when there actually is a synopsis.
+  bool hasSynopsis = (currentMeta.synopsis.length() > 0);
+  if (gameInfoSubPage == 1 && !hasSynopsis) gameInfoSubPage = 0;
+
+  // ---- subpage indicator / toggle (top-right of the title row, tappable) ------
+  // 6 chars at size 2 = 72 px, right-aligned to x=310. No frame: the arrows
+  // carry the affordance. Hitbox in the touch handler: x>=230, y 36..60.
+  if (hasSynopsis) {
+    Lcd.setTextColor(THEME_CYAN, THEME_BLACK);
+    Lcd.setTextSize(2);
+    Lcd.setCursor(238, 40);
+    Lcd.print(gameInfoSubPage == 0 ? "1/2>>" : "<<2/2");
+  }
+
+  if (gameInfoSubPage == 0) {
+    // ---- SUBPAGE 1/2: metadata fields -----------------------------------------
+    // size 1.5: glyph advance 9 px, height 12 px. Label column 10..73
+    // ("PLAYERS" = 7 x 9 px), value column from x=80 with 25 chars of room.
+    // Rows with an empty value are skipped, so the block height depends on the
+    // game: count the visible rows first, then centre them vertically in the
+    // band between the title rule (y=58) and the footer band (y=205).
+    struct MetaRow { const char *label; String *val; };
+    MetaRow rows[] = {
+      { "YEAR",    &currentMeta.year      },
+      { "DEV",     &currentMeta.developer },
+      { "PUB",     &currentMeta.publisher },
+      { "GENRE",   &currentMeta.genre     },
+      { "PLAYERS", &currentMeta.players   },
+      { "RATING",  &currentMeta.rating    },
+    };
+    const int BAND_TOP = 64, BAND_BOT = 200;   // usable content band
+    const int ROW_STEP = 20, ROW_H = 12;       // row pitch, glyph height at 1.5
+
+    int visible = 0;
+    for (int r = 0; r < 6; r++) if (rows[r].val->length() > 0) visible++;
+
+    // Block height = n pitches minus the trailing gap below the last row.
+    int blockH = visible * ROW_STEP - (ROW_STEP - ROW_H);
+    int y = BAND_TOP + ((BAND_BOT - BAND_TOP) - blockH) / 2;
+    if (y < BAND_TOP) y = BAND_TOP;
+
+    Lcd.setTextWrap(false);
+    for (int r = 0; r < 6; r++) {
+      gameInfoRowShown[r] = (rows[r].val->length() > 0);
+      if (!gameInfoRowShown[r]) continue;
+
+      Lcd.setTextColor(THEME_CYAN, THEME_BLACK);
+      Lcd.setTextSize(1.5);
+      Lcd.setCursor(10, y);
+      Lcd.print(rows[r].label);
+
+      // Value: scrolls horizontally when longer than the column. Padding to a
+      // constant width keeps the painted pixel width stable, which is what
+      // makes setTextColor(fg, bg) flicker-free on every scroll step.
+      if (gameInfoRowScroll[r].fullText != *rows[r].val ||
+          gameInfoRowScroll[r].maxChars != GI_VAL_CHARS) {
+        initScrollText(&gameInfoRowScroll[r], *rows[r].val, GI_VAL_CHARS);
+      }
+      String v = getScrolledText(&gameInfoRowScroll[r]);
+      while ((int)v.length() < GI_VAL_CHARS) v += ' ';
+
+      Lcd.setTextColor(THEME_WHITE, THEME_BLACK);
+      Lcd.setCursor(GI_VAL_X, y);
+      Lcd.print(v);
+
+      gameInfoRowY[r] = y;
+      y += ROW_STEP;
+    }
+  } else {
+    // ---- SUBPAGE 2/2: synopsis (wrapped, vertical auto-scroll) ----------------
+    Lcd.setTextColor(THEME_CYAN);
+    Lcd.setTextSize(1);
+    Lcd.setCursor(10, 66);
+    Lcd.print("SYNOPSIS");
+    drawGameInfoSynopsis();
+  }
+}
+
+String getPageTitle() {
+  switch(currentPage) {
+    case 0: return "MAIN HUD";
+    case 1: return "SYS MONITOR";
+    case 2: return "STORAGE";
+    case 3: return "NETWORK";
+    case 4: return "DEVICES";
+    case 5: return "GAME INFO";
+    case 6: return "RETROACHIEVEMENTS";
+    default: return "SYSTEM";
+  }
+}
+
+String getPageSubtitle() {
+  switch(currentPage) {
+    case 0: return "CORE STATUS";
+    case 1: return "PERFORMANCE";
+    case 2: return "DISK ARRAY";
+    case 3: return "TERMINAL";
+    case 4: return "SCANNER";
+    case 5: return "NOW PLAYING";
+    case 6: return raSubPage == 0 ? "RA TROPHIES" : "TROPHY LIST";
+    default: return "ONLINE";
+  }
+}
+
+float extractFloatValue(String json, String key) {
+  String searchKey = "\"" + key + "\":";
+  int index = json.indexOf(searchKey);
+  if (index == -1) return 0.0;
+  
+  int start = index + searchKey.length();
+  int end = json.indexOf(",", start);
+  if (end == -1) end = json.indexOf("}", start);
+  
+  return json.substring(start, end).toFloat();
+}
+
+int extractIntValue(String json, String key) {
+  String searchKey = "\"" + key + "\":";
+  int index = json.indexOf(searchKey);
+  if (index == -1) return 0;
+  
+  int start = index + searchKey.length();
+  int end = json.indexOf(",", start);
+  if (end == -1) end = json.indexOf("}", start);
+  
+  return json.substring(start, end).toInt();
+}
+
+String extractStringValue(String json, String key) {
+  String searchKey = "\"" + key + "\":\"";
+  int index = json.indexOf(searchKey);
+  if (index == -1) {
+    // Try without quotes (for non-string values that are treated as strings)
+    searchKey = "\"" + key + "\":";
+    index = json.indexOf(searchKey);
+    if (index == -1) return "N/A";
+    
+    int start = index + searchKey.length();
+    // Skip whitespace
+    while (start < json.length() && json.charAt(start) == ' ') {
+      start++;
+    }
+    
+    // Check if it starts with quote (string value)
+    if (json.charAt(start) == '"') {
+      start++; // Skip opening quote
+      int end = json.indexOf("\"", start);
+      if (end == -1) return "N/A";
+      return json.substring(start, end);
+    } else {
+      // Non-quoted value (number, boolean, etc.) - read until comma, }, or space
+      int end = start;
+      while (end < json.length() && 
+             json.charAt(end) != ',' && 
+             json.charAt(end) != '}' && 
+             json.charAt(end) != ' ' &&
+             json.charAt(end) != '\n' &&
+             json.charAt(end) != '\r') {
+        end++;
+      }
+      if (end > start) {
+        return json.substring(start, end);
+      }
+      return "N/A";
+    }
+  }
+  
+  // Original logic for quoted strings
+  int start = index + searchKey.length();
+  int end = json.indexOf("\"", start);
+  if (end == -1) return "N/A";
+  
+  return json.substring(start, end);
+}
+
+bool extractBoolValue(String json, String key) {
+  String searchKey = "\"" + key + "\":";
+  int index = json.indexOf(searchKey);
+  if (index == -1) return false;
+  
+  int start = index + searchKey.length();
+  // Skip whitespace
+  while (start < json.length() && json.charAt(start) == ' ') {
+    start++;
+  }
+  
+  // Check if it's true or false
+  if (json.substring(start, start + 4) == "true") {
+    return true;
+  }
+  return false;
+}
+
+bool isValidHash(String hash, String type) {
+  hash.trim();
+  
+  if (hash.length() == 0 || hash == "N/A") {
+    return false;
+  }
+  
+  if (type == "crc32" && hash.length() != 8) {
+    return false;
+  }
+  
+  if (type == "md5" && hash.length() != 32) {
+    return false;
+  }
+  
+  if (type == "sha1" && hash.length() != 40) {
+    return false;
+  }
+  
+  // Check if all characters are hexadecimal
+  for (int i = 0; i < hash.length(); i++) {
+    char c = hash.charAt(i);
+    if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))) {
+      return false;
+    }
+  }
+  
+  return true;
+}
+
+void showSDCardError() {
+  Lcd.fillScreen(THEME_BLACK);
+  
+  Lcd.setTextColor(THEME_RED);
+  Lcd.setTextSize(2);
+  Lcd.setCursor(80, 60);
+  Lcd.print("SD CARD");
+  Lcd.setCursor(90, 80);
+  Lcd.print("ERROR");
+  
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(40, 110);
+  Lcd.print("Check SD card:");
+  Lcd.setCursor(40, 125);
+  Lcd.print("1. Card inserted properly");
+  Lcd.setCursor(40, 140);
+  Lcd.print("2. Formatted as FAT32");
+  Lcd.setCursor(40, 155);
+  Lcd.print("3. Create /cores folder");
+  Lcd.setCursor(40, 170);
+  Lcd.print("4. Add 320x240 JPG images");
+  
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setCursor(40, 200);
+  Lcd.print("Continuing without core images...");
+  
+  delay(4000);
+}
+
+void showImageNotFound(String coreName) {
+  Lcd.fillScreen(THEME_BLACK);
+  
+  // Frame
+  Lcd.drawRect(20, 40, 280, 160, THEME_ORANGE);
+  Lcd.drawRect(21, 41, 278, 158, THEME_ORANGE);
+  
+  // "Image not found" icon
+  Lcd.setTextColor(THEME_ORANGE);
+  Lcd.setTextSize(4);
+  Lcd.setCursor(140, 80);
+  Lcd.print("?");
+  
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(110, 110);
+  Lcd.print("IMAGE NOT FOUND");
+  
+  Lcd.setTextColor(THEME_CYAN);
+  Lcd.setCursor(130, 130);
+  Lcd.print("CORE:");
+  Lcd.setTextColor(THEME_YELLOW);
+  Lcd.setCursor(100, 145);
+  String displayCore = coreName.length() > 12 ? coreName.substring(0, 12) : coreName;
+  String coreDisplay = displayCore;
+    if (coreDisplay.equalsIgnoreCase("arcade")) {
+      coreDisplay = "Arcade";
+    }
+    Lcd.print(coreDisplay);
+  
+  // Additional info
+  Lcd.setTextColor(THEME_GRAY);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(40, 170);
+  Lcd.printf("Expected: %s/A/*.jpg or /#/*.jpg", CORE_IMAGES_PATH);
+  
+  // Header and footer
+  drawMiSTerLogo(10, 5);
+  Lcd.setTextColor(THEME_WHITE);
+  Lcd.setTextSize(1);
+  Lcd.setCursor(120, 15);
+  Lcd.print("CORE IMAGE SYSTEM");
+  
+  drawStatusIndicator(300, 15, connected ? THEME_GREEN : THEME_RED, connected);
+  
+  Lcd.setTextColor(THEME_GREEN);
+  Lcd.setCursor(60, 225);
+  Lcd.print("Press any button to continue");
+}
+
+bool findGameImageExact(String coreName, String gameName, String &imagePath) {
+  if (!sdCardAvailable) {
+    Serial.println("SD not available");
+    return false;
+  }
+  
+  // Use the exact game name as it comes from the API
+  String exactFileName = getExactFileName(gameName);
+  String searchCore = coreName;
+  searchCore.toLowerCase();
+  // Sanitize after lowercasing — '/' in friendly names breaks SD paths.
+  searchCore = sanitizeCoreFilename(searchCore);
+  
+  bool isArcade = isArcadeCore(coreName);
+  
+  Serial.printf("\n=== Searching %sEXACT game image ===\n", isArcade ? "ARCADE " : "");
+  Serial.printf("Core: '%s' | Exact filename: '%s'\n", searchCore.c_str(), exactFileName.c_str());
+  
+  // List of supported extensions
+  String extensions[] = {".jpg", ".jpeg", ".JPG", ".JPEG"};
+  
+  // Function to try different paths
+  auto tryPath = [&](String basePath, String name) -> bool {
+    Serial.printf("Trying in directory: %s\n", basePath.c_str());
+    
+    for (String ext : extensions) {
+      String fullPath = basePath + "/" + name + ext;
+      Serial.printf("  Checking: %s\n", fullPath.c_str());
+      
+      if (SD.exists(fullPath)) {
+        File testFile = SD.open(fullPath);
+        if (testFile && testFile.size() > 0) {
+          imagePath = fullPath;
+          testFile.close();
+          Serial.printf("EXACT image found: %s (%d bytes)\n", 
+                       isArcade ? "ARCADE " : "", fullPath.c_str(), testFile.size());
+          return true;
+        }
+        if (testFile) testFile.close();
+      }
+    }
+    return false;
+  };
+  
+  if (isArcade && ENABLE_ALPHABETICAL_FOLDERS) {
+    // SPECIAL SEARCH FOR ARCADE: /cores/A/game.jpg
+    Serial.println("ARCADE: Searching in alphabetical structure by game name");
+    
+    if (exactFileName.length() > 0) {
+      char firstChar = exactFileName.charAt(0);
+      String alphabetPath;
+      
+      // Determine alphabetical folder based on the first letter of the game
+      if (firstChar >= '0' && firstChar <= '9') {
+        alphabetPath = String(CORE_IMAGES_PATH) + "/#";
+      } else if (firstChar >= 'a' && firstChar <= 'z') {
+        alphabetPath = String(CORE_IMAGES_PATH) + "/" + String((char)(firstChar - 32));
+      } else if (firstChar >= 'A' && firstChar <= 'Z') {
+        alphabetPath = String(CORE_IMAGES_PATH) + "/" + String(firstChar);
+      } else {
+        alphabetPath = String(CORE_IMAGES_PATH) + "/#";
+      }
+      
+      Serial.printf("ARCADE alphabetical search: %s\n", alphabetPath.c_str());
+      if (tryPath(alphabetPath, exactFileName)) return true;
+    }
+  } else if (ENABLE_ALPHABETICAL_FOLDERS && searchCore.length() > 0) {
+    // STANDARD SEARCH: /cores/A/corename/game.jpg
+    String alphabetPath = getAlphabeticalPath(searchCore);
+    String gamePath = alphabetPath + "/" + searchCore;
+    
+    Serial.printf("1. Searching in alphabetical structure: %s\n", gamePath.c_str());
+    if (tryPath(gamePath, exactFileName)) return true;
+  }
+  
+  // Search in direct structure: /cores/corename/exactgamename.jpg
+  String directPath = String(CORE_IMAGES_PATH) + "/" + searchCore;
+  Serial.printf("2. Searching in direct structure: %s\n", directPath.c_str());
+  if (tryPath(directPath, exactFileName)) return true;
+  
+  Serial.printf("No %sEXACT image found for: '%s'\n", 
+               isArcade ? "ARCADE " : "", gameName.c_str());
+  return false;
+}
+
+// ========== FUNCTION TO GET EXACT FILENAME ==========
+
+String getExactFileName(String gameName) {
+  String exactName = gameName;
+  
+  // Only remove characters that are NOT valid for filenames
+  // KEEP everything else exactly the same
+  exactName.replace("/", "_");
+  exactName.replace("\\", "_");
+  exactName.replace(":", "_");
+  exactName.replace("*", "_");
+  exactName.replace("?", "_");
+  exactName.replace("\"", "_");
+  exactName.replace("<", "_");
+  exactName.replace(">", "_");
+  exactName.replace("|", "_");
+  
+  // DO NOT remove parentheses, brackets, spaces, etc.
+  // User wants exact name!
+  
+  return exactName;
+}
+
+// ========== SANITIZE CORE NAME FOR USE AS FILE/DIR COMPONENT ==========
+// MiSTer friendly core names sometimes contain '/' (e.g. "Nintendo NES/Famicom",
+// "Sega Genesis/Mega Drive", "TurboGrafx-16/PC Engine"). Using them as-is in
+// SD paths creates phantom subdirectories that mkdir() cannot create
+// recursively, breaking both image lookup and download save.
+//
+// Mirror getExactFileName() but for core names. Keep visual look intact;
+// only replace path-hostile characters with '_'.
+String sanitizeCoreFilename(String name) {
+  String safe = name;
+  safe.replace("/",  "_");
+  safe.replace("\\", "_");
+  safe.replace(":",  "_");
+  safe.replace("*",  "_");
+  safe.replace("?",  "_");
+  safe.replace("\"", "_");
+  safe.replace("<",  "_");
+  safe.replace(">",  "_");
+  safe.replace("|",  "_");
+  return safe;
+}
+
+// ========== MISTER TO SCREENSCRAPER SYSTEM MAPPING ==========
+
+// -----------------------------------------------------------------------------
+// getScreenScraperSystemId() — resolution chain, raw CORENAME first.
+//
+// currentCoreRaw only applies when the question is about the core we are
+// actually tracking (coreName == currentCore): several call sites pass copies
+// (currentCoreForCrc and friends), and those match; a query about an arbitrary
+// name must not be answered with the current core's raw.
+//
+// An unmapped raw falls through to the friendly name. That fallback carries
+// three real cases: arcade (raw is the specific rbf, friendly 'Arcade' -> 75),
+// older servers (no core_raw in the snapshot), and the legacy /status/core
+// path (which clears the raw on purpose).
+// -----------------------------------------------------------------------------
+String getScreenScraperSystemId(String coreName) {
+  if (currentCoreRaw.length() > 0 && coreName == currentCore) {
+    String viaRaw = mapCoreToScreenScraperId(currentCoreRaw);
+    if (viaRaw.length() > 0) {
+      return viaRaw;
+    }
+  }
+  return mapCoreToScreenScraperId(coreName);
+}
+
+// -----------------------------------------------------------------------------
+// ssSystemForRom() — the ScreenScraper system to query for THIS file.
+//
+// Some cores run their predecessor's software: the Atari 7800 takes 2600
+// cartridges, the Apple IIgs boots Apple II disks through its 5.25" slot. The
+// core — and therefore CORENAME, and therefore getScreenScraperSystemId() —
+// is the same either way, so a 2600 game launched from the 7800 core used to
+// be searched under system 41, where its CRC simply does not exist. The
+// loaded file's extension is the signal that says which library it belongs to.
+//
+// Keyed on the RESOLVED system id rather than the core name: that survives a
+// names.txt rename and behaves identically whether the raw or the friendly leg
+// of the chain produced the id.
+//
+// altOut, when supplied, receives the sibling system worth a second query if
+// the first one misses. Some extensions are genuinely undecidable and no table
+// can settle them:
+//   .bin              is the classic 2600 extension, but the 7800 core accepts
+//                     raw 7800 dumps under it too;
+//   .po / .2mg / .woz are ProDOS-order and WOZ images, written by both eras.
+// For those the first choice keeps today's behaviour — the core's own system —
+// and the sibling turns what used to be a dead end into one cheap extra query.
+// The decisive extensions (.a26, .a78, .dsk/.do/.nib, .hdv) need no sibling.
+// -----------------------------------------------------------------------------
+String ssSystemForRom(const String& coreName, const RomDetails& rd, String* altOut) {
+  if (altOut) *altOut = "";
+
+  String base = getScreenScraperSystemId(coreName);
+  if (base.length() == 0) return base;
+
+  // Extension of the loaded file, lowercased, without the dot. Fall back to
+  // the path when the server sent no filename.
+  String name = rd.filename.length() > 0 ? rd.filename : rd.path;
+  int slash = name.lastIndexOf('/');
+  if (slash >= 0) name = name.substring(slash + 1);
+  int dot = name.lastIndexOf('.');
+  if (dot < 0) return base;              // no extension: nothing to decide on
+  String ext = name.substring(dot + 1);
+  ext.toLowerCase();
+
+  // --- Atari 7800 (41) also runs Atari 2600 (26) cartridges ------------------
+  if (base == "41") {
+    if (ext == "a26") { if (altOut) *altOut = "41";  return "26"; }
+    if (ext == "a78") {                              return "41"; }  // headered 7800 dump
+    if (ext == "bin") { if (altOut) *altOut = "26";  return "41"; }
+  }
+
+  // --- Genesis / Mega Drive (1) can be handed a Master System ROM -----------
+  // Field-confirmed: a .sms can be picked from the Genesis core's own OSD file
+  // browser. Its CONF_STR declares only "BINGENMD" and neither the source nor
+  // the README mentions Mark III support, so whether the core actually RUNS
+  // the cartridge is not something this firmware can know — but the MiSTer
+  // reports it as the loaded game either way, and a .sms is a Master System
+  // title regardless of which core opened it. Decisive, so no sibling.
+  if (base == "1") {
+    if (ext == "sms") return "2";    // Master System
+  }
+
+  // --- Sega Master System (2) also runs Game Gear and SG-1000/SC-3000 -------
+  // The SMS core declares two file slots (see its CONF_STR): "SMS SG SC" and
+  // "GG". All three foreign extensions are decisive — nothing else loads them
+  // — so no sibling is needed. Note the Genesis core is NOT part of this
+  // family: its single slot takes BIN/GEN/MD only and the source carries no
+  // Master System support at all, so a Mark III cartridge cannot reach it.
+  if (base == "2") {
+    // .gg gets a sibling: the core's own README warns that a number of dumps
+    // ship with a .gg extension while actually being Master System games (the
+    // SMSpower SMS-GG list), so a miss on Game Gear is worth re-asking as SMS.
+    if (ext == "gg") { if (altOut) *altOut = "2"; return "21"; }   // Game Gear
+    if (ext == "sg") return "109";   // SG-1000
+    if (ext == "sc") return "109";   // SC-3000, filed with SG-1000 upstream
+  }
+
+  // --- Apple IIgs (217) also boots Apple II (86) software --------------------
+  // The core exposes four slots (see its CONF_STR): two hard drives taking
+  // HDV/PO/2MG, a 3.5" taking WOZ/PO/2MG, and a 5.25" taking WOZ/DSK/DO/PO/
+  // NIB/2MG. DSK, DO and NIB only ever appear on that 5.25" slot and are the
+  // Apple II era's own formats, so they are decisive.
+  if (base == "217") {
+    if (ext == "dsk" || ext == "do" || ext == "nib") { if (altOut) *altOut = "217"; return "86"; }
+    if (ext == "hdv") {                                                    return "217"; }
+    if (ext == "po" || ext == "2mg" || ext == "woz") { if (altOut) *altOut = "86";  return "217"; }
+  }
+
+  // --- NES (3) also runs Famicom Disk System (106) images -------------------
+  // The disk system hangs off a Famicom and the NES core loads its images
+  // directly, so CORENAME stays NES. The "Famicom Disk System" entries in the
+  // name tables never fire for that reason -- no core is called that -- and a
+  // disk was being queried as a cartridge, under 3, where its CRC does not
+  // exist. .fds and .qd are decisive: nothing else on this core uses them.
+  // 3 is the sibling because ScreenScraper files some disk titles under NES.
+  if (base == "3") {
+    if (ext == "fds" || ext == "qd") { if (altOut) *altOut = "3"; return "106"; }
+  }
+
+  // --- SNES (4) also runs Satellaview (107) broadcasts ---------------------
+  // The BS-X adapter sits on a Super Famicom and the SNES core loads its
+  // broadcast dumps directly, so CORENAME stays SNES. ScreenScraper files
+  // them as their own system with their own art, and .bs is decisive: nothing
+  // else on this core uses that extension. 4 is the sibling for the same
+  // reason the server falls back from docs/Satellaview to docs/SNES --
+  // ScreenScraper occasionally files a BS title under the cartridge system.
+  if (base == "4") {
+    if (ext == "bs") { if (altOut) *altOut = "4"; return "107"; }
+  }
+
+  // --- Neo Geo (142) also runs Neo Geo CD (70) --------------------------------
+  // One core, two platforms: the cartridge side arrives as a .neo file, a
+  // Darksoft romset ZIP or a romset folder, while the CD side is a disc image.
+  // A disc image on this core can therefore only be a Neo Geo CD title, which
+  // is why the extension decides.
+  //
+  // There IS a "Neo-Geo CD" entry in the friendly-name table returning 70, but
+  // it can only fire when CORENAME is literally NeoGeo-CD. Loading a CD from
+  // the stock NeoGeo core never reaches it — the core resolves to 142 and the
+  // disc was queried as a cartridge, which is the bug this fixes.
+  //
+  // 70 leads and 142 is the sibling rather than the reverse: most Neo Geo CD
+  // releases are CD editions of AES/MVS titles, so ScreenScraper's cartridge
+  // entry usually exists even where its CD entry does not. Asking 70 first
+  // gets the CD-specific artwork when it is there; the retry recovers the
+  // cartridge entry when it is not. Today only 142 is ever asked, so this is
+  // strictly more coverage and never less.
+  if (base == "142") {
+    if (ext == "cue" || ext == "chd" || ext == "iso") {
+      if (altOut) *altOut = "142";
+      return "70";
+    }
+  }
+
+  return base;
+}
+
+String mapCoreToScreenScraperId(String coreName) {
+  String core = coreName;
+  
+  Serial.printf("Mapping MiSTer core '%s' to ScreenScraper system ID\n", core.c_str());
+  
+  // === EXACT NAME-BASED MAPPING (returned by /status/core) ===
+  
+  // Nintendo systems
+  if (core == "Nintendo Entertainment System" || core == "Nintendo NES/Famicom") return "3";
+  if (core == "Super Nintendo Entertainment System" || core == "Super Nintendo" || core == "Super Nintendo/Super Famicom") return "4";
+  if (core == "Nintendo 64") return "14";
+  if (core == "Nintendo Game Boy" || core == "Game Boy") return "9";
+  if (core == "Nintendo Game Boy Color" || core == "Game Boy Color") return "10";
+  if (core == "Nintendo Game Boy Advance" || core == "Game Boy Advance" || core == "Nintendo Game Boy Advance 2P") return "12";
+  if (core == "Famicom Disk System" || core == "Family Computer Disk System") return "106";
+  if (core == "Satellaview" || core == "Nintendo Satellaview") return "107";
+  if (core == "Nintendo Super Game Boy" || core == "Super Game Boy") return "127";
+  if (core == "Nintendo Game & Watch" || core == "Game & Watch") return "52";
+  if (core == "Nintendo Virtual Boy") return "11";
+  
+  // Sega systems
+  if (core == "Sega Genesis/Mega Drive" || core == "Megadrive") return "1";
+  if (core == "Megadrive 32X" || core == "Sega Genesis/Megadrive 32X") return "19";
+  if (core == "Sega Master System" || core == "Master System") return "2";
+  if (core == "Sega Game Gear" || core == "Game Gear") return "21";
+  if (core == "Sega Saturn" || core == "Saturn") return "22";
+  if (core == "Sega Mega-CD" || core == "Sega CD/Mega CD" || core == "MegaCD") return "20";
+  if (core == "Sega SG-1000" || core == "SG-1000") return "109";
+  
+  // Sony systems
+  if (core == "PlayStation" || core == "Sony PlayStation") return "57";
+  
+  // PC Engine / TurboGrafx
+  if (core == "TurboGrafx-16/PC Engine" || core == "PC Engine") return "31";
+  if (core == "PC Engine CD-Rom" || core == "TurboGrafx-16/PC Engine CD-Rom") return "114";
+  if (core == "PC Engine SuperGrafx" || core == "SuperGrafx") return "105";
+  
+  // Neo-Geo
+  if (core == "Neo-Geo") return "142";
+  if (core == "Neo-Geo CD") return "70";
+  if (core == "Neo Geo Pocket" || core == "Neo-Geo Pocket") return "25";
+  if (core == "Neo Geo Pocket Color" || core == "Neo-Geo Pocket Color") return "82";
+  
+  // Arcade — accept all known aliases that may arrive from server or SAM
+  if (core == "Arcade" ||
+      core == "mame"   ||
+      core == "MAME"   ||
+      core == "Multiple Arcade Machine Emulator") return "75";
+  
+  // Atari systems
+  if (core == "Atari 2600") return "26";
+  if (core == "Atari 5200") return "40";
+  if (core == "Atari 7800") return "41";
+  if (core == "Atari Lynx") return "28";
+  // The 2-player Lynx core is Atari Lynx with two ComLynx pads: same .lnx
+  // library (its games live under games/AtariLynx/), same ScreenScraper
+  // system. It is a distinct CORENAME, not a back-compat case for a foreign
+  // library, so it belongs here as system 28 rather than going through the
+  // game_system / ssSystemForRom path — there is no second system to decide
+  // between. Without this entry getScreenScraperSystemId() returns empty and
+  // artwork is impossible while the stock Lynx works.
+  if (core == "Atari Lynx (2P)") return "28";
+  if (core == "Atari Jaguar" || core == "Jaguar") return "27";
+  if (core == "Atari ST/STE" || core == "Atari ST") return "42";
+  if (core == "Atari 8bit") return "43";
+  
+  // Commodore / Amiga
+  if (core == "Commodore Amiga") return "64";
+  if (core == "Amiga CD32") return "130";
+  if (core == "Commodore 64" || core == "Commodore 128") return "66";
+  if (core == "Vic-20" || core == "Commodore VIC-20" || core == "Commodore Vic-20") return "73";
+  if (core == "PET" || core == "Commodore PET") return "240";
+  if (core == "C16") return "99";
+  
+  // PC / DOS
+  if (core == "PC Dos") return "135";
+  
+  // British micros
+  if (core == "ZX Spectrum") return "76";
+  if (core == "ZX81") return "77";
+  if (core == "Amstrad CPC" || core == "Amstrad GX4000" || core == "CPC") return "65";
+  if (core == "Acorn Electron" || core == "Electron") return "85";
+  if (core == "Acorn Atom" || core == "Atom") return "36";
+  if (core == "Acorn Archimedes" || core == "Archimedes") return "84";
+  if (core == "BBC Micro") return "37";
+  if (core == "MGT SAM Coup\xc3\xa9" || core == "SAM Coup\xc3\xa9") return "213";
+  
+  // MSX
+  if (core == "MSX" || core == "MSX1") return "113";
+  if (core == "MSX2 Computer" || core == "MSX2") return "116";
+  if (core == "MSX2+ Computer" || core == "MSX2Plus") return "116";
+  
+  // Other
+  if (core == "BK" || core == "Elektronika BK0011M") return "93";
+  if (core == "Tomy Tutor / Pyuta / Pyuta Jr.") return "317";
+  if (core == "Jupiter Ace") return "126";
+  if (core == "Tamagotchi") return "293";
+  if (core == "EG2000 Colour Genie") return "92";
+  if (core == "Camputers Lynx") return "88";
+  if (core == "NEC PC-8801") return "221";
+  if (core == "PC-9801") return "120";
+  if (core == "FM-7") return "97";
+  if (core == "Spectravideo SVI-328") return "218";
+  if (core == "TI-99/4A") return "205";
+  if (core == "Sharp X68000") return "79";
+  
+  // Apple
+  if (core == "Apple II") return "86";
+  // The IIgs runs Apple II software, but ScreenScraper catalogues it as its
+  // OWN system: a IIgs disk queried under 86 misses. Keep them distinct.
+  if (core == "Apple IIgs" || core == "Apple 2GS") return "217";
+  if (core == "Apple Macintosh Plus" || core == "Mac OS") return "146";
+  if (core == "Apple Macintosh LC") return "146";
+  
+  // Misc consoles / handhelds
+  if (core == "Vectrex") return "102";
+  if (core == "Intellivision") return "115";
+  if (core == "Colecovision") return "48";
+  if (core == "WonderSwan") return "45";
+  if (core == "WonderSwan Color" || core == "WonderSwanColor") return "46";
+  if (core == "Oric 1 / Atmos") return "131";
+  if (core == "Videopac G7000" || core == "Videopac G7000/Odyssey 2") return "104";
+  if (core == "CreatiVision") return "241";
+  if (core == "Channel F") return "80";
+  if (core == "Astrocade") return "44";
+  if (core == "Arcadia 2001") return "94";
+  if (core == "Adventure Vision") return "78";
+  if (core == "Adam") return "89";
+  if (core == "PV-1000" || core == "Casio PV-1000") return "74";
+  if (core == "CD-i" || core == "Philips CD-i" || core == "Phillips CD-i") return "133";
+  if (core == "3DO" || core == "Panasonic 3DO") return "29";
+  if (core == "Super Cassette Vision" || core == "SCV") return "67";
+  if (core == "Gamate" || core == "Bit Corporation Gamate") return "266";
+  if (core == "Mega Duck") return "90";
+  if (core == "Pocket Challenge V2") return "237";
+  if (core == "Pokemon Mini") return "211";
+  if (core == "Watara Supervision") return "207";
+  if (core == "VC 4000" || core == "Interton VC 4000") return "281";
+  
+  // TRS-80 / Tandy systems
+  if (core == "TRS-80 Color Computer" ||
+      core == "TRS-80 Color Computer 2" ||
+      core == "TRS-80 Color Computer 3") return "144";
+  
+  // Special cases
+  if (core == "Menu") return "";
+  
+  // === FALLBACK: lowercase variants and raw CORENAMEs ===
+  // Used when the server returns an unmapped CORENAME directly, or for
+  // alternate spellings from other sources.
+  String coreLower = core;
+  coreLower.toLowerCase();
+  
+  if (coreLower == "nes" || coreLower == "nintendo") return "3";
+  if (coreLower == "snes" || coreLower == "supernintendo") return "4";
+  if (coreLower == "n64" || coreLower == "nintendo64") return "14";
+  if (coreLower == "gameboy" || coreLower == "gb") return "9";
+  if (coreLower == "gbc" || coreLower == "gameboycolor") return "10";
+  if (coreLower == "gba" || coreLower == "gameboyadvance") return "12";
+  if (coreLower == "fds") return "106";
+  if (coreLower == "satellaview") return "107";
+  if (coreLower == "sgb") return "127";
+  if (coreLower == "genesis" || coreLower == "megadrive" || coreLower == "md") return "1";
+  if (coreLower == "s32x") return "19";
+  if (coreLower == "mastersystem" || coreLower == "sms") return "2";
+  if (coreLower == "gg") return "21";
+  if (coreLower == "saturn") return "22";
+  if (coreLower == "megacd" || coreLower == "segacd") return "20";
+  if (coreLower == "psx" || coreLower == "playstation") return "57";
+  if (coreLower == "tgfx16" || coreLower == "pcengine" ||
+      coreLower == "turbografx16") return "31";
+  if (coreLower == "neogeo" || coreLower == "neo-geo") return "142";
+  if (coreLower == "arcade" || coreLower == "mame" ||
+      coreLower == "multiple arcade machine emulator") return "75";
+  if (coreLower == "atari2600") return "26";
+  if (coreLower == "atari5200") return "40";
+  if (coreLower == "atari7800") return "41";
+  if (coreLower == "atarilynx") return "28";   // Camputers Lynx is "lynx48"
+  if (coreLower == "atarilynx2p") return "28"; // 2-player Lynx, same system as above
+  if (coreLower == "atarist") return "42";
+  if (coreLower == "amiga" || coreLower == "minimig" ||
+      coreLower == "amiga500" || coreLower == "amiga500hd" ||
+      coreLower == "amiga600hd" || coreLower == "commodore amiga") return "64";
+  if (coreLower == "amigacd32") return "130";
+  if (coreLower == "c64" || coreLower == "commodore64" || coreLower == "c128") return "66";
+  if (coreLower == "ao486" || coreLower == "pc dos" || coreLower == "pcxt") return "135";
+  // Raw CORENAMEs that reached this table only through their friendly names
+  // until core_raw existed. The raw chain must be self-sufficient for them:
+  // without these, "raw-first" silently degrades to friendly-only exactly on
+  // the cores the whole feature was built for.
+  if (coreLower == "atari800") return "43";        // Atari 8bit family
+  if (coreLower == "coco3") return "144";          // TRS-80 Color Computer 3
+  if (coreLower == "colecovision") return "48";
+  if (coreLower == "gameboy2p") return "10";       // shares GBC artwork
+  if (coreLower == "virtualboy") return "11";
+  if (coreLower == "odyssey2") return "104";       // Videopac G7000/Odyssey 2
+  if (coreLower == "svi328") return "218";         // Spectravideo SVI-328
+  // Apple. CORENAMEs straight from each core's CONF_STR, so the raw leg stands
+  // on its own: a names.txt entry renaming either core cannot cost it artwork
+  // by shadowing the friendly lookup above.
+  if (coreLower == "apple-iigs" || coreLower == "appleiigs") return "217";
+  if (coreLower == "apple-ii" || coreLower == "apple2") return "86";
+  if (coreLower == "maclc") return "146";
+  if (coreLower == "macplus") return "146";
+  if (coreLower == "amstrad" || coreLower == "cpc") return "65";
+  if (coreLower == "sam" || coreLower == "samcoupe") return "213";
+  if (coreLower == "x68000") return "79";
+  if (coreLower == "wonderswan") return "45";
+  if (coreLower == "wonderswancolor") return "46";
+  if (coreLower == "vectrex") return "102";
+  if (coreLower == "coleco") return "48";
+  if (coreLower == "intellivision") return "115";
+  if (coreLower == "3do") return "29";
+  if (coreLower == "supergrafx") return "105";
+  if (coreLower == "ngp") return "25";
+  if (coreLower == "ngpc") return "82";
+  if (coreLower == "gba2p") return "12";
+  if (coreLower == "scv") return "67";
+  if (coreLower == "jaguar") return "27";
+  // Systems whose ScreenScraper platform exists but was never wired up. The
+  // CORENAMEs come from the server's CORE_NAME_MAPPING keys, which are the
+  // strings those cores actually write to /tmp/CORENAME.
+  if (coreLower == "bk0011m" || coreLower == "bk") return "93";
+  if (coreLower == "tomytutor") return "317";
+  if (coreLower == "jupiter") return "126";     // CORENAME is "Jupiter", not "JupiterAce"
+  if (coreLower == "tamagotchi") return "293";  // no friendly mapping: raw == friendly
+  if (coreLower == "menu" || coreLower == "main") return "";
+  
+  Serial.printf("Core '%s' not mapped to ScreenScraper system\n", coreName.c_str());
+  return ""; // Unsupported system
+}
+
+// ========== IMAGE DOWNLOAD WITH AUTOMATIC RESIZING ==========
+
+bool downloadImageFromScreenScraper(String imageUrl, String savePath) {
+  // Add resizing parameters to ScreenScraper URL
+  String resizedUrl = imageUrl;
+  if (resizedUrl.indexOf("?") == -1) {
+    resizedUrl += "?";
+  } else {
+    resizedUrl += "&";
+  }
+  
+  // ScreenScraper can resize automatically
+  resizedUrl += "maxwidth=" + String(TARGET_WIDTH);
+  resizedUrl += "&maxheight=" + String(ARTWORK_MAX_HEIGHT);  // Use 645 instead of 720
+  resizedUrl += "&outputformat=jpg";
+  
+  Serial.printf("Downloading resized image: %s\n", redactScreenScraperUrl(resizedUrl).c_str());
+  
+  HTTPClient http;
+  http.begin(resizedUrl);
+  http.setTimeout(DOWNLOAD_TIMEOUT);
+  http.addHeader("User-Agent", SCREENSCRAPER_SOFTWARE);
+  
+  int httpCode = http.GET();
+  g_lastSSHttpCode = httpCode;
+
+  if (httpCode != 200) {
+    Serial.printf("Download failed: %d\n", httpCode);
+    showDownloadProgress(50, ssHudMessage(httpCode));
+    pumpedDelay(2000);
+    http.end();
+    return false;
+  }
+  
+  int contentLength = http.getSize();
+  if (contentLength > MAX_IMAGE_SIZE) {
+    Serial.printf("Image too large: %d bytes (max %d)\n", contentLength, MAX_IMAGE_SIZE);
+    http.end();
+    return false;
+  }
+  
+  if (contentLength <= 0) {
+    Serial.println("Invalid content length");
+    http.end();
+    return false;
+  }
+  
+  showDownloadProgress(50, "Downloading...");
+  
+  // Download to buffer 
+  uint8_t* buffer = (uint8_t*)malloc(contentLength);
+  if (!buffer) {
+    Serial.println("No memory for download");
+    http.end();
+    return false;
+  }
+  
+  WiFiClient* stream = http.getStreamPtr();
+  size_t downloaded = 0;
+  unsigned long downloadStart = millis();
+  
+  while (downloaded < (size_t)contentLength) {
+    // Safety: abort if download hangs beyond DOWNLOAD_TIMEOUT
+    if (millis() - downloadStart > DOWNLOAD_TIMEOUT) {
+      Serial.println("[DOWNLOAD] Timeout waiting for stream data");
+      break;
+    }
+    size_t available = stream->available();
+    if (available > 0) {
+      size_t toRead = min(available, (size_t)(contentLength - downloaded));
+      size_t read = stream->readBytes(buffer + downloaded, toRead);
+      downloaded += read;
+      
+      // Update progress
+      int progress = 50 + (downloaded * 40 / contentLength);
+      showDownloadProgress(progress, "Downloading...");
+    }
+    // Keep the screenshot endpoint (port 8080) alive mid-transfer so an OBS
+    // browser source can film the progress screen. Serving a request here
+    // pauses the transfer briefly; TCP flow control absorbs the gap.
+    screenshotServer.handleClient();
+    delay(1);  // Yield to FreeRTOS / feed WDT every iteration
+  }
+  
+  http.end();
+  
+  Serial.printf("Downloaded %d bytes\n", downloaded);
+  
+  // Verify it's a valid JPEG
+  if (downloaded < 4 || buffer[0] != 0xFF || buffer[1] != 0xD8) {
+    Serial.println("Not a valid JPEG");
+    free(buffer);
+    return false;
+  }
+  
+  showDownloadProgress(90, "Saving...");
+  
+  // Save file
+  File file = SD.open(savePath, FILE_WRITE);
+  if (!file) {
+    Serial.printf("Cannot create file: %s\n", savePath.c_str());
+    free(buffer);
+    return false;
+  }
+  
+  size_t written = file.write(buffer, downloaded);
+  file.close();
+  free(buffer);
+  
+  if (written == downloaded) {
+    Serial.printf("File saved: %s (%d bytes)\n", savePath.c_str(), written);
+    showDownloadProgress(100, "Complete!");
+    return true;
+  } else {
+    Serial.printf("Write error: %d/%d bytes\n", written, downloaded);
+    SD.remove(savePath);
+    return false;
+  }
+}
+
+// ========== JPEGDEC FILE CALLBACKS ==========
+// Let JPEGDEC pull from the card through its own internal window instead of
+// requiring the whole file in one contiguous heap block. The handle has to
+// outlive the call, hence the static File.
+
+static File g_jpegSDFile;
+
+static void * jpegSDOpen(const char *filename, int32_t *size) {
+  // A failed open() never reaches the close callback, so reclaim any handle
+  // left behind before taking a new one -- otherwise descriptors leak until
+  // the card stops handing them out.
+  if (g_jpegSDFile) g_jpegSDFile.close();
+  g_jpegSDFile = SD.open(filename);
+  if (!g_jpegSDFile) return NULL;
+  *size = (int32_t)g_jpegSDFile.size();
+  return &g_jpegSDFile;
+}
+
+static void jpegSDClose(void *handle) {
+  File *f = (File *)handle;
+  if (f) f->close();
+}
+
+static int32_t jpegSDRead(JPEGFILE *handle, uint8_t *buffer, int32_t length) {
+  File *f = (File *)handle->fHandle;
+  if (!f) return 0;
+  return f->read(buffer, length);
+}
+
+static int32_t jpegSDSeek(JPEGFILE *handle, int32_t position) {
+  File *f = (File *)handle->fHandle;
+  if (!f) return 0;
+  return f->seek(position) ? position : 0;
+}
+
+// ========== DISPLAY WITH AUTOMATIC CENTERING ==========
+
+bool displayCoreImageCentered(String imagePath) {
+  if (!sdCardAvailable || !SD.exists(imagePath)) {
+    Serial.printf("Image doesn't exist: %s\n", imagePath.c_str());
+    return false;
+  }
+  
+  Serial.printf("Displaying image with auto-centering: %s\n", imagePath.c_str());
+  
+  // Clear screen with black
+  Lcd.fillScreen(THEME_BLACK);
+  
+  // Open and verify image file
+  File imageFile = SD.open(imagePath);
+  if (!imageFile) {
+    Serial.println("Error opening image file");
+    return false;
+  }
+  
+  // Probe size and signature only. The decode itself reads from the card, so
+  // nothing here allocates on the image's scale: openRAM() used to demand the
+  // whole file in one contiguous block and failed on covers the card held fine.
+  size_t fileSize = imageFile.size();
+  uint8_t header[4] = {0, 0, 0, 0};
+  size_t headerRead = imageFile.read(header, 4);
+  imageFile.close();
+  
+  if (fileSize == 0 || fileSize > 500000) {
+    Serial.println("Invalid image file size");
+    return false;
+  }
+  
+  // Verify valid JPEG
+  if (headerRead != 4 || header[0] != 0xFF || header[1] != 0xD8) {
+    Serial.println("Not a valid JPEG file");
+    return false;
+  }
+  
+  Serial.println("=== JPEG DECODE DIAGNOSTIC ===");
+  Serial.printf("File: %s\n", imagePath.c_str());
+  Serial.printf("File size: %d bytes (decoded from SD)\n", (int)fileSize);
+  Serial.printf("JPEG signature: %02X %02X %02X %02X\n", header[0], header[1], header[2], header[3]);
+  Serial.printf("Free heap before open: %d bytes\n", ESP.getFreeHeap());
+  
+  // Ensure clean state
+  jpeg.close();
+  
+  // Prefer RAM. JPEGDEC's file window is 2 KB but refills PARTIALLY -- it keeps
+  // what it has not consumed and asks only for the gap -- so decoding from the
+  // card costs roughly a thousand small reads on a large asset. Reading the
+  // file in one go and decoding from memory is what it always was.
+  //
+  // The failing allocation IS the test for "does it fit": no invented
+  // threshold, nothing to keep in sync per board. Only images too large for a
+  // contiguous block take the slow path, which is the case that had no path at
+  // all before.
+  uint8_t *buffer = (uint8_t*)malloc(fileSize);
+  if (buffer) {
+    File rf = SD.open(imagePath);
+    if (!rf || rf.read(buffer, fileSize) != (int)fileSize) {
+      if (rf) rf.close();
+      free(buffer);
+      buffer = NULL;   // fall through to the card
+    } else {
+      rf.close();
+    }
+  }
+  
+  bool jpegOpened;
+  if (buffer) {
+    Serial.println("Calling jpeg.openRAM()...");
+    jpegOpened = jpeg.openRAM(buffer, fileSize, jpegDrawCallback);
+  } else {
+    Serial.println("Calling jpeg.open() from SD (image exceeds contiguous heap)...");
+    jpegOpened = jpeg.open(imagePath.c_str(), jpegSDOpen, jpegSDClose,
+                           jpegSDRead, jpegSDSeek, jpegDrawCallback);
+  }
+  
+  if (jpegOpened) {
+    Serial.println("JPEG decoder ready");
+    int imgW = jpeg.getWidth();
+    int imgH = jpeg.getHeight();
+    
+    // Which box does this image belong in? ONLY an exactly panel-sized asset
+    // keeps the full panel and bleeds into the footer, as it always has.
+    // Anything else, artwork and core screens alike, is fitted to the image
+    // area and centred there.
+    const int srcW = imgW, srcH = imgH;
+    g_artBoxW = TARGET_WIDTH;
+    g_artBoxH = (KIOSK_MODE || (srcW == TARGET_WIDTH && srcH == TARGET_HEIGHT))
+              ? TARGET_HEIGHT        // kiosk mode and panel assets use the full panel
+              : IMAGE_AREA_HEIGHT;   // everything else stays above the footer
+    
+    // Ideal destination: preserve aspect and fit the box.
+    int dstW = srcW, dstH = srcH;
+    if (srcW > g_artBoxW || srcH > g_artBoxH) {
+      if ((int64_t)srcW * g_artBoxH > (int64_t)srcH * g_artBoxW) {
+        dstW = g_artBoxW;
+        dstH = (int)(((int64_t)srcH * g_artBoxW + srcW / 2) / srcW);
+      } else {
+        dstH = g_artBoxH;
+        dstW = (int)(((int64_t)srcW * g_artBoxH + srcH / 2) / srcH);
+      }
+    } else if (IMAGE_UPSCALE) {
+      // Smaller than the box: grow it, capped. The cap is the whole point --
+      // it lets art that is only slightly short reach the edges while keeping
+      // genuinely tiny sources from being blown up into mush.
+      int64_t byW = ((int64_t)g_artBoxW << 16) / (srcW > 0 ? srcW : 1);
+      int64_t byH = ((int64_t)g_artBoxH << 16) / (srcH > 0 ? srcH : 1);
+      int64_t s   = (byW < byH) ? byW : byH;
+      if (s > IMAGE_UPSCALE_MAX_Q16) s = IMAGE_UPSCALE_MAX_Q16;
+      if (s > (1 << 16)) {
+        dstW = (int)(((int64_t)srcW * s) >> 16);
+        dstH = (int)(((int64_t)srcH * s) >> 16);
+        if (dstW > g_artBoxW) dstW = g_artBoxW;
+        if (dstH > g_artBoxH) dstH = g_artBoxH;
+      }
+    }
+    if (dstW < 1) dstW = 1;
+    if (dstH < 1) dstH = 1;
+    
+    // JPEGDEC only halves, so pick the SMALLEST divisor that fits, with 8 as
+    // the floor for anything enormous.
+    int fitDiv = 8;
+    for (int d = 1; d <= 8; d <<= 1) {
+      if (srcW / d <= g_artBoxW && srcH / d <= g_artBoxH) { fitDiv = d; break; }
+    }
+    int fitW = srcW / fitDiv, fitH = srcH / fitDiv;
+    
+    // Take the cheap path whenever it already fills the box, so panel assets
+    // and everything ScreenScraper pre-sized render exactly as before. Extreme
+    // aspect ratios can overflow even at 1/8, and those must resample too.
+    int  fillPct = (fitW * 100 / dstW < fitH * 100 / dstH)
+                 ?  fitW * 100 / dstW :  fitH * 100 / dstH;
+    bool fitOverflows = (fitW > g_artBoxW || fitH > g_artBoxH);
+    
+    int scaleOpt = 0;
+    g_fineActive = false;
+    
+    if (fillPct >= 90 && !fitOverflows) {
+      imgW = fitW;  imgH = fitH;
+      if      (fitDiv == 8) scaleOpt = JPEG_SCALE_EIGHTH;
+      else if (fitDiv == 4) scaleOpt = JPEG_SCALE_QUARTER;
+      else if (fitDiv == 2) scaleOpt = JPEG_SCALE_HALF;
+      if (scaleOpt != 0) {
+        Serial.printf("Scaling %dx%d -> %dx%d to fit %dx%d\n",
+                      srcW, srcH, imgW, imgH, g_artBoxW, g_artBoxH);
+      }
+    } else {
+      // Fine path: LARGEST divisor whose output still covers the destination,
+      // so the resample only ever shrinks (ratio lands above one half).
+      int covDiv = 1;
+      for (int d = 8; d >= 1; d >>= 1) {
+        if (srcW / d >= dstW && srcH / d >= dstH) { covDiv = d; break; }
+      }
+      int decW = srcW / covDiv, decH = srcH / covDiv;
+      if      (covDiv == 8) scaleOpt = JPEG_SCALE_EIGHTH;
+      else if (covDiv == 4) scaleOpt = JPEG_SCALE_QUARTER;
+      else if (covDiv == 2) scaleOpt = JPEG_SCALE_HALF;
+      
+      g_fineXStep  = (uint32_t)(((uint64_t)decW << 16) / dstW);
+      g_fineYStep  = (uint32_t)(((uint64_t)decH << 16) / dstH);
+      g_fineDstW   = dstW;
+      g_fineDstH   = dstH;
+      g_fineActive = true;
+      imgW = dstW;  imgH = dstH;
+      
+      Serial.printf("Scaling %dx%d -> 1/%d (%dx%d) -> %dx%d to fit %dx%d\n",
+                    srcW, srcH, covDiv, decW, decH, imgW, imgH,
+                    g_artBoxW, g_artBoxH);
+    }
+    
+    // Calculate automatic centering
+    int offsetX = (g_artBoxW - imgW) / 2;
+    int offsetY = (g_artBoxH - imgH) / 2;
+
+    Serial.printf("Image dimensions: %dx%d\n", imgW, imgH);
+    Serial.printf("Available area: %dx%d\n", g_artBoxW, g_artBoxH);
+    Serial.printf("Calculated offset: X=%d, Y=%d\n", offsetX, offsetY);
+    Serial.printf("Final position: X=%d to X=%d, Y=%d to Y=%d\n", 
+                  offsetX, offsetX + imgW, offsetY, offsetY + imgH);
+    
+    // Ensure offsets are not negative
+    if (offsetX < 0) offsetX = 0;
+    if (offsetY < 0) offsetY = 0;
+    
+    // Keep the image inside ITS box. For artwork that is the image area; for a
+    // panel asset the box is the whole panel, so the footer bleed the design
+    // has always allowed no longer trips a warning.
+    if (offsetY + imgH > g_artBoxH) {
+      offsetY = g_artBoxH - imgH;
+      if (offsetY < 0) offsetY = 0;
+    }
+    
+    // Set global offsets for callback-based centering
+    // JPEGDEC doesn't accept large offsets in decode(), so we apply them in the callback
+    g_jpegOffsetX = offsetX;
+    g_jpegOffsetY = offsetY;
+    Serial.printf("Set global callback offsets: (%d,%d)\n", g_jpegOffsetX, g_jpegOffsetY);
+    
+    // One MCU per callback. Required whenever the fine path runs -- including
+    // at divisor 1, where scaleOpt is 0 -- because the block buffer is sized
+    // for a single MCU and nothing else bounds what the decoder hands over.
+    if (scaleOpt != 0 || g_fineActive) jpeg.setMaxOutputSize(1);
+    jpeg.setPixelType(RGB565_BIG_ENDIAN);
+    
+    Serial.printf("Image: %dx%d, File: %d bytes\n", imgW, imgH, (int)fileSize);
+    Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
+    
+    // ALWAYS decode at (0,0) - centering is applied in callback
+    Serial.println("Calling jpeg.decode() - centering via callback...");
+    bool success = jpeg.decode(0, 0, scaleOpt);
+    
+    // Clear global offsets
+    g_jpegOffsetX = 0;
+    g_jpegOffsetY = 0;
+    g_fineActive  = false;
+    
+    Serial.printf("Result: %s\n", success ? "SUCCESS" : "FAILED");
+    Serial.printf("Heap after: %d bytes\n", ESP.getFreeHeap());
+    
+    jpeg.close();
+    if (buffer) free(buffer);
+    
+    if (success) {
+      Serial.printf("Image displayed centered: %dx%d at (%d,%d)\n", 
+                    imgW, imgH, offsetX, offsetY);
+      return true;
+    } else {
+      Serial.println("Error decoding JPEG");
+      return false;
+    }
+  } else {
+    Serial.println("Error opening JPEG decoder");
+    if (buffer) free(buffer);
+    return false;
+  }
+}
+
+GameInfo extractGameInfoFromJeuInfos(String& response, String originalFilename) {
+  GameInfo result;
+  result.found = false;
+  
+  Serial.printf("Extracting game info from JSON response (%d bytes)\n", response.length());
+  Serial.printf("Free heap before JSON parsing: %d bytes\n", ESP.getFreeHeap());
+  
+  // OPTIMIZATION: Memory verification and truncation if necessary
+  if (response.length() > 8000 && ESP.getFreeHeap() < 100000) {
+    Serial.printf("Large JSON + low memory, truncating response\n");
+    response = response.substring(0, 8000);
+  }
+  
+  // EXTRACT GAME ID - Search specifically in "jeu" section
+  int jeuStart = response.indexOf("\"jeu\"");
+  if (jeuStart == -1) {
+    jeuStart = response.indexOf("\"jeu\" :");
+  }
+  
+  if (jeuStart != -1) {
+    // Look for "id" specifically after "jeu" section starts
+    int idStart = response.indexOf("\"id\":\"", jeuStart);
+    if (idStart == -1) {
+      idStart = response.indexOf("\"id\": \"", jeuStart);
+    }
+    
+    if (idStart != -1) {
+      idStart += (response.charAt(idStart + 5) == ' ') ? 7 : 6;
+      int idEnd = response.indexOf("\"", idStart);
+      if (idEnd != -1) {
+        result.gameId = response.substring(idStart, idEnd);
+        Serial.printf("Game ID extracted from jeu section: %s\n", result.gameId.c_str());
+      }
+    }
+  }
+  
+  // Fallback: if no game ID found in jeu section, try to find it differently
+  if (result.gameId.length() == 0) {
+    Serial.printf("No game ID found in jeu section, trying alternative extraction\n");
+    
+    // Look for pattern: "jeu" : { "id": "XXXXX"
+    int jeuPatternStart = response.indexOf("\"jeu\":");
+    if (jeuPatternStart == -1) {
+      jeuPatternStart = response.indexOf("\"jeu\" :");
+    }
+    
+    if (jeuPatternStart != -1) {
+      int searchStart = jeuPatternStart + 6; // Start after "jeu":
+      int idPos = response.indexOf("\"id\":", searchStart);
+      if (idPos != -1 && idPos < jeuPatternStart + 200) { // Within reasonable range of jeu section
+        int valueStart = response.indexOf("\"", idPos + 5) + 1;
+        int valueEnd = response.indexOf("\"", valueStart);
+        if (valueStart > 0 && valueEnd > valueStart) {
+          result.gameId = response.substring(valueStart, valueEnd);
+          Serial.printf("Game ID extracted via alternative method: %s\n", result.gameId.c_str());
+        }
+      }
+    }
+  }
+  
+  // EXTRACT SYSTEME ID - CRITICAL FOR ARCADE DETECTION
+  int systemeStart = response.indexOf("\"systeme\":{\"id\":\"");
+  if (systemeStart == -1) {
+    systemeStart = response.indexOf("\"systeme\": {\"id\": \"");
+  }
+  
+  if (systemeStart != -1) {
+    int idStart = response.indexOf("\"id\":\"", systemeStart);
+    if (idStart == -1) {
+      idStart = response.indexOf("\"id\": \"", systemeStart);
+    }
+    
+    if (idStart != -1) {
+      idStart += (response.charAt(idStart + 5) == ' ') ? 7 : 6;
+      int idEnd = response.indexOf("\"", idStart);
+      if (idEnd != -1) {
+        result.systemeId = response.substring(idStart, idEnd);
+        Serial.printf("Systeme ID extracted: %s\n", result.systemeId.c_str());
+      }
+    }
+  }
+  if (result.systemeId.length() > 0) {
+  lastArcadeSystemeId = result.systemeId;
+  Serial.printf("Stored arcade subsystem ID: %s\n", lastArcadeSystemeId.c_str());
+  }
+
+  // EXTRACT GAME NAME with multiple patterns
+  String namePatterns[] = {"\"nom\":", "\"name\":", "\"nom_wor\":", "\"nom_us\":", "\"nom_eu\":", "\"title\":"};
+  for (int i = 0; i < 6; i++) {
+    int nomPos = response.indexOf(namePatterns[i]);
+    if (nomPos != -1) {
+      int nomStart = nomPos + namePatterns[i].length();
+      
+      // Skip to opening quote
+      while (nomStart < response.length() && response.charAt(nomStart) != '"') nomStart++;
+      nomStart++; // Skip opening quote
+      
+      String gameName = "";
+      int pos = nomStart;
+      while (pos < response.length() && response.charAt(pos) != '"') {
+        gameName += response.charAt(pos);
+        pos++;
+        if (gameName.length() > 150) break; // Safety limit
+      }
+      
+      if (gameName.length() > 0) {
+        result.gameName = gameName;
+        Serial.printf("Game Name extracted: %s (pattern: %s)\n", 
+                      gameName.c_str(), namePatterns[i].c_str());
+        break;
+      }
+    }
+  }
+  
+  // FALLBACK: Use original filename if no name found
+  if (result.gameName.length() == 0) {
+    result.gameName = originalFilename;
+    Serial.printf("Using original filename as game name: %s\n", originalFilename.c_str());
+  }
+  
+  // FINAL STATUS
+  if (result.gameId.length() > 0) {
+    result.found = true;
+    Serial.printf("JSON EXTRACTION SUCCESS!\n");
+    Serial.printf("   Game ID: %s\n", result.gameId.c_str());
+    Serial.printf("   Systeme ID: %s\n", result.systemeId.c_str());
+    Serial.printf("   Game Name: %s\n", result.gameName.c_str());
+  } else {
+    Serial.printf("JSON extraction failed - no valid game ID found\n");
+  }
+  
+  Serial.printf("Free heap after JSON extraction: %d bytes\n", ESP.getFreeHeap());
+  return result;
+}
+
+bool isArcadeCore(String coreName) {
+  String core = coreName;
+  core.toLowerCase();
+  return (core == "arcade" ||
+          core == "mame"   ||
+          core == "multiple arcade machine emulator");
+}
+
+// ULTRA OPTIMIZED VERSION - NO LARGE STACK ARRAYS
+bool downloadImageFromMediaJeu(String mediaUrl, String savePath) {
+  Serial.printf("Downloading from mediaJeu.php: %s\n", redactScreenScraperUrl(mediaUrl).c_str());
+  g_mediaSawNoMedia   = false;
+  g_mediaSawValidJpeg = false;
+  g_mediaAttemptCount = 0;
+  
+  // CRITICAL: Check memory first
+  int freeHeap = ESP.getFreeHeap();
+  Serial.printf("Free heap at start: %d bytes\n", freeHeap);
+  
+  if (freeHeap < 80000) {
+    Serial.printf("CRITICAL: Insufficient memory (%d bytes), aborting download\n", freeHeap);
+    return false;
+  }
+  
+  // MINIMAL ARCADE DETECTION - NO ARRAYS (same as before)
+  String lowerUrl = mediaUrl;
+  lowerUrl.toLowerCase();
+  bool isArcadeGeneric = (lowerUrl.indexOf("systemeid=75") != -1);
+  bool isArcadeSpecific = false;
+  
+  // CHECK SPECIFIC ARCADE IDs ONE BY ONE - NO ARRAY (same as before)
+  if (!isArcadeSpecific && (lowerUrl.indexOf("systemeid=6&") != -1 || lowerUrl.endsWith("systemeid=6"))) isArcadeSpecific = true;
+  if (!isArcadeSpecific && (lowerUrl.indexOf("systemeid=7&") != -1 || lowerUrl.endsWith("systemeid=7"))) isArcadeSpecific = true;
+  if (!isArcadeSpecific && (lowerUrl.indexOf("systemeid=8&") != -1 || lowerUrl.endsWith("systemeid=8"))) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=47") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=49") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=53") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=54") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=55") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=56") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=69") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=112") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=147") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=148") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=149") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=150") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=151") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=152") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=153") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=154") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=155") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=156") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=157") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=158") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=159") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=160") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=161") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=162") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=163") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=164") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=165") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=166") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=167") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=168") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=169") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=170") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=173") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=174") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=175") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=176") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=177") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=178") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=179") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=180") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=181") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=182") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=183") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=184") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=185") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=186") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=187") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=188") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=189") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=190") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=191") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=192") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=193") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=194") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=195") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=196") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=209") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=227") != -1) isArcadeSpecific = true;
+  if (!isArcadeSpecific && lowerUrl.indexOf("systemeid=230") != -1) isArcadeSpecific = true;
+  
+  bool isArcade = isArcadeGeneric || isArcadeSpecific;
+  
+  if (isArcadeSpecific) {
+    Serial.println("ARCADE SPECIFIC SYSTEM: Using arcade-specific media priority order");
+  } else if (isArcadeGeneric) {
+    Serial.println("ARCADE GENERIC SYSTEM: Using arcade-specific media priority order");
+  } else {
+    Serial.println("OTHER SYSTEM DETECTED: Using standard media priority order");
+  }
+  
+  // Extract base URL once
+  String baseUrl = mediaUrl.substring(0, mediaUrl.lastIndexOf("&media="));
+  if (baseUrl == mediaUrl) {
+    baseUrl = mediaUrl;
+  }
+  
+  // CONFIGURABLE DOWNLOAD ORDER — driven by config.ini [images] section
+  String& orderStr = isArcade ? ARCADE_MEDIA_ORDER_STR : GAME_MEDIA_ORDER_STR;
+  bool result = applyGameMediaOrder(baseUrl, savePath, orderStr, isArcade);
+
+  if (!result) {
+    Serial.printf("[MEDIA] All types failed for %s\n", isArcade ? "ARCADE" : "OTHER SYSTEM");
+    Serial.printf("[MEDIA] Free heap: %d bytes\n", ESP.getFreeHeap());
+  }
+  return result;
+}
+// HELPER FUNCTION - MINIMAL STACK USAGE
+// Media types fetched as stored for games: ScreenScraper's screenshots and
+// title screens are native-size PNG almost always, which keeps pixel art exact.
+static bool isShotMedia(const char* mediaType) {
+  return strcmp(mediaType, "ss") == 0 || strncmp(mediaType, "ss(", 3) == 0 ||
+         strncmp(mediaType, "sstitle", 7) == 0;
+}
+
+static bool fileIsPng(const String& path) {
+  File f = SD.open(path);
+  uint8_t sig[4] = {0, 0, 0, 0};
+  bool png = f && f.read(sig, 4) == 4 && sig[0] == 0x89 && sig[1] == 'P' &&
+             sig[2] == 'N' && sig[3] == 'G';
+  if (f) f.close();
+  return png;
+}
+
+// Downloads a ScreenScraper media as stored: no maxwidth, maxheight or
+// outputformat, streamed to the card. writeToStream() undoes the chunked
+// transfer encoding ScreenScraper's CDN uses. The Content-Type header is
+// unreliable (JPEG arrives labelled image/png), so the format is told from the
+// file's signature.
+// Returns 1 when savePath holds a usable PNG or JPEG, 0 when there is nothing
+// to fetch for this media type, and -1 when the original exists but cannot be
+// used here (too large, or a PNG the decoder does not support even once
+// re-encoded): the caller then asks for the reduced JPEG instead.
+// Some originals are interlaced PNGs, which PNGdec cannot read. Given a size
+// limit ScreenScraper re-encodes the image, and the result is the same pixels
+// as a plain PNG; reencoded marks that second request.
+static int downloadMediaOriginal(const String& url, const String& savePath,
+                                 const char* mediaName, bool reencoded) {
+  g_mediaAttemptCount++;
+  int mediaProgress = 50 + g_mediaAttemptCount;
+  if (mediaProgress > 90) mediaProgress = 90;
+  showDownloadProgressColored(mediaProgress, String("Trying ") + mediaName + "...",
+                              THEME_CYAN);
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(25000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+  int httpCode = http.GET();
+  g_lastSSHttpCode = httpCode;
+  if (httpCode != 200) {
+    http.end();
+    return 0;
+  }
+  int len = http.getSize();
+  if (len > MAX_IMAGE_SIZE) {
+    Serial.printf("[MEDIA] %s original is %d bytes, over the limit\n", mediaName, len);
+    http.end();
+    return -1;
+  }
+  File f = SD.open(savePath, FILE_WRITE);
+  if (!f) {
+    http.end();
+    return -1;
+  }
+  int written = http.writeToStream(&f);
+  f.close();
+  http.end();
+  if (written <= 0 || (len > 0 && written != len)) {
+    SD.remove(savePath);
+    return 0;
+  }
+  if (written > MAX_IMAGE_SIZE) {
+    SD.remove(savePath);
+    return -1;
+  }
+
+  uint8_t head[64];
+  size_t n = 0;
+  File r = SD.open(savePath);
+  if (r) { n = r.read(head, sizeof(head)); r.close(); }
+
+  if (n >= 3 && head[0] == 0xFF && head[1] == 0xD8 && head[2] == 0xFF) {
+    g_mediaSawValidJpeg = true;
+    Serial.printf("[MEDIA] %s original: JPEG, %d bytes\n", mediaName, written);
+    return 1;
+  }
+  if (n >= 4 && head[0] == 0x89 && head[1] == 'P' && head[2] == 'N' && head[3] == 'G') {
+    if (pngIsSupported(SD, savePath.c_str())) {
+      g_mediaSawValidJpeg = true;     // "a usable image arrived"; predates PNG
+      Serial.printf("[MEDIA] %s %s: PNG, %d bytes\n", mediaName,
+                  reencoded ? "re-encoded" : "original", written);
+      return 1;
+    }
+    SD.remove(savePath);
+    if (!reencoded) {
+      Serial.printf("[MEDIA] %s original: PNG the decoder cannot read, asking for it re-encoded\n",
+                    mediaName);
+      return downloadMediaOriginal(url + "&outputformat=png&maxwidth=1280&maxheight=720",
+                                   savePath, mediaName, true);
+    }
+    Serial.printf("[MEDIA] %s re-encoded PNG still unreadable\n", mediaName);
+    return -1;
+  }
+
+  // Not an image: ScreenScraper answers in plain text ("NOMEDIA", errors).
+  String text;
+  for (size_t i = 0; i < n; i++) text += (char)head[i];
+  if (text.indexOf("NOMEDIA") != -1) g_mediaSawNoMedia = true;
+  SD.remove(savePath);
+  return 0;
+}
+
+bool tryDownloadMediaTypeWorking(String baseUrl, String savePath, const char* mediaType, const char* mediaName) {
+  // Check memory before each attempt
+  int currentHeap = ESP.getFreeHeap();
+  if (currentHeap < 60000) {
+    Serial.printf("Low memory before %s (%d bytes), stopping\n", mediaName, currentHeap);
+    return false;
+  }
+
+  // Screenshots and title screens for games: the original first; the reduced
+  // JPEG below remains for originals the panel cannot use.
+  if (g_gameOriginalShots && isShotMedia(mediaType)) {
+    int r = downloadMediaOriginal(baseUrl + "&media=" + String(mediaType), savePath, mediaName,
+                                  false);
+    if (r > 0) return true;
+    if (r == 0) {
+      pumpedDelay(1000);
+      return false;
+    }
+  }
+  
+  String currentUrl = baseUrl + "&media=" + String(mediaType);
+  currentUrl += "&maxwidth=" + String(TARGET_WIDTH);
+  currentUrl += "&maxheight=" + String(ARTWORK_MAX_HEIGHT);  // Use 645 instead of 720
+  currentUrl += "&outputformat=jpg";
+  
+  Serial.printf("Trying: %s\n", mediaName);
+
+  // Live HUD: show WHICH media type is being tried and inch the bar forward.
+  // A no-artwork game walks ~30 types; a frozen "Downloading image..." at 50%
+  // looked like a hang for the whole scan.
+  g_mediaAttemptCount++;
+  int mediaProgress = 50 + g_mediaAttemptCount;
+  if (mediaProgress > 90) mediaProgress = 90;
+  // Fixed CYAN: this bar tracks search-space coverage, not likelihood of
+  // success. Only the actual byte transfer earns the stoplight gradient.
+  showDownloadProgressColored(mediaProgress, String("Trying ") + mediaName + "...",
+                              THEME_CYAN);
+  Serial.printf("   URL: %s\n", redactScreenScraperUrl(currentUrl).c_str());
+  
+  HTTPClient http;
+  http.begin(currentUrl);
+  http.setTimeout(25000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+  http.addHeader("Accept", "image/jpeg,image/png,image/*");
+  
+  int httpCode = http.GET();
+  Serial.printf("   HTTP Response: %d\n", httpCode);
+  g_lastSSHttpCode = httpCode;
+  
+  if (httpCode == 200) {
+    // METHOD FROM BACKUP: Get complete response first
+    String completeResponse = http.getString();
+    Serial.printf("   Complete response: %d bytes\n", completeResponse.length());
+    
+    if (completeResponse.length() > 0) {
+      // Check if it's a valid JPEG (from backup method)
+      if (completeResponse.length() >= 3) {
+        uint8_t byte1 = completeResponse.charAt(0);
+        uint8_t byte2 = completeResponse.charAt(1);
+        uint8_t byte3 = completeResponse.charAt(2);
+        
+        if (byte1 == 0xFF && byte2 == 0xD8 && byte3 == 0xFF) {
+          g_mediaSawValidJpeg = true;
+          // Valid JPEG - save to file
+          if (completeResponse.length() > 100) { // Reasonable size check
+            Serial.printf("   Valid JPEG detected, saving %s...\n", mediaName);
+            
+            File file = SD.open(savePath, FILE_WRITE);
+            if (file) {
+              // Write complete response to file (method from backup)
+              size_t bytesWritten = file.write((const uint8_t*)completeResponse.c_str(), completeResponse.length());
+              file.close();
+              
+              if (bytesWritten == completeResponse.length()) {
+                Serial.printf("SUCCESS: Downloaded %s (%d bytes)\n", mediaName, bytesWritten);
+                Serial.printf("Final free heap: %d bytes\n", ESP.getFreeHeap());
+                
+                // Clean up
+                completeResponse = "";
+                currentUrl = "";
+                http.end();
+                
+                return true;
+              } else {
+                Serial.printf("Write error: expected %d bytes, wrote %d\n", completeResponse.length(), bytesWritten);
+                SD.remove(savePath); // Clean up partial file
+              }
+            } else {
+              Serial.printf("Failed to create file: %s\n", savePath.c_str());
+            }
+          } else {
+            Serial.printf("Invalid image size: %d bytes\n", completeResponse.length());
+          }
+        } else {
+          Serial.printf("Not a JPEG image (bytes: %02X %02X %02X)\n", byte1, byte2, byte3);
+          
+          // Check if it's a ScreenScraper text response (from backup)
+          if (completeResponse.indexOf("NOMEDIA") != -1) {
+            g_mediaSawNoMedia = true;
+            Serial.printf("No %s media available in database\n", mediaName);
+          } else if (completeResponse.indexOf("erreur") != -1) {
+            Serial.printf("ScreenScraper error: %s\n", completeResponse.substring(0, 100).c_str());
+          } else if (completeResponse.length() < 100) {
+            Serial.printf("ScreenScraper response: %s\n", completeResponse.c_str());
+          } else {
+            Serial.printf("Unknown response (first 100 chars): %s\n", completeResponse.substring(0, 100).c_str());
+          }
+        }
+      } else {
+        Serial.printf("Response too short: %d bytes\n", completeResponse.length());
+      }
+    } else {
+      Serial.println("Empty response");
+    }
+    
+    // Clean up
+    completeResponse = "";
+  } else {
+    Serial.printf("HTTP %d for %s\n", httpCode, mediaName);
+    
+    String errorResponse = http.getString();
+    if (errorResponse.length() > 0 && errorResponse.length() < 500) {
+      Serial.printf("   Error: %s\n", errorResponse.c_str());
+    }
+    errorResponse = "";
+  }
+  
+  http.end();
+  currentUrl = "";
+  
+  // Delay between attempts
+  pumpedDelay(1000);
+  
+  return false;
+}
+
+// =============================================================================
+// tryMediaTypeWithRegions()
+//
+// Tries a media type with all region suffixes in user-preferred order.
+// The preferred region comes from config.ini [screenscraper] region=
+//
+// Order: preferred region first, then the rest of ALL_REGIONS in fixed
+//        order (wor -> us -> eu -> jp -> ss, skipping the preferred one),
+//        then generic (no suffix) if includeGeneric is true.
+//
+// Example with region=eu and mediaBase="box-3D":
+//   box-3D(eu)  box-3D(wor)  box-3D(us)  box-3D(jp)  box-3D(ss)  box-3D
+//
+// includeGeneric=false is used when the generic variant was already tried
+// before calling this function (e.g. marquee), or when it does not exist
+// in ScreenScraper (e.g. box-2D has no generic variant).
+// =============================================================================
+bool tryMediaTypeWithRegions(String baseUrl, String savePath,
+                              const char* mediaBase, const char* mediaLabel,
+                              bool includeGeneric) {
+  // 'ss' is ScreenScraper's own region: what an upload carries when the
+  // contributor set none. It is often the ONLY region a box exists in --
+  // the Satellaview Actraiser has box-2D and box-3D under 'ss' and nothing
+  // else -- and no geographic preference can ever reach it, so it closes
+  // the chain: after the real regions, before the unsuffixed generic. The
+  // pack builder falls back the same way (pick_media: 'else any region').
+  const char* ALL_REGIONS[] = {"wor", "us", "eu", "jp", "ss"};
+  const int   ALL_REGIONS_N = sizeof(ALL_REGIONS) / sizeof(ALL_REGIONS[0]);
+  String pref = _boxart_region_str;  // from config.ini region=
+
+  // 1. Preferred region first
+  String type  = String(mediaBase) + "(" + pref + ")";
+  String label = String(mediaLabel) + " " + pref;
+  if (tryDownloadMediaTypeWorking(baseUrl, savePath, type.c_str(), label.c_str())) return true;
+
+  // 2. Remaining regions in fixed order, skipping the preferred one
+  for (int i = 0; i < ALL_REGIONS_N; i++) {
+    if (String(ALL_REGIONS[i]) != pref) {
+      type  = String(mediaBase) + "(" + String(ALL_REGIONS[i]) + ")";
+      label = String(mediaLabel) + " " + String(ALL_REGIONS[i]);
+      if (tryDownloadMediaTypeWorking(baseUrl, savePath, type.c_str(), label.c_str())) return true;
+    }
+  }
+
+  // 3. Generic (no region suffix)
+  if (includeGeneric) {
+    if (tryDownloadMediaTypeWorking(baseUrl, savePath, mediaBase, mediaLabel)) return true;
+  }
+
+  return false;
+}
+
+// =============================================================================
+// tryMediaTypesForToken()
+//
+// Expands a config.ini token to actual ScreenScraper &media= strings.
+// Regional variants are tried in user-preferred order via tryMediaTypeWithRegions.
+//
+// Tokens without regional variants (fanart) map directly to a single API
+// string.
+//
+// marquee is special: the generic "marquee" key is the most common variant
+// in ScreenScraper, so it is tried first before the regional ones.
+// box2d has no generic variant in the API, so includeGeneric=false.
+// =============================================================================
+bool tryMediaTypesForToken(String baseUrl, String savePath, String token) {
+  token.trim();
+  token.toLowerCase();
+
+  if      (token == "wheel-steel")   return tryMediaTypeWithRegions(baseUrl, savePath, "wheel-steel",  "Wheel Steel");
+  else if (token == "wheel-carbon")  return tryMediaTypeWithRegions(baseUrl, savePath, "wheel-carbon", "Wheel Carbon");
+  else if (token == "wheel")         return tryMediaTypeWithRegions(baseUrl, savePath, "wheel",        "Wheel");
+  else if (token == "box3d")         return tryMediaTypeWithRegions(baseUrl, savePath, "box-3D",       "3D Box");
+  else if (token == "box2d")         return tryMediaTypeWithRegions(baseUrl, savePath, "box-2D",       "2D Box",    false);
+  else if (token == "mix" ||
+           token == "mix2")          return tryMediaTypeWithRegions(baseUrl, savePath, "mixrbv2",      "MixRBV2");
+  else if (token == "mix1")          return tryMediaTypeWithRegions(baseUrl, savePath, "mixrbv1",      "MixRBV1");
+  else if (token == "marquee") {
+    // Generic "marquee" is the most common variant -- try it before regional ones
+    if (tryDownloadMediaTypeWorking(baseUrl, savePath, "marquee", "Marquee")) return true;
+    return tryMediaTypeWithRegions(baseUrl, savePath, "marquee", "Marquee", false);
+  }
+  else if (token == "fanart")        return tryDownloadMediaTypeWorking(baseUrl, savePath, "fanart",        "Fanart");
+  else if (token == "screenshot") {
+    // 'ss' is the in-game screenshot and 'sstitle' the title screen: two
+    // separate media, and plenty of games carry one without the other. Ask
+    // for the screenshot first and settle for the title screen.
+    if (tryMediaTypeWithRegions(baseUrl, savePath, "ss", "Screenshot")) return true;
+    return tryMediaTypeWithRegions(baseUrl, savePath, "sstitle", "Title Screen");
+  }
+  else if (token == "titlescreen")   return tryMediaTypeWithRegions(baseUrl, savePath, "sstitle", "Title Screen");
+  // System-level media. photo and illustration carry regions there, so they
+  // go through the region chain like the wheels; at game level the generic
+  // variant closes the chain and still resolves.
+  else if (token == "photo")         return tryMediaTypeWithRegions(baseUrl, savePath, "photo",         "Photo");
+  else if (token == "illustration")  return tryMediaTypeWithRegions(baseUrl, savePath, "illustration",  "Illustration");
+  else if (token == "screenmarquee") return tryMediaTypeWithRegions(baseUrl, savePath, "screenmarquee", "Screen Marquee");
+  else if (token == "background")    return tryMediaTypeWithRegions(baseUrl, savePath, "background",    "Background");
+  else Serial.printf("[MEDIA] Unknown token: '%s' -- skipping\n", token.c_str());
+
+  return false;
+}
+
+// =============================================================================
+// applyMediaOrderAndDownload() -- iterates order string, tries token by token
+// =============================================================================
+// Game variant: each token saves into its category's file (<base>.<cat>.jpg,
+// where savePath is <base>.jpg) through a temporary name, so a failed attempt
+// never destroys an image the category already had, and the winner is
+// recorded in the game's manifest.
+bool applyGameMediaOrder(String baseUrl, String savePath, String orderStr, bool arcade) {
+  Serial.printf("[MEDIA] Order: %s\n", orderStr.c_str());
+  String base = savePath.substring(0, savePath.lastIndexOf('.'));
+  int start = 0;
+  while (start < (int)orderStr.length()) {
+    int comma = orderStr.indexOf(',', start);
+    String token = (comma == -1) ? orderStr.substring(start)
+                                 : orderStr.substring(start, comma);
+    token.trim();
+    if (token.length() > 0) {
+      String cat = gameImageCategory(token);
+      String tmpPath = base + "." + cat + ".tmp";
+      if (SD.exists(tmpPath)) SD.remove(tmpPath);
+      g_gameOriginalShots = true;
+      bool got = tryMediaTypesForToken(baseUrl, tmpPath, token);
+      g_gameOriginalShots = false;
+      if (got) {
+        // The format decides the name: screenshots and title screens may
+        // arrive as PNG. Whatever the category held before goes, its .565
+        // included, so a stale file can never shadow the new one.
+        String ext = fileIsPng(tmpPath) ? "png" : "jpg";
+        String finalPath = base + "." + cat + "." + ext;
+        static const char* olds[] = { ".jpg", ".png", ".565" };
+        for (const char* o : olds) {
+          String old = base + "." + cat + o;
+          if (SD.exists(old)) SD.remove(old);
+        }
+        if (SD.rename(tmpPath, finalPath)) {
+          recordGameImage(base, cat, "ss", token, mediaOrderStamp(arcade), "-", ext);
+          return true;
+        }
+        SD.remove(tmpPath);
+      }
+    }
+    if (comma == -1) break;
+    start = comma + 1;
+  }
+  return false;
+}
+
+bool applyMediaOrderAndDownload(String baseUrl, String savePath, String orderStr) {
+  Serial.printf("[MEDIA] Order: %s\n", orderStr.c_str());
+  int start = 0;
+  while (start < (int)orderStr.length()) {
+    int comma = orderStr.indexOf(',', start);
+    String token = (comma == -1) ? orderStr.substring(start)
+                                 : orderStr.substring(start, comma);
+    token.trim();
+    if (token.length() > 0) {
+      Serial.printf("[MEDIA] Trying token: %s\n", token.c_str());
+      if (tryMediaTypesForToken(baseUrl, savePath, token)) return true;
+    }
+    if (comma == -1) break;
+    start = comma + 1;
+  }
+  Serial.println("[MEDIA] All tokens exhausted -- no image found");
+  return false;
+}
+
+// Directory where a game's cached files live, without creating anything:
+//   arcade    -> /cores/<letter of the game>
+//   alphabet  -> /cores/<letter of the core>/<core>
+//   direct    -> /cores/<core>
+// searchCore is the lowercased core name; it is sanitised here.
+String gameCacheDir(const String& exactFileName, String searchCore) {
+  bool isArcade = isArcadeCore(searchCore);
+  searchCore = sanitizeCoreFilename(searchCore);
+
+  if (isArcade && ENABLE_ALPHABETICAL_FOLDERS) {
+    if (exactFileName.length() == 0) return String(CORE_IMAGES_PATH) + "/A";
+    char c = exactFileName.charAt(0);
+    if (c >= 'a' && c <= 'z') return String(CORE_IMAGES_PATH) + "/" + String((char)(c - 32));
+    if (c >= 'A' && c <= 'Z') return String(CORE_IMAGES_PATH) + "/" + String(c);
+    return String(CORE_IMAGES_PATH) + "/#";
+  }
+  if (ENABLE_ALPHABETICAL_FOLDERS) return getAlphabeticalPath(searchCore) + "/" + searchCore;
+  return String(CORE_IMAGES_PATH) + "/" + searchCore;
+}
+
+// Path a downloaded game image is saved to, creating its directory (and that
+// directory's parent) when missing.
+String getSavePath(String exactFileName, String searchCore) {
+  String dir = gameCacheDir(exactFileName, searchCore);
+  String parent = dir.substring(0, dir.lastIndexOf('/'));
+  if (parent.length() > 0 && !SD.exists(parent)) {
+    if (SD.mkdir(parent)) Serial.printf("Created dir: %s\n", parent.c_str());
+    else Serial.printf("Failed to create: %s\n", parent.c_str());
+  }
+  if (!SD.exists(dir)) {
+    if (SD.mkdir(dir)) Serial.printf("Created dir: %s\n", dir.c_str());
+    else Serial.printf("Failed to create: %s\n", dir.c_str());
+  }
+  String savePath = dir + "/" + exactFileName + ".jpg";
+  Serial.printf("Final save path: %s\n", savePath.c_str());
+  return savePath;
+}
+
+void showGameImageScreenCorrected(String coreName, String gameName) {
+  // backgroundLoaded = false;
+  String imagePath;
+  
+  Serial.printf("\n=== STREAMING-SAFE GAME SCREEN: %s - %s ===\n", coreName.c_str(), gameName.c_str());
+  
+  if (!sdCardAvailable) {
+    Serial.println("SD not available, showing SD error");
+    showSDCardError();
+    return;
+  }
+  
+  if (gameName.length() == 0) {
+    Serial.println("No game name, showing core image instead");
+    lastGameImageOK = false;
+    showCoreImageScreen(coreName);
+    return;
+  }
+  
+  // Check memory before processing
+  if (ESP.getFreeHeap() < 80000) {
+    Serial.printf("Low memory for game screen (%d bytes), showing core image\n", ESP.getFreeHeap());
+    lastGameImageOK = false;
+    showCoreImageScreen(coreName);
+    return;
+  }
+  
+  // Check existing image and force download setting. A stale image (chosen
+  // under a media order that has since changed) is searched again once per
+  // game per session, and stays on screen if that search finds nothing.
+  static String staleTriedFor = "";
+  bool stale = false;
+  bool imageExists = findGameImage(coreName, gameName, imagePath, &stale);
+  bool shouldDownload = false;
+  String staleImage = "";
+  String staleKey = coreName + "|" + gameName;
+  // Cached and current: once per game per session, ask the packs whether
+  // something better or newer is there (a pack installed or updated since).
+  // Short timeout: an unreachable server must not stall the screen.
+  static String localCheckedFor = "";
+  if (imageExists && !stale && !FORCE_GAME_REDOWNLOAD && localCheckedFor != staleKey &&
+      WiFi.status() == WL_CONNECTED && !downloadInProgress) {
+    localCheckedFor = staleKey;
+    if (gameLocalPass(gameCacheBase(coreName, gameName), isArcadeCore(coreName), 1500)) {
+      findGameImage(coreName, gameName, imagePath, nullptr);
+      Serial.printf("Local packs updated the image: %s\n", imagePath.c_str());
+    }
+  }
+  if (imageExists && stale && !FORCE_GAME_REDOWNLOAD && staleTriedFor != staleKey) {
+    Serial.printf("Media order changed since %s was chosen - searching again\n",
+                  imagePath.c_str());
+    staleTriedFor = staleKey;
+    staleImage = imagePath;
+    imageExists = false;
+  }
+  
+  if (FORCE_GAME_REDOWNLOAD) {
+    Serial.println("FORCE_GAME_REDOWNLOAD enabled - will download regardless of existing image");
+    shouldDownload = true;
+    
+    // If image exists and we're forcing download, back it up
+    if (imageExists) {
+      String backupPath = imagePath + ".backup";
+      if (SD.exists(backupPath)) {
+        SD.remove(backupPath);
+      }
+      SD.rename(imagePath, backupPath);
+      Serial.printf("Existing game image backed up to: %s\n", backupPath.c_str());
+    }
+  } else if (!imageExists) {
+    Serial.println("No game image found - will attempt download");
+    shouldDownload = true;
+  } else {
+    Serial.printf("Game image found: %s\n", imagePath.c_str());
+    
+    if (displayGameImage(imagePath)) {
+      Serial.println("Game image displayed correctly");
+      lastGameImageOK = true;
+      addGameImageFooter(gameName);
+      return;
+    }
+  }
+  
+  // Container image (boot.vhd, msdos622.vhd): a whole DOS environment, not a
+  // game — there is no artwork to miss. Present it exactly like "core loaded
+  // without game". The flag is set inside the first download pass (which also
+  // marks the search exhausted), so this branch owns every redraw after it and
+  // keeps the NOT-IN-SS banner — semantically false here — from ever firing.
+  // A user-supplied local image still wins: it displays above, before this.
+  if (shouldDownload && g_currentGameIsContainer) {
+    Serial.println("Container image - core-only presentation");
+    lastGameImageOK = false;
+    showCoreImageScreen(coreName);
+    return;
+  }
+
+  // AUTO-DOWNLOAD with SAFE STREAMING
+  if (shouldDownload && ENABLE_AUTO_DOWNLOAD && WiFi.status() == WL_CONNECTED && !downloadInProgress) {
+    // Two different "don't retry" reasons, deliberately kept apart:
+    //   lastSearchedGame       — this game was already fetched successfully.
+    //   lastGameSearchExhausted — ScreenScraper answered cleanly: not in the DB.
+    // A TRANSIENT failure (network down, SS busy) sets neither, so it retries.
+    // This screen calls the download directly, bypassing processCrcRecurrent's
+    // own exhaustion gate — without the check below, every redraw of a
+    // not-in-DB game would relaunch the full search.
+    if ((lastSearchedGame != gameName && !lastGameSearchExhausted) || FORCE_GAME_REDOWNLOAD) {
+      Serial.println("Attempting STREAMING-SAFE ScreenScraper download...");
+      
+      // Final memory check before download
+      if (ESP.getFreeHeap() < 120000) {
+        Serial.printf("Insufficient memory for download (%d bytes)\n", ESP.getFreeHeap());
+        if (staleImage.length() > 0 && displayGameImage(staleImage)) {
+          lastGameImageOK = true;
+          addGameImageFooter(gameName);
+          return;
+        }
+        Serial.println("Falling back to core image");
+        lastGameImageOK = false;
+        showCoreImageScreen(coreName);
+        return;
+      }
+      
+      showDownloadingScreen(coreName, gameName);
+      
+      // *** USE FUNCTION STREAMING-SAFE ***
+      if (downloadGameBoxartStreamingSafeJSON(coreName, gameName)) {
+        Serial.println("STREAMING-SAFE download successful! Displaying...");
+        
+        if (findGameImage(coreName, gameName, imagePath, nullptr) && displayGameImage(imagePath)) {
+          Serial.println("Downloaded streaming-safe image displayed successfully");
+          
+          // Only update cache on successful download AND display
+          if (!FORCE_GAME_REDOWNLOAD) {
+            lastSearchedGame = gameName;
+            Serial.printf("Cache updated: lastSearchedGame = '%s'\n", gameName.c_str());
+          }
+          
+          lastGameImageOK = true;
+          addGameImageFooter(gameName);
+          return;
+        }
+      }
+      // Do NOT update lastSearchedGame on failure: retry pacing is owned by
+      // the CRC-recurrent layer (10 s cadence, 30-attempt cap, exhaustion
+      // flag). Updating the cache here silently blocked every retry until a
+      // forced scan — the exact contradiction seen in the field logs.
+      Serial.println("STREAMING-SAFE download failed - NOT updating cache to allow retry");
+    } else if (getScreenScraperSystemId(coreName).length() == 0) {
+      // lastGameSearchExhausted is overloaded: startCrcRecurrentForGame() also
+      // sets it when the CORE has no ScreenScraper system. Report that cause
+      // separately — the game may well exist in the DB; we simply cannot ask.
+      Serial.printf("Core '%s' has no ScreenScraper system - artwork impossible\n",
+                    coreName.c_str());
+      ssNotifyUnsupportedCore(coreName);
+    } else if (lastGameSearchExhausted) {
+      if (lastGameFoundNoMedia) {
+        Serial.printf("Game '%s' catalogued but has no artwork - not retrying\n", gameName.c_str());
+        ssNotifyOnce(coreName + "|" + gameName, "GAME HAS NO ARTWORK IN SS", gameName);
+      } else {
+        Serial.printf("Game '%s' known absent from ScreenScraper - not retrying\n", gameName.c_str());
+        ssNotifyOnce(coreName + "|" + gameName, "GAME NOT IN SS DATABASE", gameName);
+      }
+    } else {
+      Serial.printf("Game '%s' already searched recently, skipping\n", gameName.c_str());
+    }
+  }
+  
+  // A stale image that could not be replaced is still better than the core.
+  if (staleImage.length() > 0 && displayGameImage(staleImage)) {
+    Serial.println("Search found nothing new - keeping the cached image");
+    lastGameImageOK = true;
+    addGameImageFooter(gameName);
+    return;
+  }
+
+  // FALLBACK: show core image
+  Serial.println("Streaming-safe fallback to core image");
+  lastGameImageOK = false;
+  showCoreImageScreen(coreName);
+}
+
+void forceMemoryCleanup() {
+  Serial.printf("Force memory cleanup - Free heap before: %d bytes\n", ESP.getFreeHeap());
+  
+  // Force garbage collection
+  delay(100);
+  
+  Serial.printf("Force memory cleanup - Free heap after: %d bytes\n", ESP.getFreeHeap());
+  
+  if (ESP.getFreeHeap() < 50000) {
+    Serial.println("CRITICAL: Memory critically low - consider restart");
+  }
+}
+
+String buildCorrectMediaJeuUrl(String gameId, String systemId, String mediaType, String specificSystemeId) {
+  // ========== INITIAL DEBUG ==========
+  Serial.printf("=== buildCorrectMediaJeuUrl DEBUG ===\n");
+  Serial.printf("   gameId: '%s'\n", gameId.c_str());
+  Serial.printf("   systemId (generic): '%s'\n", systemId.c_str());
+  Serial.printf("   mediaType: '%s'\n", mediaType.c_str());
+  Serial.printf("   specificSystemeId: '%s' (length: %d)\n", specificSystemeId.c_str(), specificSystemeId.length());
+  
+  // ========== BASIC VALIDATION ==========
+  if (gameId.length() == 0) {
+    Serial.println("Cannot build mediaJeu URL: gameId is empty");
+    return "";
+  }
+  
+  // ========== SYSTEM ID SELECTION LOGIC ==========
+  // Use the specific systemeId if available, otherwise use the generic one.
+  String finalSystemId = (specificSystemeId.length() > 0) ? specificSystemeId : systemId;
+  
+  Serial.printf("   finalSystemId: '%s'\n", finalSystemId.c_str());
+  
+  // ========== URL CONSTRUCTION ==========
+  String mediaUrl = "https://api.screenscraper.fr/api2/mediaJeu.php";
+  mediaUrl += "?devid=" + String(SCREENSCRAPER_DEV_USER);
+  mediaUrl += "&devpassword=" + String(SCREENSCRAPER_DEV_PASS);
+  mediaUrl += "&softname=MiSTer-Monitor";
+  mediaUrl += "&ssid=" + String(SCREENSCRAPER_USER);
+  mediaUrl += "&sspassword=" + String(SCREENSCRAPER_PASS);
+  
+  // REQUIRED PARAMETERS BUT THEY CAN BE EMPTY
+  mediaUrl += "&crc=";     // Empty but required
+  mediaUrl += "&md5=";     // Empty but required  
+  mediaUrl += "&sha1=";    // Empty but required
+  
+  // ========== CRITICAL PARAMETER: systemeid ==========
+  mediaUrl += "&systemeid=" + finalSystemId;  // USE THE SPECIFIC ID
+  mediaUrl += "&jeuid=" + gameId;
+  mediaUrl += "&media=" + mediaType;
+  mediaUrl += "&maxwidth=" + String(TARGET_WIDTH);
+  mediaUrl += "&maxheight=" + String(ARTWORK_MAX_HEIGHT);  // Use 645 instead of 720
+  mediaUrl += "&outputformat=jpg";
+  
+  // ========== DETAILED DEBUG ==========
+  if (specificSystemeId.length() > 0) {
+    Serial.printf("Using SPECIFIC systeme ID: %s (instead of generic: %s)\n", 
+                 specificSystemeId.c_str(), systemId.c_str());
+    Serial.printf("ARCADE SYSTEM DETECTED! Using systeme-specific ID\n");
+  } else {
+    Serial.printf("Using generic system ID: %s\n", systemId.c_str());
+    Serial.printf("No specific systeme ID available, using generic\n");
+  }
+  
+  // ========== FINAL URL DEBUG ==========
+  Serial.printf("FINAL MEDIAJEU URL:\n");
+  Serial.printf("   %s\n", redactScreenScraperUrl(mediaUrl).c_str());
+  
+  // Extract and highlight the systemeid parameter for verification
+  int systemeidPos = mediaUrl.indexOf("systemeid=");
+  if (systemeidPos != -1) {
+    int systemeidEnd = mediaUrl.indexOf("&", systemeidPos);
+    if (systemeidEnd == -1) systemeidEnd = mediaUrl.length();
+    String systemeidParam = mediaUrl.substring(systemeidPos, systemeidEnd);
+    Serial.printf("SYSTEMEID PARAMETER: %s\n", systemeidParam.c_str());
+  }
+  
+  return mediaUrl;
+}
+
+void initScrollText(ScrollTextState* state, String text, int maxDisplayChars) {
+  state->fullText = text;
+  state->maxChars = maxDisplayChars;
+  state->scrollPos = 0;
+  state->lastScrollTime = millis();
+  state->pauseStartTime = millis();
+  state->isPaused = true;
+  state->needsScroll = (text.length() > maxDisplayChars);
+  state->pauseAtEnd = false;  // Always start with pause at beginning
+  
+  Serial.printf("Init scroll: '%s' (len:%d, max:%d, needsScroll:%s)\n", 
+                text.c_str(), text.length(), maxDisplayChars, 
+                state->needsScroll ? "YES" : "NO");
+}
+
+String getScrolledText(ScrollTextState* state) {
+  // If text doesn't need scrolling, return as-is
+  if (!state->needsScroll || state->fullText.length() == 0) {
+    return state->fullText;
+  }
+  
+  unsigned long currentTime = millis();
+  
+  // Handle pauses
+  if (state->isPaused) {
+    // Determine pause duration based on whether we're at start or end
+    unsigned long pauseDuration = state->pauseAtEnd ? SCROLL_PAUSE_END_MS : SCROLL_PAUSE_START_MS;
+    
+    if (currentTime - state->pauseStartTime >= pauseDuration) {
+      state->isPaused = false;
+      state->lastScrollTime = currentTime;
+      
+      // If we were pausing at end, reset to beginning for next cycle
+      if (state->pauseAtEnd) {
+        state->scrollPos = 0;
+        state->pauseAtEnd = false;
+        // Will start pause at beginning on next cycle
+        state->isPaused = true;
+        state->pauseStartTime = currentTime;
+      }
+    }
+  } else {
+    // Handle scrolling
+    if (currentTime - state->lastScrollTime >= SCROLL_SPEED_MS) {
+      state->scrollPos++;
+      
+      // Calculate maximum scroll position
+      int maxScrollPos = state->fullText.length() - state->maxChars;
+      
+      // Check if we've reached the end
+      if (state->scrollPos >= maxScrollPos) {
+        // Don't go past the end, stay at maxScrollPos and start end pause
+        state->scrollPos = maxScrollPos;
+        state->isPaused = true;
+        state->pauseAtEnd = true;
+        state->pauseStartTime = currentTime;
+        
+        Serial.printf("Reached end, starting end pause (pos:%d, maxPos:%d)\n", 
+                      state->scrollPos, maxScrollPos);
+      }
+      
+      state->lastScrollTime = currentTime;
+    }
+  }
+  
+  // Extract visible portion of text
+  if (state->scrollPos + state->maxChars > state->fullText.length()) {
+    return state->fullText.substring(state->scrollPos);
+  } else {
+    return state->fullText.substring(state->scrollPos, state->scrollPos + state->maxChars);
+  }
+}
+
+GameInfo searchWithJeuInfosPreciseJSON(String coreName, RomDetails romDetails,
+                                       String systemIdOverride) {
+  GameInfo result;
+  result.found = false;
+
+  Serial.printf("=== JSON PRECISE SEARCH ===\n");
+  Serial.printf("Core: %s | ROM: %s | CRC: %s\n",
+                coreName.c_str(), romDetails.filename.c_str(), romDetails.crc32.c_str());
+
+  int startHeap = ESP.getFreeHeap();
+  Serial.printf("Starting heap: %d bytes\n", startHeap);
+
+  // OPTIMIZATION: Critical memory verification
+  if (startHeap < 100000) {
+    Serial.printf("CRITICAL: Insufficient memory for JSON search (%d bytes)\n", startHeap);
+    return result;
+  }
+
+  // Extension-aware: a 2600 cartridge loaded on the 7800 core has to be asked
+  // for under 2600. systemIdOverride is how the caller re-asks on the sibling
+  // system after a first miss.
+  String systemId = systemIdOverride.length() > 0
+                    ? systemIdOverride
+                    : ssSystemForRom(coreName, romDetails);
+  if (systemId.length() == 0) {
+    Serial.printf("System '%s' not supported by ScreenScraper\n", coreName.c_str());
+    return result;
+  }
+  Serial.printf("Querying ScreenScraper system %s for '%s'\n",
+                systemId.c_str(), romDetails.filename.c_str());
+
+  // Build URL
+  String url = "https://api.screenscraper.fr/api2/jeuInfos.php";
+  url += "?devid=" + String(SCREENSCRAPER_DEV_USER);
+  url += "&devpassword=" + String(SCREENSCRAPER_DEV_PASS);
+  url += "&softname=MiSTer-Monitor";
+  url += "&output=json";
+  url += "&ssid=" + urlEncode(String(SCREENSCRAPER_USER));
+  url += "&sspassword=" + urlEncode(String(SCREENSCRAPER_PASS));
+  url += "&systemeid=" + systemId;
+  url += "&romtype=rom";
+  url += "&romnom=" + urlEncode(ssRomnomFor(romDetails));
+  url += "&crc=" + romDetails.crc32;
+  url += "&romtaille=" + String(romDetails.filesize);
+  url += "&md5=" + romDetails.md5;
+  url += "&sha1=";
+
+  Serial.printf("JSON Search URL: %s\n", redactScreenScraperUrl(url).c_str());
+  logCredentialShape("ss_pass", String(SCREENSCRAPER_PASS));
+  Serial.printf("[SS] devid='%s' devpassword=[%s]\n",
+                String(SCREENSCRAPER_DEV_USER).c_str(),
+                String(SCREENSCRAPER_DEV_PASS).length() > 0 ? "set" : "EMPTY");
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(30000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+  http.addHeader("Accept", "application/json");
+
+  int httpCode = http.GET();
+  Serial.printf("HTTP Response: %d\n", httpCode);
+  g_lastSSHttpCode = httpCode;
+
+  if (httpCode == 200) {
+    int contentLength = http.getSize();
+    Serial.printf("Content length: %d bytes\n", contentLength);
+
+    int currentHeap = ESP.getFreeHeap();
+
+    // Streaming when: unknown length + tight memory, OR known large body,
+    // OR low memory right now.
+    bool shouldUseStreaming = (contentLength == -1 && currentHeap < 150000) ||
+                              (contentLength > 20000) ||
+                              (currentHeap < 130000);
+
+    if (shouldUseStreaming) {
+      // -------- EARLY-EXIT BOUNDED SCAN --------
+      // The fields we need (jeu.id, jeu.noms, jeu.systeme.id) sit in the
+      // first few KB of response.jeu. Everything that makes the body huge
+      // (synopsis, genres, medias[], roms[]) comes AFTER them. So we read
+      // only a bounded prefix of the raw stream and stop. This avoids
+      // pulling ~100 KB over slow TLS and never needs a complete/valid
+      // JSON document.
+      //
+      // Raw substring scanning is immune to Transfer-Encoding: chunked
+      // because chunk-size markers only appear BETWEEN large chunks and
+      // never split the short field patterns we look for.
+      const size_t CAP_BYTES = 12000;   // generous: fields are well within this
+      Serial.printf("Bounded streaming scan (cap=%u): contentLength=%d, heap=%d\n",
+                    (unsigned)CAP_BYTES, contentLength, currentHeap);
+
+      WiFiClient* stream = http.getStreamPtr();
+      String body;
+      body.reserve(CAP_BYTES + 256);
+
+      char tmp[513];
+      unsigned long lastDataMs = millis();
+
+      while (body.length() < CAP_BYTES) {
+        // End conditions: connection closed and nothing left to read,
+        // low memory, or a read stall (no bytes for >8 s).
+        if (!http.connected() && stream->available() == 0) break;
+        if (ESP.getFreeHeap() < 60000) {
+          Serial.printf("Low memory during scan, stopping early\n");
+          break;
+        }
+
+        int avail = stream->available();
+        if (avail > 0) {
+          int toRead = avail;
+          if (toRead > (int)sizeof(tmp) - 1) toRead = sizeof(tmp) - 1;
+          int n = stream->readBytes((uint8_t*)tmp, toRead);
+          if (n > 0) {
+            tmp[n] = '\0';
+            body += tmp;
+            lastDataMs = millis();
+          }
+        } else {
+          if (millis() - lastDataMs > 8000) {
+            Serial.printf("Stream stalled (no data 8s), stopping with %d bytes\n",
+                          body.length());
+            break;
+          }
+          screenshotServer.handleClient();  // Keep screenshot endpoint alive during bounded scan
+          delay(10);
+        }
+      }
+
+      Serial.printf("Scan collected %d bytes, heap after: %d\n",
+                    body.length(), ESP.getFreeHeap());
+
+      if (body.length() == 0) {
+        Serial.println("Empty body during streaming scan");
+      } else {
+        // Reuse the proven indexOf parser already used by the traditional
+        // branch. It handles "jeu".id, "systeme":{"id"...} and the noms
+        // region preference / nom fallback.
+        result = extractGameInfoFromJeuInfos(body, romDetails.filename);
+        body = "";  // free immediately
+
+        if (result.found && result.gameId.length() > 0) {
+          String detectedMediaType = "box-3D(wor)";
+          result.boxartUrl = buildCorrectMediaJeuUrl(
+              result.gameId, systemId, detectedMediaType, result.systemeId);
+          if (result.boxartUrl.length() == 0) {
+            Serial.println("Failed to build mediaJeu URL");
+            result.found = false;
+          }
+        } else {
+          Serial.printf("Bounded scan did not yield a game id "
+                        "(game not in DB, or fields beyond %u bytes)\n",
+                        (unsigned)CAP_BYTES);
+        }
+      }
+      // -------- END EARLY-EXIT BOUNDED SCAN --------
+
+    } else {
+      Serial.printf("Using traditional processing: contentLength=%d, heap=%d\n",
+                    contentLength, currentHeap);
+
+      if (currentHeap < 90000) {
+        Serial.printf("Insufficient memory for traditional processing (need 90000+, have %d)\n",
+                      currentHeap);
+        http.end();
+        return result;
+      }
+
+      String response = http.getString();
+      Serial.printf("Response received: %d bytes\n", response.length());
+      Serial.printf("Memory after getString: %d bytes\n", ESP.getFreeHeap());
+
+      if (response.length() == 0) {
+        Serial.printf("Empty response received despite successful HTTP 200\n");
+        http.end();
+        return result;
+      }
+
+      int memoryAfterResponse = ESP.getFreeHeap();
+      if (response.length() > 10000 && memoryAfterResponse < 80000) {
+        Serial.printf("Large response (%d bytes) + low memory (%d bytes), truncating to 8000\n",
+                      response.length(), memoryAfterResponse);
+        response = response.substring(0, 8000);
+        Serial.printf("Response truncated to: %d bytes\n", response.length());
+      }
+
+      if (response.length() > 0) {
+        Serial.printf("Processing JSON response of %d bytes...\n", response.length());
+        result = extractGameInfoFromJeuInfos(response, romDetails.filename);
+
+        if (result.found && result.gameId.length() > 0) {
+          String detectedMediaType = "box-3D(wor)";
+          result.boxartUrl = buildCorrectMediaJeuUrl(result.gameId, systemId,
+                                                     detectedMediaType, result.systemeId);
+          if (result.boxartUrl.length() > 0) {
+            Serial.printf("BUILT MEDIAJEU URL:\n   %s\n", redactScreenScraperUrl(result.boxartUrl).c_str());
+          } else {
+            Serial.println("Failed to build mediaJeu URL");
+            result.found = false;
+          }
+        } else {
+          Serial.printf("Failed to extract game info from response\n");
+        }
+        response = "";
+        Serial.printf("Memory after processing: %d bytes\n", ESP.getFreeHeap());
+      } else {
+        Serial.printf("Response became empty during processing\n");
+      }
+    }
+  } else {
+    Serial.printf("HTTP error: %d\n", httpCode);
+  }
+
+  http.end();
+
+  int finalHeap = ESP.getFreeHeap();
+  Serial.printf("Final heap: %d bytes (change: %+d)\n", finalHeap, finalHeap - startHeap);
+
+  return result;
+}
+
+// Systems whose game containers may carry no ScreenScraper-matchable identity
+// (0MHz DOS packs build per-pack VHDs/CHDs). Text search is the fallback of
+// last resort there. Extend deliberately, one system at a time, after field
+// validation — the allowlist is what prevents a transient hash failure on a
+// CRC-capable system from degrading into a fuzzy search with wrong artwork.
+bool isNameSearchSystem(const String& systemId) {
+  return systemId == "135";   // DOS (0MHz packs)
+}
+
+// Text-search fallback for hash-less containers. Same response shape as
+// jeuInfos.php but the game object arrives inside a "jeux":[...] array.
+// We take the FIRST element (documented policy) by rebranding the array as a
+// single "jeu" object and reusing the proven jeuInfos indexOf parser.
+GameInfo searchWithJeuRechercheJSON(String coreName, String cleanName) {
+  GameInfo result;
+  result.found = false;
+
+  Serial.printf("=== JSON NAME SEARCH (jeuRecherche) ===\n");
+  Serial.printf("Core: %s | Query: '%s'\n", coreName.c_str(), cleanName.c_str());
+
+  if (ESP.getFreeHeap() < 100000) {
+    Serial.printf("CRITICAL: Insufficient memory for name search (%d bytes)\n",
+                  ESP.getFreeHeap());
+    return result;
+  }
+
+  String systemId = getScreenScraperSystemId(coreName);
+  if (systemId.length() == 0 || cleanName.length() == 0) {
+    Serial.println("Name search: missing system id or query");
+    return result;
+  }
+
+  String url = "https://api.screenscraper.fr/api2/jeuRecherche.php";
+  url += "?devid=" + String(SCREENSCRAPER_DEV_USER);
+  url += "&devpassword=" + String(SCREENSCRAPER_DEV_PASS);
+  url += "&softname=MiSTer-Monitor";
+  url += "&output=json";
+  url += "&ssid=" + urlEncode(String(SCREENSCRAPER_USER));
+  url += "&sspassword=" + urlEncode(String(SCREENSCRAPER_PASS));
+  url += "&systemeid=" + systemId;
+  url += "&recherche=" + urlEncode(cleanName);
+
+  Serial.printf("Name Search URL: %s\n", redactScreenScraperUrl(url).c_str());
+
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(30000);
+  http.addHeader("User-Agent", "MiSTer-Monitor");
+  http.addHeader("Accept", "application/json");
+
+  int httpCode = http.GET();
+  Serial.printf("HTTP Response: %d\n", httpCode);
+  g_lastSSHttpCode = httpCode;
+
+  if (httpCode == 200) {
+    // Bounded prefix scan, same rationale as the jeuInfos streaming branch:
+    // jeux[0]'s id/noms/systeme sit in the first few KB, after the
+    // serveurs/ssuser preamble. Chunked transfer is harmless to substring
+    // scanning of short field patterns.
+    const size_t CAP_BYTES = 12000;
+    WiFiClient* stream = http.getStreamPtr();
+    String body;
+    body.reserve(CAP_BYTES + 256);
+
+    char tmp[513];
+    unsigned long lastDataMs = millis();
+
+    while (body.length() < CAP_BYTES) {
+      if (!http.connected() && stream->available() == 0) break;
+      if (ESP.getFreeHeap() < 60000) {
+        Serial.printf("Low memory during name-search scan, stopping early\n");
+        break;
+      }
+      int avail = stream->available();
+      if (avail > 0) {
+        int toRead = avail;
+        if (toRead > (int)sizeof(tmp) - 1) toRead = sizeof(tmp) - 1;
+        int n = stream->readBytes((uint8_t*)tmp, toRead);
+        if (n > 0) {
+          tmp[n] = '\0';
+          body += tmp;
+          lastDataMs = millis();
+        }
+      } else {
+        if (millis() - lastDataMs > 8000) {
+          Serial.printf("Stream stalled (no data 8s), stopping with %d bytes\n",
+                        body.length());
+          break;
+        }
+        screenshotServer.handleClient();  // Keep screenshot endpoint alive during bounded scan
+        delay(10);
+      }
+    }
+
+    Serial.printf("Name-search scan collected %d bytes, heap: %d\n",
+                  body.length(), ESP.getFreeHeap());
+
+    int jx = body.indexOf("\"jeux\"");
+    if (jx == -1) {
+      Serial.println("No 'jeux' array in response (no results or error body)");
+    } else {
+      int arrStart = body.indexOf('[', jx);
+      if (arrStart != -1) {
+        // Rebrand jeux[...] as a single "jeu" object. The indexOf parser
+        // stops at the FIRST id/systeme/noms it finds — i.e. jeux[0].
+        String rebranded = "\"jeu\":" + body.substring(arrStart + 1);
+        body = "";
+        result = extractGameInfoFromJeuInfos(rebranded, cleanName);
+
+        if (result.found && result.gameId.length() > 0) {
+          String detectedMediaType = "box-3D(wor)";
+          result.boxartUrl = buildCorrectMediaJeuUrl(
+              result.gameId, systemId, detectedMediaType, result.systemeId);
+          if (result.boxartUrl.length() == 0) {
+            Serial.println("Failed to build mediaJeu URL");
+            result.found = false;
+          }
+        } else {
+          Serial.println("jeuRecherche yielded no usable game id");
+        }
+      }
+    }
+  } else {
+    Serial.printf("Name search HTTP error: %d\n", httpCode);
+  }
+
+  http.end();
+  Serial.printf("=== NAME SEARCH %s ===\n", result.found ? "HIT" : "MISS");
+  return result;
+}
+
+// Shared tail of the name-search fallback: search by clean title, download
+// the artwork, prefetch GAME INFO metadata. Mirrors the CRC success path.
+// Runs inside downloadGameBoxartStreamingSafeJSON: the DownloadFlagGuard of
+// the caller keeps downloadInProgress set for the whole attempt.
+// Precise ScreenScraper lookup driven by the romset id, for games that have no
+// CRC and never will. jeuInfos matches on romnom alone; the CRC path's own URL
+// already carries romnom, so this is that same request with one parameter
+// empty — an exact hit, not the fuzzy title search below.
+//
+// Mirrors tryNameSearchFallback() step for step on purpose: same progress
+// stages, same save path, same metadata prefetch hook. Only the identifying
+// query differs.
+bool tryRomnomLookup(String coreName, String gameName, RomDetails romDetails) {
+  Serial.printf("Romnom lookup for '%s' (no CRC, server-confirmed romset)\n",
+                romDetails.ssRomnom.c_str());
+  showDownloadProgress(40, "Romset lookup...");
+
+  GameInfo gameInfo = searchWithJeuInfosPreciseJSON(coreName, romDetails);
+  if (!(gameInfo.found && gameInfo.boxartUrl.length() > 0)) {
+    Serial.println("Romnom lookup found nothing");
+    return false;
+  }
+  Serial.printf("ROMNOM CHOSE: '%s' (id %s)\n",
+                gameInfo.gameName.c_str(), gameInfo.gameId.c_str());
+
+  String exactFileName = getExactFileName(gameName);
+  String searchCore = coreName;
+  searchCore.toLowerCase();
+  String savePath = getSavePath(exactFileName, searchCore);
+
+  showDownloadProgress(60, "Downloading image...");
+  bool ok = downloadImageFromMediaJeu(gameInfo.boxartUrl, savePath);
+  Serial.printf("Romnom MediaJeu download: %s\n", ok ? "SUCCESS" : "FAILED");
+
+  if (ok) {
+    // GAME INFO panel: metadata prefetch, same hook as the CRC path.
+    String metaPath = getMetaPathFromImagePath(savePath);
+    if (!SD.exists(metaPath)) {
+      showDownloadProgress(92, "Fetching game info...");
+      GameMeta meta;
+      if (fetchGameMetadataJSON(gameInfo.gameId, coreName, romDetails, meta)) {
+        saveGameMeta(metaPath, meta);
+        if (gameName == currentGame) { meta.forGame = gameName; currentMeta = meta; }
+      }
+    }
+    showDownloadProgress(100, "Romset lookup complete!");
+    pumpedDelay(1500);
+  }
+  return ok;
+}
+
+bool tryNameSearchFallback(String coreName, String gameName, RomDetails romDetails) {
+  String cleanName = romDetails.searchName.length() > 0 ? romDetails.searchName
+                                                        : gameName;
+  Serial.printf("Name-search fallback for '%s' (server hint: %s)\n",
+                cleanName.c_str(), romDetails.nameSearchHint ? "YES" : "NO");
+
+  // The server sets this when search_name denotes a container image rather
+  // than a game (boot.vhd, BOOT-DOS98.vhd, Shareware Pack-fbit.vhd).
+  // jeuRecherche has no "no match": it answers with a fuzzy hit (observed:
+  // id 170580 for 'boot'), i.e. confident-looking wrong artwork. Gate HERE so
+  // both call legs are covered, and on containerImage — not nameSearchHint —
+  // because a DOS pack CHD with a valid-but-unindexed CRC reaches the second
+  // leg with hint=NO and must still be searched. Returning false lets the
+  // caller mark the search exhausted, stopping further ScreenScraper traffic.
+  if (romDetails.containerImage) {
+    Serial.println("Container image, not a game - skipping name search");
+    return false;
+  }
+  showDownloadProgress(40, "Name search...");
+
+  // Snapshot the diagnostic code the CRC path produced. jeuRecherche answers
+  // "200 with zero results" for an unknown title, which would overwrite a far
+  // more informative 404 and turn the on-screen reason from
+  // "NOT IN SS DATABASE (404)" into a generic "Download failed".
+  int codeBeforeNameSearch = g_lastSSHttpCode;
+
+  GameInfo gameInfo = searchWithJeuRechercheJSON(coreName, cleanName);
+  if (!(gameInfo.found && gameInfo.boxartUrl.length() > 0)) {
+    Serial.println("Name search found no results");
+    if (romDetails.noRomOnDisk && !gameInfo.found && g_lastSSHttpCode == 200) {
+      // SAM name-only entry: no rom file on disk means the CRC route never
+      // existed, so this clean jeuRecherche miss (HTTP 200, zero results) IS
+      // the definitive verdict — the title is not in ScreenScraper. Present
+      // it with the stable card and mark the search exhausted so SAM redraws
+      // stop re-querying SS for this game. The verdict comes from the search
+      // itself, not from any name heuristic: commercial Amiga titles that DO
+      // exist in SS were found above and never reach this branch. A transient
+      // error (429, timeout, 5xx) leaves a different code and keeps the
+      // normal retry path. found-but-no-boxart is excluded (!gameInfo.found):
+      // that means catalogued-without-media, a different message.
+      lastGameSearchExhausted = true;
+      ssNotifyOnce(coreName + "|" + gameName, "GAME NOT IN SS DATABASE", cleanName);
+    }
+    // Restore the CRC path's diagnostic on a clean 200-but-empty miss. A real
+    // error from the name search (429, -1, ...) is newer and more relevant, so
+    // it is kept.
+    if (g_lastSSHttpCode == 200 && codeBeforeNameSearch != 0 &&
+        codeBeforeNameSearch != 200) {
+      g_lastSSHttpCode = codeBeforeNameSearch;
+      Serial.printf("Preserved CRC-path diagnostic code %d for the HUD\n",
+                    codeBeforeNameSearch);
+    }
+    return false;
+  }
+
+  // Ambiguity policy: first jeux[] element, chosen name always logged.
+  Serial.printf("NAME SEARCH CHOSE: '%s' (id %s)\n",
+                gameInfo.gameName.c_str(), gameInfo.gameId.c_str());
+
+  String exactFileName = getExactFileName(gameName);
+  String searchCore = coreName;
+  searchCore.toLowerCase();
+  String savePath = getSavePath(exactFileName, searchCore);
+
+  showDownloadProgress(60, "Downloading image...");
+  bool ok = downloadImageFromMediaJeu(gameInfo.boxartUrl, savePath);
+  Serial.printf("Name-search MediaJeu download: %s\n", ok ? "SUCCESS" : "FAILED");
+
+  if (ok) {
+    // GAME INFO panel: metadata prefetch, same hook as the CRC path.
+    String metaPath = getMetaPathFromImagePath(savePath);
+    if (!SD.exists(metaPath)) {
+      showDownloadProgress(92, "Fetching game info...");
+      GameMeta meta;
+      if (fetchGameMetadataJSON(gameInfo.gameId, coreName, romDetails, meta)) {
+        saveGameMeta(metaPath, meta);
+        if (gameName == currentGame) { meta.forGame = gameName; currentMeta = meta; }
+      }
+    }
+    showDownloadProgress(100, "Name search complete!");
+    pumpedDelay(1500);
+  }
+  return ok;
+}
+
+bool downloadGameBoxartStreamingSafeJSON(String coreName, String gameName) {
+  if (downloadInProgress) {
+    Serial.println("Download already in progress");
+    return false;
+  }
+  
+  DownloadFlagGuard dlGuard;
+  g_lastSSHttpCode = 0;
+  g_mediaAttemptCount = 0;
+  bool success = false;
+  bool gameWasFound = false;   // a jeu was resolved (id present), media may still be missing
+
+  // OPTIONAL: Detect if it is a recurring search
+  bool isRecurrent = crcRecurrentActive && (gameName == currentGameForCrc);
+  
+  Serial.printf("=== JSON-BASED SCREENSCRAPER DOWNLOAD ===\n");
+  Serial.printf("Game: '%s' | Core: '%s'\n", gameName.c_str(), coreName.c_str());
+  Serial.printf("Free heap at start: %d bytes\n", ESP.getFreeHeap());
+  
+  // Local-first: the packs installed on the MiSTer, in media order, before
+  // any network traffic. Deliberately ABOVE the systemId guard below: the
+  // packs are keyed by the game's own identity, not by a ScreenScraper system
+  // id, so they can cover cores this firmware has no mapping for. On a miss
+  // nothing is consumed and the ScreenScraper path below runs untouched.
+  {
+    String packExactName = getExactFileName(gameName);
+    String packCore = coreName;
+    packCore.toLowerCase();
+    String packSavePath = getSavePath(packExactName, packCore);   // creates the folder
+    String packBase = packSavePath.substring(0, packSavePath.lastIndexOf('.'));
+    showDownloadProgress(40, "Local images...");
+    if (gameLocalPass(packBase, isArcadeCore(coreName), DOWNLOAD_TIMEOUT)) {
+      Serial.println("Image served from the local packs - no ScreenScraper call");
+      return true;
+    }
+  }
+  
+  // Early exit: if the core isn't mapped to a ScreenScraper system, there's
+  // no point asking MiSTer for ROM details 
+  // the search would fail anyway. Mark search exhausted.
+  String systemId = getScreenScraperSystemId(coreName);
+  if (systemId.length() == 0) {
+    Serial.printf("Core '%s' not mapped to any ScreenScraper system — skipping search\n",
+                  coreName.c_str());
+    lastGameSearchExhausted = true;
+    return false;
+  }
+  
+  // Memory check
+  if (ESP.getFreeHeap() < 100000) {
+    Serial.printf("Insufficient memory: %d bytes\n", ESP.getFreeHeap());
+    showDownloadProgress(0, "Low memory");
+    pumpedDelay(2000);
+    return false;
+  }
+  
+  showDownloadProgress(5, "Starting JSON search...");
+  
+  // STEP 1: JSON-based precise search (much simpler than XML streaming)
+  Serial.printf("STEP 1: JSON precise search with CRC...\n");
+  RomDetails romDetails = getCurrentRomDetails();
+
+  // Presentation flag for every screen from here on: container images get
+  // core-only treatment (see g_currentGameIsContainer). Assignment, not |=,
+  // so it also self-clears if the server's verdict changes for this game.
+  g_currentGameIsContainer = romDetails.containerImage;
+  if (g_currentGameIsContainer) {
+    // Bail out here rather than letting the container fall through to the
+    // name-search gate: reaching the tail with success=false lands in the
+    // generic failure branch, which paints "Download failed" and blocks for
+    // delay(6000). Nothing failed — there is simply no artwork to fetch for a
+    // whole-environment image. Marking the search exhausted also stops the
+    // 10 s recurrent from re-entering on every tick.
+    Serial.println("Container image per server - no artwork to fetch, core-only presentation");
+    lastGameSearchExhausted = true;
+    return false;                 // DownloadFlagGuard clears downloadInProgress
+  }
+
+  Serial.printf("ROM Details check:\n");
+  Serial.printf("  Available: %s\n", romDetails.available ? "YES" : "NO");
+  Serial.printf("  Hash calculated: %s\n", romDetails.hashCalculated ? "YES" : "NO");
+  Serial.printf("  CRC32 length: %d\n", romDetails.crc32.length());
+  
+  if (romDetails.available && romDetails.hashCalculated && romDetails.crc32.length() > 0) {
+    lastRomHasCrc = true;
+    lastRomCrcChecked = true;
+    Serial.println("ROM data available - using JSON search");
+    showDownloadProgress(20, "JSON CRC search...");
+    
+    Serial.printf("Calling searchWithJeuInfosPreciseJSON()...\n");
+    GameInfo gameInfo = searchWithJeuInfosPreciseJSON(coreName, romDetails);
+
+    // Backwards-compatible core, undecidable extension: ask the sibling system.
+    // Gated on a CLEAN answer (404 = definitive no-match, 200 = answered but no
+    // usable game) so a timeout or a 429 does not burn an extra call on a
+    // question the network never delivered. Unlike the transient retry further
+    // down, this URL differs from the first one — different systemeid — so a
+    // 404 on the primary is exactly the reason to ask it.
+    if (!gameInfo.found &&
+        (g_lastSSHttpCode == 404 || g_lastSSHttpCode == 200)) {
+      String altSystem;
+      ssSystemForRom(coreName, romDetails, &altSystem);
+      if (altSystem.length() > 0) {
+        Serial.printf("Not found on primary system - retrying on compatible system %s\n",
+                      altSystem.c_str());
+        showDownloadProgress(28, "Compatible system...");
+        gameInfo = searchWithJeuInfosPreciseJSON(coreName, romDetails, altSystem);
+      }
+    }
+    
+    Serial.printf("JSON search result:\n");
+    Serial.printf("  Found: %s\n", gameInfo.found ? "YES" : "NO");
+    Serial.printf("  Game ID: '%s'\n", gameInfo.gameId.c_str());
+    Serial.printf("  Game Name: '%s'\n", gameInfo.gameName.c_str());
+    Serial.printf("  Boxart URL length: %d\n", gameInfo.boxartUrl.length());
+    
+    if (gameInfo.found && gameInfo.boxartUrl.length() > 0) {
+      Serial.printf("JSON SEARCH SUCCESS!\n");
+      gameWasFound = true;
+      Serial.printf("   Using mediaJeu.php download method\n");
+      
+      String exactFileName = getExactFileName(gameName);
+      String searchCore = coreName;
+      searchCore.toLowerCase();
+      String savePath = getSavePath(exactFileName, searchCore);
+      
+      Serial.printf("Save path: %s\n", savePath.c_str());
+      
+      showDownloadProgress(50, "Downloading image...");
+      Serial.printf("Calling downloadImageFromMediaJeu()...\n");
+      success = downloadImageFromMediaJeu(gameInfo.boxartUrl, savePath);
+      
+      Serial.printf("MediaJeu download result: %s\n", success ? "SUCCESS" : "FAILED");
+      
+      if (success) {
+        Serial.printf("JSON-BASED DOWNLOAD SUCCESS!\n");
+
+        // --- GAME INFO panel: metadata prefetch. Same operation, warm
+        // connection, gameId already resolved. A failed metadata fetch
+        // NEVER affects the artwork result.
+        {
+          String metaPath = getMetaPathFromImagePath(savePath);
+          if (!SD.exists(metaPath)) {
+            showDownloadProgress(92, "Fetching game info...");
+            GameMeta meta;
+            if (fetchGameMetadataJSON(gameInfo.gameId, coreName, romDetails, meta)) {
+              saveGameMeta(metaPath, meta);
+              if (gameName == currentGame) { meta.forGame = gameName; currentMeta = meta; }
+            }
+          }
+        }
+
+        showDownloadProgress(100, "JSON download complete!");
+        pumpedDelay(1500);
+        Serial.println("=== JSON DOWNLOAD COMPLETE ===\n");
+        return true;
+      } else {
+        Serial.println("MediaJeu download failed");
+      }
+    } else {
+      Serial.println("First JSON search found no results");
+
+      // A 404 from jeuInfos is ScreenScraper's definitive "nothing matches these
+      // parameters", not a transient failure. The retry re-issues a byte-identical
+      // URL, so it can only receive the identical 404: skipping it saves one API
+      // call and 10 s of dead screen per unmatchable game. Every other outcome
+      // (timeout, -1, 5xx, 429) may still be transient and keeps the retry.
+      const bool ssDefinitiveMiss = (g_lastSSHttpCode == 404);
+
+      // SECOND TRY: Retry CRC search with longer delay
+      Serial.printf(ssDefinitiveMiss
+                    ? "ScreenScraper 404 (definitive no-match) - skipping second CRC search\n"
+                    : "ATTEMPTING SECOND CRC SEARCH...\n");
+      if (!ssDefinitiveMiss) showDownloadProgress(35, "Retrying CRC search...");
+      
+      // WDT-safe wait: yields to OS in 100ms slices instead of blocking 10s
+      if (!ssDefinitiveMiss) {
+        Serial.printf("Waiting 10s before CRC retry (WDT-safe, yielding every 100ms)...\n");
+        unsigned long _waitStart = millis();
+        while (millis() - _waitStart < 10000) {
+          Board.update();
+          screenshotServer.handleClient();
+          delay(100);
+        }
+      }
+      
+      // Check memory before second attempt
+      if (ssDefinitiveMiss) {
+        // Nothing to retry: an identical URL can only return the identical 404.
+        //
+        // But this shortcut must finish the job the retry branch below would
+        // have done, because that branch is the only other owner of the
+        // exhaustion flag on the CRC path. Two things were being skipped:
+        //
+        //  1. The name-search fallback (F4). A 404 on the CRC query says the
+        //     hash is unknown to ScreenScraper; it says nothing about whether
+        //     the title is findable by name. Allowlisted systems still get
+        //     their one text search.
+        //  2. lastGameSearchExhausted. A definitive 404 with no name-search
+        //     rescue IS "clean response, not in the DB". Leaving the flag
+        //     false made gameInfoAvailable() fall through to lastRomHasCrc —
+        //     true here, since the CRC is exactly what got the 404 — so the
+        //     GAME INFO button stayed up for a game that can never fill it.
+        //     It also left processCrcRecurrent re-asking every 10 s for an
+        //     answer ScreenScraper had already given.
+        if (isNameSearchSystem(systemId)) {
+          success = tryNameSearchFallback(coreName, gameName, romDetails);
+        }
+        if (!success) {
+          lastGameSearchExhausted = true;
+          Serial.println("ScreenScraper 404 on CRC, no name-search rescue - marked search as exhausted");
+        }
+      } else if (ESP.getFreeHeap() < 90000) {
+        // Transient: memory pressure, not a ScreenScraper verdict. Deliberately
+        // leaves the search NOT exhausted so the 10 s recurrent retries later.
+        Serial.printf("Low memory for second attempt (%d bytes), skipping retry\n", ESP.getFreeHeap());
+      } else {
+        Serial.printf("Second attempt: Calling searchWithJeuInfosPreciseJSON()...\n");
+        GameInfo gameInfoRetry = searchWithJeuInfosPreciseJSON(coreName, romDetails);
+        
+        Serial.printf("Second CRC search result:\n");
+        Serial.printf("  Found: %s\n", gameInfoRetry.found ? "YES" : "NO");
+        Serial.printf("  Game ID: '%s'\n", gameInfoRetry.gameId.c_str());
+        Serial.printf("  Game Name: '%s'\n", gameInfoRetry.gameName.c_str());
+        Serial.printf("  Boxart URL length: %d\n", gameInfoRetry.boxartUrl.length());
+        
+        if (gameInfoRetry.found && gameInfoRetry.boxartUrl.length() > 0) {
+          Serial.printf("SECOND ATTEMPT SUCCESS!\n");
+          gameWasFound = true;
+          Serial.printf("   Using mediaJeu.php download method\n");
+          
+          String exactFileName = getExactFileName(gameName);
+          String searchCore = coreName;
+          searchCore.toLowerCase();
+          String savePath = getSavePath(exactFileName, searchCore);
+          
+          showDownloadProgress(50, "Downloading image...");
+          Serial.printf("Calling downloadImageFromMediaJeu() on retry...\n");
+          success = downloadImageFromMediaJeu(gameInfoRetry.boxartUrl, savePath);
+          
+          Serial.printf("Retry MediaJeu download result: %s\n", success ? "SUCCESS" : "FAILED");
+          
+          if (success) {
+            Serial.printf("RETRY-BASED DOWNLOAD SUCCESS!\n");
+
+            // --- GAME INFO panel: metadata prefetch (see first-attempt hook)
+            {
+              String metaPath = getMetaPathFromImagePath(savePath);
+              if (!SD.exists(metaPath)) {
+                showDownloadProgress(92, "Fetching game info...");
+                GameMeta meta;
+                if (fetchGameMetadataJSON(gameInfoRetry.gameId, coreName, romDetails, meta)) {
+                  saveGameMeta(metaPath, meta);
+                  if (gameName == currentGame) { meta.forGame = gameName; currentMeta = meta; }
+                }
+              }
+            }
+
+            showDownloadProgress(100, "Retry download complete!");
+            pumpedDelay(1500);
+            Serial.println("=== RETRY DOWNLOAD COMPLETE ===\n");
+            return true;
+          } else {
+            Serial.println("Retry MediaJeu download failed");
+          }
+        } else {
+          Serial.println("Second CRC search also found no results");
+          // Second leg of the name-search fallback (F4): a valid-but-unindexed
+          // hash (e.g. pack-built CHDs) reaches this point with a CRC that
+          // ScreenScraper will never match. On allowlisted systems, try ONE
+          // text search before giving up.
+          if (isNameSearchSystem(systemId)) {
+            success = tryNameSearchFallback(coreName, gameName, romDetails);
+          }
+          if (!success) {
+            // ScreenScraper returned clean responses with no match (CRC twice,
+            // plus name where applicable). Mark search as exhausted.
+            lastGameSearchExhausted = true;
+            Serial.println("Marked search as exhausted");
+          }
+        }
+      }
+    }
+  } else {
+    lastRomHasCrc = false;
+    lastRomCrcChecked = true;
+    Serial.println("ROM CRC not available for JSON search");
+
+    // Hash-less fallback (F4, first leg): no usable CRC on an allowlisted
+    // system OR a server-confirmed name-only game. The per-system allowlist
+    // is the guardian for CRC-capable systems: a transient hash failure
+    // there keeps behaving exactly as before (no fuzzy search, no wrong-
+    // artwork risk). no_rom_on_disk is the per-GAME equivalent: the server
+    // verified this entry has no rom file at all (SAM name-only: Amiga
+    // MegaAGS demos and titles), so a hash can never exist and the name
+    // search is the only possible route — same guarantee, entry-scoped.
+    // Field log that motivated this: Amiga is NOT allowlisted, so SAM
+    // name-only games skipped the search entirely and flashed the generic
+    // failure on every redraw (nothing ever marked the search exhausted).
+    // Exact route first: a server-confirmed romset id identifies the game
+    // outright, where the name search below can only guess. Requires noHash so
+    // a merely transient hash failure still waits for the real CRC through the
+    // recurrent search instead of settling for a weaker identifier.
+    if (romDetails.noHash && romDetails.ssRomnom.length() > 0) {
+      success = tryRomnomLookup(coreName, gameName, romDetails);
+    }
+
+    if (!success && (isNameSearchSystem(systemId) || romDetails.noRomOnDisk)) {
+      success = tryNameSearchFallback(coreName, gameName, romDetails);
+      if (!success) {
+        // Clean miss on a name-search system: stop the 10 s hammering.
+        lastGameSearchExhausted = true;
+        Serial.println("Name search found nothing - marked search as exhausted");
+      }
+    }
+  }
+  
+  if (!success && romDetails.noRomOnDisk && lastGameSearchExhausted &&
+      g_lastSSHttpCode == 200) {
+    // g_lastSSHttpCode == 200 pins this to the clean-miss case where the
+    // NOT-IN-SS card was actually presented. A transient error (429,
+    // timeout) keeps its honest HUD message from the ladder below.
+    // tryNameSearchFallback() already presented the definitive NOT-IN-SS card
+    // for this name-only entry (and set the exhausted flag: it cannot be
+    // stale — startCrcRecurrentForGame() clears it on every new game and the
+    // caller gate never re-enters while it is set). Nothing failed: skip the
+    // generic "Download failed" + 6 s block.
+    Serial.printf("Final result: FAILED (name-only, not in SS - already presented)\n");
+    Serial.println("=== JSON DOWNLOAD COMPLETE ===\n");
+    return false;
+  }
+
+  if (!success) {
+    Serial.println("JSON method failed");
+    // Game catalogued in ScreenScraper but with ZERO artwork of any configured
+    // type: every mediaJeu attempt answered a clean NOMEDIA. That is a
+    // definitive state — retrying every 10 s cannot change it and burns ~30
+    // requests of the user's daily quota per cycle. Mark exhausted and say so.
+    if (gameWasFound && g_mediaSawNoMedia && !g_mediaSawValidJpeg) {
+      lastGameSearchExhausted = true;
+      lastGameFoundNoMedia    = true;
+      Serial.println("Game exists in SS but has no artwork of any type - marked exhausted");
+      showDownloadProgress(0, "GAME HAS NO ARTWORK IN SS");
+    } else if (g_lastSSHttpCode != 0 && g_lastSSHttpCode != 200) {
+      showDownloadProgress(0, ssHudMessage(g_lastSSHttpCode));
+    } else {
+      showDownloadProgress(0, "Download failed");
+    }
+    pumpedDelay(6000);
+  }
+  
+  Serial.printf("Final result: %s\n", success ? "SUCCESS" : "FAILED");
+  Serial.printf("Free heap at end: %d bytes\n", ESP.getFreeHeap());
+  Serial.println("=== JSON DOWNLOAD COMPLETE ===\n");
+  
+  return success;
+}
+
+void updateArcadeSubsystemForCurrentGame(String coreName, String gameName) {
+  Serial.printf("=== ENHANCED ARCADE SUBSYSTEM UPDATE ===\n");
+  Serial.printf("Core: '%s'\n", coreName.c_str());
+  Serial.printf("Game: '%s'\n", gameName.c_str());
+  Serial.printf("Current lastArcadeSystemeId: '%s'\n", lastArcadeSystemeId.c_str());
+  
+  // Only process for Arcade cores with active game
+  String coreNameLower = coreName;
+  coreNameLower.toLowerCase();
+  if (coreNameLower != "arcade" || gameName.length() == 0) {
+    Serial.printf("Not Arcade or no game - skipping subsystem update\n");
+    return;
+  }
+  
+  // Perform lightweight search only to get systemeId (without downloading image)
+  Serial.printf("Searching for subsystem ID for game: %s\n", gameName.c_str());
+  
+  RomDetails romDetails = getCurrentRomDetails();
+  if (romDetails.available && romDetails.hashCalculated && romDetails.crc32.length() > 0) {
+    Serial.printf("ROM data available, searching with CRC\n");
+    
+    // Use existing search function
+    GameInfo gameInfo = searchWithJeuInfosPreciseJSON(coreName, romDetails);
+    
+    if (gameInfo.found && gameInfo.systemeId.length() > 0) {
+      String oldSubsystemId = lastArcadeSystemeId;
+      lastArcadeSystemeId = gameInfo.systemeId;
+      
+      Serial.printf("SUBSYSTEM UPDATE SUCCESS!\n");
+      Serial.printf("   Previous subsystem: '%s'\n", oldSubsystemId.c_str());
+      Serial.printf("   New subsystem: '%s'\n", lastArcadeSystemeId.c_str());
+      Serial.printf("   Game: '%s'\n", gameInfo.gameName.c_str());
+    } else {
+      Serial.printf("Could not find subsystem ID for game: %s\n", gameName.c_str());
+      
+      // Don't clear immediately - preserve existing subsystem if available
+      if (lastArcadeSystemeId.length() == 0) {
+        Serial.printf("No existing subsystem to preserve\n");
+      } else {
+        Serial.printf("Preserving existing subsystem ID: %s (search failed for current game)\n", 
+                     lastArcadeSystemeId.c_str());
+        Serial.printf("   This prevents falling back to generic Arcade image\n");
+      }
+    }
+  } else {
+    Serial.printf("ROM CRC not available\n");
+    
+    // Don't clear subsystem on missing ROM data
+    if (lastArcadeSystemeId.length() > 0) {
+      Serial.printf("Preserving existing subsystem ID despite missing ROM data: %s\n", 
+                   lastArcadeSystemeId.c_str());
+    } else {
+      Serial.printf("No existing subsystem to preserve\n");
+    }
+  }
+  
+  Serial.printf("=== ENHANCED SUBSYSTEM UPDATE COMPLETE ===\n");
+}
+
+void updateArcadeSubsystemForCurrentGameEnhanced(String coreName, String gameName, bool forceUpdate = false) {
+  Serial.printf("=== ENHANCED ARCADE SUBSYSTEM UPDATE v2 ===\n");
+  Serial.printf("Core: '%s'\n", coreName.c_str());
+  Serial.printf("Game: '%s'\n", gameName.c_str());
+  Serial.printf("Force update: %s\n", forceUpdate ? "YES" : "NO");
+  Serial.printf("Current lastArcadeSystemeId: '%s'\n", lastArcadeSystemeId.c_str());
+  Serial.printf("Last processed game: '%s'\n", lastProcessedGame.c_str());
+  
+  // Only process for MAME cores with active game
+  String coreNameLower = coreName;
+  coreNameLower.toLowerCase();
+  if (coreNameLower != "arcade" || gameName.length() == 0) {
+    Serial.printf("Not Arcade or no game - skipping subsystem update\n");
+    return;
+  }
+  
+  // Check if this is a different game or forced update
+  bool isDifferentGame = (gameName != lastProcessedGame);
+  bool shouldUpdate = forceUpdate || isDifferentGame;
+  
+  if (isDifferentGame) {
+    Serial.printf("DIFFERENT GAME DETECTED: '%s' -> '%s'\n", lastProcessedGame.c_str(), gameName.c_str());
+    Serial.printf("Clearing previous subsystem state for new game\n");
+    lastArcadeSystemeId = "";
+  }
+  
+  if (forceUpdate) {
+    Serial.printf("FORCED UPDATE: bypassing all checks\n");
+  }
+  
+  if (!shouldUpdate) {
+    Serial.printf("No update needed - same game, no force\n");
+    return;
+  }
+  
+  // Perform search for subsystem ID
+  Serial.printf("Searching for subsystem ID for game: %s\n", gameName.c_str());
+  
+  RomDetails romDetails = getCurrentRomDetails();
+  if (romDetails.available && romDetails.hashCalculated && romDetails.crc32.length() > 0) {
+    Serial.printf("ROM data available, searching with CRC: %s\n", romDetails.crc32.c_str());
+    
+    // Use existing search function
+    GameInfo gameInfo = searchWithJeuInfosPreciseJSON(coreName, romDetails);
+    
+    if (gameInfo.found && gameInfo.systemeId.length() > 0) {
+      String oldSubsystemId = lastArcadeSystemeId;
+      lastArcadeSystemeId = gameInfo.systemeId;
+      lastProcessedGame = gameName;
+      
+      Serial.printf("SUBSYSTEM UPDATE SUCCESS!\n");
+      Serial.printf("   Previous subsystem: '%s'\n", oldSubsystemId.c_str());
+      Serial.printf("   New subsystem: '%s'\n", lastArcadeSystemeId.c_str());
+      Serial.printf("   Game: '%s'\n", gameInfo.gameName.c_str());
+      Serial.printf("   Game processed: '%s'\n", lastProcessedGame.c_str());
+      
+      // If this is a different subsystem, log the change
+      if (oldSubsystemId.length() > 0 && oldSubsystemId != lastArcadeSystemeId) {
+        Serial.printf("SUBSYSTEM CHANGED: %s -> %s\n", oldSubsystemId.c_str(), lastArcadeSystemeId.c_str());
+      }
+    } else {
+      Serial.printf("Could not find subsystem ID for game: %s\n", gameName.c_str());
+      
+      // Mark this game as processed even if no subsystem found
+      lastProcessedGame = gameName;
+      
+      // For forced updates or different games, clear subsystem if not found
+      if (forceUpdate || isDifferentGame) {
+        Serial.printf("No subsystem found for new game - clearing\n");
+        lastArcadeSystemeId = "";
+      }
+    }
+  } else {
+    Serial.printf("ROM CRC not available for game: %s\n", gameName.c_str());
+    
+    // Mark as processed even without CRC data
+    lastProcessedGame = gameName;
+    
+    // For game changes without CRC, clear subsystem to force re-detection
+    if (isDifferentGame || forceUpdate) {
+      Serial.printf("Game change without CRC - clearing subsystem for re-detection\n");
+      lastArcadeSystemeId = "";
+    }
+  }
+  
+  Serial.printf("=== ENHANCED SUBSYSTEM UPDATE COMPLETE ===\n");
+  Serial.printf("Final state - Subsystem: '%s', Processed: '%s'\n", 
+                lastArcadeSystemeId.c_str(), lastProcessedGame.c_str());
+}

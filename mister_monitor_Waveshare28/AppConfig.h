@@ -1,0 +1,294 @@
+// MiSTer Monitor
+// Copyright (C) 2025-2026 chipster6502
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// =============================================================================
+// AppConfig.h  —  Configuration loader for MiSTer Monitor
+// =============================================================================
+// Reads /config.ini from the root of the microSD card at boot.
+// Call loadConfig(appConfig) in setup() AFTER SD.begin() and BEFORE WiFi.begin().
+//
+// Any key absent from config.ini keeps the default value defined in the struct.
+// The file format is a simple INI with [sections], key=value pairs, and
+// comment lines starting with ; or #.
+// =============================================================================
+
+#pragma once
+#include <Arduino.h>
+#include <SD.h>
+
+// -----------------------------------------------------------------------------
+// AppConfig — holds every user-configurable parameter.
+// Default values here are used when config.ini is missing or a key is absent.
+// -----------------------------------------------------------------------------
+struct AppConfig {
+
+  // --- WiFi ------------------------------------------------------------------
+  String ssid         = "YOUR_WIFI_SSID";
+  String wifiPass     = "YOUR_WIFI_PASSWORD";
+
+  // --- MiSTer ----------------------------------------------------------------
+  String misterIP = "";   // empty = unknown; set by config.ini ip= or UDP discovery
+
+  // --- ScreenScraper credentials ---------------------------------------------
+  String ssUser       = "";
+  String ssPass       = "";
+  String ssDevUser    = "";
+  String ssDevPass    = "";
+
+  // --- ScreenScraper behaviour -----------------------------------------------
+  String boxartRegion = "wor";   // wor=world  us  eu  jp
+  int    ssTimeout    = 30000;
+  int    ssRetries    = 2;
+  bool   ssUseHttps   = false;
+
+  // --- Game info panel ---------------------------------------------------------
+  String infoLang        = "en";   // synopsis/genre language: en es pt fr de it
+  int    infoSynopsisMax = 2000;   // synopsis memory cap (chars, clamped 200-2000)
+  int    infoScrollStepMs = 2000;  // synopsis auto-scroll: ms per line (clamped 200-8000)
+  bool   infoScrollAuto   = true;  // false = hold synopsis still, no auto-scroll
+  bool   infoInRotation   = false; // true = GAME INFO joins the image rotation
+                                   // as a third slide (game -> info -> core).
+                                   // Off by default: existing configs keep the
+                                   // two-slide rotation they have today.
+
+  // --- Image paths -----------------------------------------------------------
+  String coreImagesPath    = "/cores";
+  String defaultCoreImage  = "/cores/menu.jpg";
+
+  // --- Image behaviour -------------------------------------------------------
+  int    coreImageTimeout      = 30000;
+  int    systemImageTimeout    = 0;      // 0 = same as coreImageTimeout
+  bool   alphabeticalFolders   = true;
+  bool   autoDownload          = true;
+  int    maxImageSize          = 500000;
+  int    downloadTimeout       = 30000;
+  bool   forceCoreRedownload   = false;
+  bool   forceGameRedownload   = false;
+
+  // --- Media type search order -----------------------------------------------
+  // Comma-separated list of media type tokens tried in priority order.
+  //
+  // Available tokens:
+  //
+  //   Wheels (logo artwork on a coloured background):
+  //     wheel-steel   Steel/metallic background wheel
+  //                   API: wheel-steel(wor/us/eu/jp), wheel-steel
+  //     wheel-carbon  Carbon fibre background wheel
+  //                   API: wheel-carbon(wor/us/eu/jp), wheel-carbon
+  //     wheel         Plain/transparent background wheel
+  //                   API: wheel(wor/us/eu/jp), wheel
+  //
+  //   Boxes:
+  //     box3d         3-D rendered box art
+  //                   API: box-3D(wor/us/eu/jp), box-3D
+  //     box2d         2-D flat box scan
+  //                   API: box-2D(wor/us/eu/jp)
+  //
+  //   Other types:
+  //     fanart        Fan art / promotional artwork
+  //     marquee       Arcade cabinet marquee header
+  //     screenshot    In-game title screenshot  (API: sstitle)
+  //     photo         Real photograph of hardware or cartridge
+  //     illustration  Promotional illustration / poster art
+  //     mix1          MixRBV composite image, Recalbox mix V1
+  //                   API: mixrbv1(wor/us/eu/jp), mixrbv1
+  //     mix2          MixRBV composite image, Recalbox mix V2
+  //                   API: mixrbv2(wor/us/eu/jp), mixrbv2
+  //                   'mix' is accepted as an alias of mix2
+  //
+  // Within each token the region fallback order is fixed:
+  //   wor → us → eu → jp → generic
+  //
+  // Four separate lists for the four download contexts:
+  //
+  //   game_media_order              — non-arcade games
+  //   arcade_media_order            — arcade games
+  //   arcade_subsystem_media_order  — arcade subsystems (hardware platform)
+  //   core_media_order              — system-level core artwork (non-arcade systems)
+
+  // Non-arcade games: boxes first, then wheels, then other types
+  String gameMediaOrder   = "box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot";
+
+  // Arcade games (ROM level): logo art before boxes (no physical box exists for most)
+  String arcadeMediaOrder = "fanart,marquee,wheel-carbon,wheel-steel,wheel,box3d,box2d,screenshot";
+
+  // Arcade subsystems (hardware platform level, e.g. CPS1, Neo Geo, Konami):
+  // wheel art only — subsystem images are logos, not game-specific artwork
+  String arcadeSubsystemMediaOrder = "wheel-steel,wheel-carbon,wheel,screenmarquee";
+
+  // Non-arcade system cores. Only tokens that exist at system level: game
+  // artwork (box art, marquee, fanart, screenshot) is not published per
+  // system, so listing it here only bought failed requests.
+  // Let artwork smaller than its box grow to fill it, up to a ceiling.
+  bool   imageUpscale     = false;
+  float  imageUpscaleMax  = 2.5f;  // clamped 1.0..2.875 at load
+
+  // Artwork owns the whole panel and the footer is raised by a tap.
+  bool   kioskMode        = false;
+  int    kioskHideDelayMs = 5000;  // how long the footer stays up, 500..600000
+
+  // --- Standby -----------------------------------------------------------------
+  // Dimmed idle screen. Starts once the MiSTer has been unreachable for
+  // standbyOfflineMin minutes and/or after standbyIdleMin minutes without a
+  // core or game change or a touch (0 = never). A touch always ends it.
+  String standbyScreen      = "clock";
+  bool   standbyWhenOffline = true;
+  int    standbyOfflineMin  = 3;
+  int    standbyIdleMin     = 0;
+  int    standbyBrightness  = 10;
+  int    standbyDim         = 100;
+
+  // --- Clock -------------------------------------------------------------------
+  // timezone is a friendly name or a POSIX TZ string. Empty = no time sync and
+  // no clock anywhere, standby falls back to its minimal screen.
+  String timezone  = "";
+  String ntpServer = "pool.ntp.org";
+  bool   clock24h  = true;
+
+  // What the fullscreen image mode shows for a game:
+  //   rotate  game artwork and system artwork in turn (default)
+  //   game    game artwork only
+  //   system  system artwork only
+  String imageMode        = "rotate";
+  String screenshotScaling = "fill";  // fill | integer
+
+  String coreMediaOrder   = "wheel-steel,wheel-carbon,wheel,screenmarquee,illustration,photo";
+
+  // --- UI / scroll -----------------------------------------------------------
+  // true = rotate the panel 180 degrees, for cases that mount the board
+  // upside down. Only 0 and 180 are offered: 90/270 would leave the panel in
+  // portrait and the whole UI is laid out on a fixed 320x240 landscape grid.
+  bool   flipDisplay        = false;
+  int    scrollSpeedMs      = 300;
+  int    scrollPauseStartMs = 2000;
+  int    scrollPauseEndMs   = 3000;
+
+  // --- Web config editor ------------------------------------------------------
+  bool   webConfig   = true;   // [ui] web_config   - false disables /config + /reboot
+  String webPassword = "";     // [ui] web_password - non-empty enables Basic Auth
+
+  // --- Firmware updates ------------------------------------------------------
+  bool   updateAuto  = false;  // [update] ota_auto - install an offered update without a tap
+
+  // --- Debug -----------------------------------------------------------------
+  bool   debugMode      = false;
+};
+
+// -----------------------------------------------------------------------------
+// parseBool() — accepts "true"/"1"/"yes" (case-insensitive) as true
+// -----------------------------------------------------------------------------
+inline bool parseBool(const String& val) {
+  String v = val;
+  v.toLowerCase();
+  return (v == "true" || v == "1" || v == "yes");
+}
+
+// -----------------------------------------------------------------------------
+// loadConfig() — reads /config.ini from SD and populates cfg.
+// -----------------------------------------------------------------------------
+inline void loadConfig(AppConfig& cfg) {
+  const char* CONFIG_PATH = "/config.ini";
+
+  if (!SD.exists(CONFIG_PATH)) {
+    Serial.println("[CONFIG] /config.ini not found — using built-in defaults");
+    return;
+  }
+
+  File f = SD.open(CONFIG_PATH, FILE_READ);
+  if (!f) {
+    Serial.println("[CONFIG] Failed to open /config.ini — using built-in defaults");
+    return;
+  }
+
+  Serial.println("[CONFIG] Reading /config.ini …");
+  int keysLoaded = 0;
+
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+
+    if (line.length() == 0 || line[0] == ';' || line[0] == '#' || line[0] == '[') continue;
+
+    int eqPos = line.indexOf('=');
+    if (eqPos < 1) continue;
+
+    String key = line.substring(0, eqPos);
+    String val = line.substring(eqPos + 1);
+    key.trim();
+    val.trim();
+    if (key.length() == 0 || val.length() == 0) continue;
+
+    // [wifi]
+    if      (key == "ssid")                   { cfg.ssid = val; }
+    else if (key == "password")               { cfg.wifiPass = val; }
+    // [mister]
+    else if (key == "ip")                     { cfg.misterIP = val; }
+    // [screenscraper]
+    else if (key == "ss_user")                { cfg.ssUser = val; }
+    else if (key == "ss_pass")                { cfg.ssPass = val; }
+    else if (key == "ss_dev_user")            { cfg.ssDevUser = val; }
+    else if (key == "ss_dev_pass")            { cfg.ssDevPass = val; }
+    else if (key == "region")                 { cfg.boxartRegion = val; }
+    else if (key == "timeout")                { cfg.ssTimeout = val.toInt(); }
+    else if (key == "retries")                { cfg.ssRetries = val.toInt(); }
+    else if (key == "use_https")              { cfg.ssUseHttps = parseBool(val); }
+    // [gameinfo]
+    else if (key == "info_lang")              { cfg.infoLang = val; }
+    else if (key == "info_in_rotation")       { cfg.infoInRotation = parseBool(val); }
+    else if (key == "info_synopsis_max")      { cfg.infoSynopsisMax = val.toInt(); }
+    else if (key == "info_scroll_step_ms")    { cfg.infoScrollStepMs = val.toInt(); }
+    else if (key == "info_scroll_auto")       { cfg.infoScrollAuto = parseBool(val); }
+    // [images]
+    else if (key == "base_path")              { cfg.coreImagesPath = val; }
+    else if (key == "default_image")          { cfg.defaultCoreImage = val; }
+    else if (key == "core_image_timeout")     { cfg.coreImageTimeout = val.toInt(); }
+    else if (key == "system_image_timeout")   { cfg.systemImageTimeout = val.toInt(); }
+    else if (key == "alphabetical_folders")   { cfg.alphabeticalFolders = parseBool(val); }
+    else if (key == "auto_download")          { cfg.autoDownload = parseBool(val); }
+    else if (key == "max_image_size")         { cfg.maxImageSize = val.toInt(); }
+    else if (key == "download_timeout")       { cfg.downloadTimeout = val.toInt(); }
+    else if (key == "force_core_redownload")  { cfg.forceCoreRedownload = parseBool(val); }
+    else if (key == "force_game_redownload")  { cfg.forceGameRedownload = parseBool(val); }
+    else if (key == "game_media_order")              { cfg.gameMediaOrder = val; }
+    else if (key == "arcade_media_order")            { cfg.arcadeMediaOrder = val; }
+    else if (key == "arcade_subsystem_media_order")  { cfg.arcadeSubsystemMediaOrder = val; }
+    else if (key == "core_media_order")              { cfg.coreMediaOrder = val; }
+    else if (key == "image_mode")                    { cfg.imageMode = val; }
+    else if (key == "screenshot_scaling")            { cfg.screenshotScaling = val; }
+    else if (key == "image_upscale")                 { cfg.imageUpscale = parseBool(val); }
+    else if (key == "image_upscale_max")             { cfg.imageUpscaleMax = val.toFloat(); }
+    else if (key == "kiosk_mode")                    { cfg.kioskMode = parseBool(val); }
+    else if (key == "kiosk_hide_delay_ms")           { cfg.kioskHideDelayMs = val.toInt(); }
+    else if (key == "standby_screen")         { cfg.standbyScreen = val; }
+    else if (key == "standby_when_offline")   { cfg.standbyWhenOffline = parseBool(val); }
+    else if (key == "standby_offline_min")    { cfg.standbyOfflineMin = val.toInt(); }
+    else if (key == "standby_idle_min")       { cfg.standbyIdleMin = val.toInt(); }
+    else if (key == "standby_brightness")     { cfg.standbyBrightness = val.toInt(); }
+    else if (key == "standby_dim")            { cfg.standbyDim = val.toInt(); }
+    else if (key == "timezone")               { cfg.timezone = val; }
+    else if (key == "ntp_server")             { cfg.ntpServer = val; }
+    else if (key == "clock_24h")              { cfg.clock24h = parseBool(val); }
+    // [ui]
+    else if (key == "scroll_speed_ms")        { cfg.scrollSpeedMs = val.toInt(); }
+    else if (key == "scroll_pause_start_ms")  { cfg.scrollPauseStartMs = val.toInt(); }
+    else if (key == "scroll_pause_end_ms")    { cfg.scrollPauseEndMs = val.toInt(); }
+    else if (key == "flip_display")           { cfg.flipDisplay = parseBool(val); }
+    // [ui] web config editor
+    else if (key == "web_config")             { cfg.webConfig = parseBool(val); }
+    else if (key == "web_password")           { cfg.webPassword = val; }
+    // [update]
+    else if (key == "ota_auto")               { cfg.updateAuto = parseBool(val); }
+    // [debug]
+    else if (key == "debug")                  { cfg.debugMode = parseBool(val); }
+    else {
+      Serial.printf("[CONFIG] Unknown key ignored: '%s'\n", key.c_str());
+      continue;
+    }
+
+    keysLoaded++;
+  }
+
+  f.close();
+  Serial.printf("[CONFIG] Loaded %d parameter(s) from %s\n", keysLoaded, CONFIG_PATH);
+}
