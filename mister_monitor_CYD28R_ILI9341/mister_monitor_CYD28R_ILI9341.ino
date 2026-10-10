@@ -3320,9 +3320,16 @@ static void standbyBacklightBegin() {
 }
 
 static void standbyBacklightEnd() {
-  if (standbyBlFine) ledcDetach(STANDBY_BL_PIN);
+  // Always release the pin, also after the 8-bit fallback: that path leaves it
+  // attached through display.light()->init(), and a second init() on a pin
+  // that is still attached fails silently, leaving the screen dark.
+  ledcDetach(STANDBY_BL_PIN);
   standbyBlFine = false;
-  display.light()->init(DISPLAY_BRIGHTNESS_NORMAL);
+  if (!display.light()->init(DISPLAY_BRIGHTNESS_NORMAL)) {
+    Serial.println("[STANDBY] Backlight init failed - driving the pin high");
+    pinMode(STANDBY_BL_PIN, OUTPUT);
+    digitalWrite(STANDBY_BL_PIN, HIGH);
+  }
 }
 
 // level is 0-255 of standby_brightness. Squared, so the breath looks even to
