@@ -134,7 +134,10 @@ String NTP_SERVER_STR             = "pool.ntp.org";  // [ui] ntp_server
 static void standbyStartClock();            // defined with the standby block
 
 // [images] image_mode - what the fullscreen image mode shows for a game.
-enum ImageMode : uint8_t { IMAGE_MODE_ROTATE, IMAGE_MODE_GAME, IMAGE_MODE_SYSTEM };
+// cycle = game artwork only, alternating screenshot / title screen / box of
+// that game (see cycleGameSlide() at the end).
+enum ImageMode : uint8_t { IMAGE_MODE_ROTATE, IMAGE_MODE_GAME, IMAGE_MODE_SYSTEM, IMAGE_MODE_CYCLE };
+void cycleGameSlide();
 ImageMode IMAGE_MODE                    = IMAGE_MODE_ROTATE;
 // [images] screenshot_scaling - how screenshots and title screens fill the
 // image box: fill (default, sharp bilinear) or integer (whole factors only).
@@ -2914,7 +2917,8 @@ void setup() {
   if (NTP_SERVER_STR.length() == 0) NTP_SERVER_STR = "pool.ntp.org";
   Serial.printf("[CONFIG] Image mode       : %s\n",
                 IMAGE_MODE == IMAGE_MODE_GAME   ? "game"   :
-                IMAGE_MODE == IMAGE_MODE_SYSTEM ? "system" : "rotate");
+                IMAGE_MODE == IMAGE_MODE_SYSTEM ? "system" :
+                IMAGE_MODE == IMAGE_MODE_CYCLE  ? "cycle"  : "rotate");
   Serial.printf("[CONFIG] Image upscale    : %s (max x%.2f)\n",
                 IMAGE_UPSCALE ? "on" : "off", IMAGE_UPSCALE_MAX_Q16 / 65536.0f);
   Serial.printf("[CONFIG] Kiosk mode       : %s (%d ms)\n", KIOSK_MODE ? "on" : "off", KIOSK_HIDE_DELAY_MS);
@@ -2929,6 +2933,7 @@ void setup() {
     mode.toLowerCase();
     if      (mode == "game")   IMAGE_MODE = IMAGE_MODE_GAME;
     else if (mode == "system") IMAGE_MODE = IMAGE_MODE_SYSTEM;
+    else if (mode == "cycle")  IMAGE_MODE = IMAGE_MODE_CYCLE;
     else {
       IMAGE_MODE = IMAGE_MODE_ROTATE;
       if (mode != "rotate")
@@ -4203,6 +4208,11 @@ void loop() {
 
   // Rotation logic for games (only when game is active and core is not MENU).
   // Static image modes never toggle: the opening slide is the only slide.
+    if (IMAGE_MODE == IMAGE_MODE_CYCLE && currentGame.length() > 0 && currentCore != "MENU" &&
+        millis() - coreImageStartTime > currentSlideTimeout()) {
+      cycleGameSlide();
+      coreImageStartTime = millis();
+    }
     if (IMAGE_MODE == IMAGE_MODE_ROTATE && currentGame.length() > 0 && currentCore != "MENU") {
       // The slide clock is coreImageStartTime, restamped by every draw site;
       // each half of the cycle has its own dwell (core_image_timeout for the
@@ -12625,4 +12635,76 @@ void updateArcadeSubsystemForCurrentGameEnhanced(String coreName, String gameNam
   Serial.printf("=== ENHANCED SUBSYSTEM UPDATE COMPLETE ===\n");
   Serial.printf("Final state - Subsystem: '%s', Processed: '%s'\n", 
                 lastArcadeSystemeId.c_str(), lastProcessedGame.c_str());
+}
+// =============================================================================
+// [images] image_mode=cycle
+// =============================================================================
+// While a game is loaded the screen alternates every core_image_timeout
+// between the screenshot, the title screen and the box of that game, all from
+// the artwork packs on the MiSTer. Each kind is requested from the server once
+// per game (after a time-out or server error it is asked again next round)
+// and shown from the SD card after that. Kinds the server does not have are
+// skipped; with only one image the screen simply stays on it.
+
+struct CycleKind { const char* kind; const char* cat; };
+static const CycleKind CYCLE_KINDS[] = {
+  { "snap",    "snap"  },
+  { "title",   "title" },
+  { "artwork", "box"   },
+};
+static const int CYCLE_N = sizeof(CYCLE_KINDS) / sizeof(CYCLE_KINDS[0]);
+
+static String cycleGameKey;            // core|game the state below belongs to
+static int    cycleIndex = 0;          // kind currently on screen
+static bool   cycleAsked[CYCLE_N];     // already requested from the server for this game
+
+static bool cycleImagePath(const String& base, const char* cat, String& path) {
+  static const char* exts[] = { ".jpg", ".png" };
+  for (const char* e : exts) {
+    String p = base + "." + cat + e;
+    if (SD.exists(p)) { path = p; return true; }
+  }
+  return false;
+}
+
+// Makes sure kind i of the current game is on the card. Asks the server only
+// the first time per game; after that, what is on the card counts.
+static bool cycleEnsure(const String& base, int i, String& path) {
+  if (!cycleAsked[i] && WiFi.status() == WL_CONNECTED && !downloadInProgress) {
+    String ext, etag;
+    int r = fetchPackMedia(CYCLE_KINDS[i].kind, base, CYCLE_KINDS[i].cat, "", 3000, ext, etag);
+    // A time-out or server error is not an answer: try again next round.
+    cycleAsked[i] = (r != PACK_ERROR);
+  }
+  return cycleImagePath(base, CYCLE_KINDS[i].cat, path);
+}
+
+void cycleGameSlide() {
+  if (!sdCardAvailable || currentGame.length() == 0) return;
+  String key = currentCore + "|" + currentGame;
+  String base = gameCacheBase(currentCore, currentGame);
+  if (key != cycleGameKey) {
+    cycleGameKey = key;
+    cycleIndex = 0;
+    for (int i = 0; i < CYCLE_N; i++) cycleAsked[i] = false;
+    // Whatever the normal game slide shows now counts as the current image.
+    GameImageManifest m;
+    if (loadGameImageManifest(base, m)) {
+      for (int i = 0; i < CYCLE_N; i++)
+        if (m.main == CYCLE_KINDS[i].cat) cycleIndex = i;
+    }
+  }
+  for (int step = 1; step <= CYCLE_N; step++) {
+    int i = (cycleIndex + step) % CYCLE_N;
+    String path;
+    if (!cycleEnsure(base, i, path)) continue;
+    if (i == cycleIndex) return;            // full round: nothing else to show
+    if (displayGameImage(path)) {
+      Serial.printf("[CYCLE] %s -> %s\n", CYCLE_KINDS[i].cat, path.c_str());
+      cycleIndex = i;
+      lastGameImageOK = true;
+      addGameImageFooter(currentGame);
+    }
+    return;
+  }
 }
