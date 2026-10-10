@@ -127,6 +127,8 @@ static void standbyStartClock();            // defined with the standby block
 // that game (see cycleGameSlide() at the end).
 enum ImageMode : uint8_t { IMAGE_MODE_ROTATE, IMAGE_MODE_GAME, IMAGE_MODE_SYSTEM, IMAGE_MODE_CYCLE };
 void cycleGameSlide();
+bool idleClockShow();
+void idleClockTick();
 // [images] art_inset_left: pixels kept free on the left edge; artwork is fitted
 // and centred in the rest. For cases whose window is not centred on the panel.
 int ART_INSET_LEFT = 0;
@@ -4017,6 +4019,7 @@ void loop() {
   }
 
   if (showingCoreImage) {
+    idleClockTick();             // idle_clock: redraws only when something changed
     // Kiosk mode: the footer stays up for a while after every repaint, then
     // goes dark until the next tap. Timed from the last paint, not from the
     // slide clock, so slide changes and banners each get a dwell.
@@ -5137,6 +5140,7 @@ void showMenuImageWithCoreOverlay(String coreName) {
   // ========== SPECIAL CASE: MENU STATE - EARLY DETECTION ==========
   if (coreName.equalsIgnoreCase("MENU")) {
     Serial.println("MENU state detected - showing simple menu interface");
+    if (idleClockShow()) return;   // idle_clock: the clock takes over the menu image
     
     // Try to find and display menu image
     String menuPaths[] = {
@@ -12676,4 +12680,482 @@ void cycleGameSlide() {
     }
     return;
   }
+}
+
+// =============================================================================
+// Idle clock: a desk-clock screen while the MiSTer sits in its menu
+// =============================================================================
+// When the MiSTer is in the menu (core MENU, no game) the image screen shows,
+// instead of the menu picture, three screens in turn in the style of an LCD desk
+// clock: the time -> the year -> a smiling face. Time and year screens show the
+// outside temperature top left, big seven-segment digits made of dots, and the
+// weekday and date at the bottom. Each screen stays idle_clock_seconds.
+//
+// config.ini:
+//   idle_clock=false            on/off
+//   idle_clock_seconds=30       time per screen (5-3600)
+//   idle_lcd_left=0             black border on the left (0-120 px); the grey "LCD"
+//                               area and its content are centred in the rest. For
+//                               cases whose window is not centred on the panel.
+//   idle_day_names=SUN,MON,TUE,WED,THU,FRI,SAT   Sunday first, letters A-Z
+//   idle_date_order=md          md = month.day (1.24), dm = day.month (24.1)
+//   idle_face_file=             a face of your own from the SD card (see below);
+//                               empty = the built-in face
+//   weather_city=               place name, looked up once (Open-Meteo geocoding)
+//   weather_lat= / weather_lon= coordinates; override weather_city when both set
+//   weather_unit=c              c or f
+// Time comes from the existing NTP clock (timezone, clock_24h); with no timezone
+// the digits show as unlit. Temperature: Open-Meteo (open-meteo.com) over plain
+// HTTP (no key, no TLS), every 15 min, retried after 2 min on an error.
+// No location = no temperature.
+//
+// Face file: plain text, one row of dots per line, at most 32 columns x 20 rows.
+//   '#' = dot, 'e' = eye dot that disappears when the face blinks, anything else
+//   = empty. Lines starting with ';' are ignored. The dot size follows the grid.
+
+static bool          idleActive      = false;
+enum IdleScreen { IDLE_CLOCK, IDLE_YEAR, IDLE_FACE, IDLE_SCREENS };
+static int           idleScreen      = IDLE_CLOCK;
+static unsigned long idleSwitchAt    = 0;       // millis() of the last switch
+static String        idleLastKey     = "";      // what is on the screen now
+static LGFX_Sprite*  idleSpr         = nullptr;
+static bool          idleSprTried    = false;
+
+static float         idleTemp        = NAN;
+static unsigned long idleTempAt      = 0;       // last successful fetch
+static unsigned long idleTempTryAt   = 0;       // last attempt
+static bool          idleTempEver    = false;
+static String        idleGeoFor      = "";      // weather_city the lat/lon below belong to
+static String        idleGeoLat      = "";
+static String        idleGeoLon      = "";
+
+static const unsigned long IDLE_TEMP_REFRESH_MS = 15UL * 60UL * 1000UL;
+static const unsigned long IDLE_TEMP_RETRY_MS   =  2UL * 60UL * 1000UL;
+
+// --- colours: greyish LCD with near-black dots ----------------------------------
+static uint16_t idleBg(LovyanGFX* g)    { return g->color565(0xC9, 0xCC, 0xC0); }
+static uint16_t idleGhost(LovyanGFX* g) { return g->color565(0xBB, 0xBE, 0xB2); }
+static uint16_t idleInk(LovyanGFX* g)   { return g->color565(0x1C, 0x1D, 0x1A); }
+
+static void idleDot(LovyanGFX* g, int x, int y, int size, uint16_t c) {
+  g->fillRoundRect(x, y, size, size, size / 4, c);
+}
+
+static int idleAreaX() { return constrain(appConfig.idleLcdLeft, 0, 120); }
+
+// --- small 5x7 dot-matrix font ---------------------------------------------------
+struct IdleGlyph { char c; uint8_t w; uint8_t rows[7]; };   // bit4 = left column
+static const IdleGlyph IDLE_FONT[] = {
+  { '0', 5, {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E} },
+  { '1', 5, {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E} },
+  { '2', 5, {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F} },
+  { '3', 5, {0x1F,0x02,0x04,0x02,0x01,0x11,0x0E} },
+  { '4', 5, {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02} },
+  { '5', 5, {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E} },
+  { '6', 5, {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E} },
+  { '7', 5, {0x1F,0x01,0x02,0x04,0x08,0x08,0x08} },
+  { '8', 5, {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E} },
+  { '9', 5, {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C} },
+  { 'A', 5, {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11} },
+  { 'B', 5, {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E} },
+  { 'C', 5, {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E} },
+  { 'D', 5, {0x1E,0x11,0x11,0x11,0x11,0x11,0x1E} },
+  { 'E', 5, {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F} },
+  { 'F', 5, {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10} },
+  { 'G', 5, {0x0E,0x11,0x10,0x17,0x11,0x11,0x0F} },
+  { 'H', 5, {0x11,0x11,0x11,0x1F,0x11,0x11,0x11} },
+  { 'I', 3, {0x1C,0x08,0x08,0x08,0x08,0x08,0x1C} },
+  { 'J', 5, {0x07,0x02,0x02,0x02,0x02,0x12,0x0C} },
+  { 'K', 5, {0x11,0x12,0x14,0x18,0x14,0x12,0x11} },
+  { 'L', 5, {0x10,0x10,0x10,0x10,0x10,0x10,0x1F} },
+  { 'M', 5, {0x11,0x1B,0x15,0x15,0x11,0x11,0x11} },
+  { 'N', 5, {0x11,0x11,0x19,0x15,0x13,0x11,0x11} },
+  { 'O', 5, {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E} },
+  { 'P', 5, {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10} },
+  { 'Q', 5, {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D} },
+  { 'R', 5, {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11} },
+  { 'S', 5, {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E} },
+  { 'T', 5, {0x1F,0x04,0x04,0x04,0x04,0x04,0x04} },
+  { 'U', 5, {0x11,0x11,0x11,0x11,0x11,0x11,0x0E} },
+  { 'V', 5, {0x11,0x11,0x11,0x11,0x11,0x0A,0x04} },
+  { 'W', 5, {0x11,0x11,0x11,0x15,0x15,0x15,0x0A} },
+  { 'X', 5, {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11} },
+  { 'Y', 5, {0x11,0x11,0x0A,0x04,0x04,0x04,0x04} },
+  { 'Z', 5, {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F} },
+  { '-', 4, {0x00,0x00,0x00,0x1E,0x00,0x00,0x00} },
+  { '.', 1, {0x00,0x00,0x00,0x00,0x00,0x00,0x10} },
+  { 'o', 4, {0x0C,0x12,0x12,0x0C,0x00,0x00,0x00} },   // degree sign
+  { ' ', 2, {0x00,0x00,0x00,0x00,0x00,0x00,0x00} },
+};
+
+// Index into IDLE_FONT, -1 = unknown. (Not a struct pointer as the return type:
+// the Arduino prototype generator would put that declaration before the struct.)
+static int idleGlyph(char c) {
+  if (c >= 'a' && c <= 'z' && c != 'o') c -= 32;
+  for (int i = 0; i < (int)(sizeof(IDLE_FONT) / sizeof(IDLE_FONT[0])); i++)
+    if (IDLE_FONT[i].c == c) return i;
+  return -1;
+}
+
+// Width in px of a text at dot pitch p.
+static int idleTextWidth(const char* s, int p) {
+  int w = 0;
+  for (; *s; s++) {
+    int gi = idleGlyph(*s);
+    if (gi >= 0) w += (IDLE_FONT[gi].w + 1) * p;
+  }
+  return w > 0 ? w - p : 0;
+}
+
+static void idleText(LovyanGFX* g, int x, int y, const char* s, int p, int dot, uint16_t c) {
+  for (; *s; s++) {
+    int gi = idleGlyph(*s);
+    if (gi < 0) continue;
+    const IdleGlyph* gl = &IDLE_FONT[gi];
+    for (int r = 0; r < 7; r++)
+      for (int col = 0; col < gl->w; col++)
+        if (gl->rows[r] & (0x10 >> col)) idleDot(g, x + col * p, y + r * p, dot, c);
+    x += (gl->w + 1) * p;
+  }
+}
+
+// --- big digits: 7 segments of dots on a 4x9 grid --------------------------------
+static const uint8_t IDLE_SEG[10] = {   // bits: a b c d e f g
+  0x7E, 0x30, 0x6D, 0x79, 0x33, 0x5B, 0x5F, 0x70, 0x7F, 0x7B
+};
+
+static bool idleSegDot(uint8_t segs, int col, int row) {
+  bool a = segs & 0x40, b = segs & 0x20, c = segs & 0x10, d = segs & 0x08;
+  bool e = segs & 0x04, f = segs & 0x02, gg = segs & 0x01;
+  if (row == 0 && a) return true;
+  if (row == 4 && gg) return true;
+  if (row == 8 && d) return true;
+  if (col == 3 && row <= 4 && b) return true;
+  if (col == 3 && row >= 4 && c) return true;
+  if (col == 0 && row <= 4 && f) return true;
+  if (col == 0 && row >= 4 && e) return true;
+  return false;
+}
+
+// digit < 0 = blank (only the unlit segments)
+static void idleBigDigit(LovyanGFX* g, int x, int y, int digit, int p, int dot) {
+  uint8_t segs = digit >= 0 ? IDLE_SEG[digit % 10] : 0;
+  for (int row = 0; row < 9; row++)
+    for (int col = 0; col < 4; col++) {
+      if (idleSegDot(segs, col, row))      idleDot(g, x + col * p, y + row * p, dot, idleInk(g));
+      else if (idleSegDot(0x7F, col, row)) idleDot(g, x + col * p, y + row * p, dot, idleGhost(g));
+    }
+}
+
+// --- the face ---------------------------------------------------------------------
+// Built-in: an original face (round eyes, a wide smile). A face of your own comes
+// from idle_face_file on the SD card, read once and kept until the setting changes.
+static const char* IDLE_FACE_BUILTIN[] = {
+  "...ee....ee...",
+  "...##....##...",
+  "..............",
+  "..............",
+  ".#..........#.",
+  "..#........#..",
+  "...########...",
+};
+static String idleFaceRows[20];
+static int    idleFaceN      = 0;
+static String idleFaceLoaded = "\x01";   // path the rows above came from ("" = built-in)
+
+static void idleLoadFace() {
+  String path = appConfig.idleFaceFile;
+  path.trim();
+  if (path == idleFaceLoaded) return;
+  idleFaceLoaded = path;
+  idleFaceN = 0;
+  if (path.length() > 0 && sdCardAvailable) {
+    if (!path.startsWith("/")) path = "/" + path;
+    File f = SD.open(path);
+    if (f) {
+      while (f.available() && idleFaceN < 20) {
+        String line = f.readStringUntil('\n');
+        line.replace("\r", "");
+        if (line.startsWith(";")) continue;
+        if (line.length() > 32) line = line.substring(0, 32);
+        idleFaceRows[idleFaceN++] = line;
+      }
+      f.close();
+      while (idleFaceN > 0 && idleFaceRows[idleFaceN - 1].length() == 0) idleFaceN--;
+      Serial.printf("[IDLECLOCK] face from %s: %d rows\n", path.c_str(), idleFaceN);
+    } else {
+      Serial.printf("[IDLECLOCK] face file %s not found - built-in face\n", path.c_str());
+    }
+  }
+  if (idleFaceN == 0) {
+    for (const char* r : IDLE_FACE_BUILTIN) idleFaceRows[idleFaceN++] = r;
+  }
+}
+
+static void idleDrawFace(LovyanGFX* g, bool blink) {
+  idleLoadFace();
+  int cols = 1;
+  for (int r = 0; r < idleFaceN; r++) cols = max(cols, (int) idleFaceRows[r].length());
+  int areaX = idleAreaX(), areaW = TARGET_WIDTH - areaX;
+  // About 70% of the width or 60% of the height, at most a 12 px pitch.
+  int p = min(12, min((areaW * 7 / 10) / cols, (TARGET_HEIGHT * 6 / 10) / max(1, idleFaceN)));
+  p = max(p, 3);
+  int dot = max(2, p * 3 / 4);
+  int x0 = areaX + (areaW - ((cols - 1) * p + dot)) / 2;
+  int y0 = (TARGET_HEIGHT - ((idleFaceN - 1) * p + dot)) / 2;
+  for (int r = 0; r < idleFaceN; r++)
+    for (int c = 0; c < (int) idleFaceRows[r].length(); c++) {
+      char ch = idleFaceRows[r][c];
+      if (ch == '#' || (ch == 'e' && !blink))
+        idleDot(g, x0 + c * p, y0 + r * p, dot, idleInk(g));
+    }
+}
+
+// --- time and year screens ----------------------------------------------------------
+static String idleDayName(int wday) {
+  String names = appConfig.idleDayNames;
+  int start = 0;
+  for (int i = 0; i < wday; i++) {
+    int comma = names.indexOf(',', start);
+    if (comma < 0) return "";
+    start = comma + 1;
+  }
+  int end = names.indexOf(',', start);
+  String n = names.substring(start, end < 0 ? names.length() : end);
+  n.trim();
+  return n;
+}
+
+// year=true: the year in big digits instead of the time.
+static void idleDrawClock(LovyanGFX* g, const struct tm* t, bool colon, bool year) {
+  int areaX = idleAreaX(), areaW = TARGET_WIDTH - areaX;
+  const int sp = 4, sdot = 3;              // small text
+  const int margin = 12;
+  uint16_t ink = idleInk(g);
+
+  // temperature top left
+  char temp[16];
+  char unit = appConfig.weatherUnit.equalsIgnoreCase("f") ? 'F' : 'C';
+  if (isnan(idleTemp)) snprintf(temp, sizeof temp, "--.-o%c", unit);
+  else                 snprintf(temp, sizeof temp, "%.1fo%c", idleTemp, unit);
+  idleText(g, areaX + margin, 12, temp, sp, sdot, ink);
+
+  // AM/PM top right (12-hour clock only)
+  if (t && !CLOCK_24H && !year) {
+    const char* ap = t->tm_hour < 12 ? "AM" : "PM";
+    idleText(g, areaX + areaW - margin - idleTextWidth(ap, sp), 12, ap, sp, sdot, ink);
+  }
+
+  // big time or year
+  const int p = 12, dot = 9;
+  int digitW = 3 * p + dot;
+  if (year) {
+    int gap = 2 * p;
+    int x = areaX + (areaW - (4 * digitW + 3 * gap)) / 2;
+    int yr = t ? t->tm_year + 1900 : -1;
+    for (int i = 0; i < 4; i++) {
+      int d = yr < 0 ? -1 : (yr / (i == 0 ? 1000 : i == 1 ? 100 : i == 2 ? 10 : 1)) % 10;
+      idleBigDigit(g, x, 52, d, p, dot);
+      x += digitW + gap;
+    }
+  } else {
+    int gapD = p + p / 2;                    // between the two digits of hours/minutes
+    int gapC = p;                            // around the colon
+    int totalW = 4 * digitW + 2 * gapD + 2 * gapC + dot;
+    int x = areaX + (areaW - totalW) / 2;
+    int y = 52;
+    int h1 = -1, h2 = -1, m1 = -1, m2 = -1;
+    if (t) {
+      int h = standbyDisplayHour(t);
+      h1 = h / 10; h2 = h % 10; m1 = t->tm_min / 10; m2 = t->tm_min % 10;
+      if (!CLOCK_24H && h1 == 0) h1 = -1;    // 12-hour: no leading zero
+    }
+    idleBigDigit(g, x, y, h1, p, dot);  x += digitW + gapD;
+    idleBigDigit(g, x, y, h2, p, dot);  x += digitW + gapC;
+    uint16_t cc = (colon || !t) ? ink : idleGhost(g);
+    idleDot(g, x, y + 2 * p, dot, cc);
+    idleDot(g, x, y + 6 * p, dot, cc);
+    x += dot + gapC;
+    idleBigDigit(g, x, y, m1, p, dot);  x += digitW + gapD;
+    idleBigDigit(g, x, y, m2, p, dot);
+  }
+
+  // weekday bottom left, date bottom right
+  if (t) {
+    int yb = TARGET_HEIGHT - 12 - 6 * sp - sdot;
+    idleText(g, areaX + margin, yb, idleDayName(t->tm_wday % 7).c_str(), sp, sdot, ink);
+    char date[8];
+    if (appConfig.idleDateOrder.equalsIgnoreCase("dm"))
+      snprintf(date, sizeof date, "%d.%d", t->tm_mday, t->tm_mon + 1);
+    else
+      snprintf(date, sizeof date, "%d.%d", t->tm_mon + 1, t->tm_mday);
+    idleText(g, areaX + areaW - margin - idleTextWidth(date, sp) - sdot, yb, date, sp, sdot, ink);
+  }
+}
+
+// --- temperature ---------------------------------------------------------------------
+static String idleUrlEncode(const String& s) {
+  String out;
+  const char* hex = "0123456789ABCDEF";
+  for (size_t i = 0; i < s.length(); i++) {
+    uint8_t c = (uint8_t) s[i];
+    if (isalnum(c) || c == '-' || c == '.' || c == '_') out += (char) c;
+    else { out += '%'; out += hex[c >> 4]; out += hex[c & 15]; }
+  }
+  return out;
+}
+
+// The number after "key": in body, searching from position from. Empty when absent.
+static String idleJsonNumber(const String& body, const char* key, int from) {
+  String k = String("\"") + key + "\":";
+  int i = body.indexOf(k, from);
+  if (i < 0) return "";
+  i += k.length();
+  int j = i;
+  while (j < (int) body.length() && (isdigit(body[j]) || body[j] == '-' || body[j] == '.')) j++;
+  return body.substring(i, j);
+}
+
+// Coordinates from weather_lat/weather_lon, or else weather_city via geocoding.
+static bool idleLocation(String& lat, String& lon) {
+  lat = appConfig.weatherLat; lon = appConfig.weatherLon;
+  lat.trim(); lon.trim();
+  if (lat.length() > 0 && lon.length() > 0) return true;
+  String city = appConfig.weatherCity;
+  city.trim();
+  if (city.length() == 0) return false;
+  if (city == idleGeoFor && idleGeoLat.length() > 0) { lat = idleGeoLat; lon = idleGeoLon; return true; }
+
+  HTTPClient http;
+  http.begin("http://geocoding-api.open-meteo.com/v1/search?count=1&format=json&name=" + idleUrlEncode(city));
+  http.setTimeout(3000);
+  int code = http.GET();
+  if (code == 200) {
+    String body = http.getString();
+    int res = body.indexOf("\"results\":[");
+    if (res >= 0) {
+      idleGeoLat = idleJsonNumber(body, "latitude", res);
+      idleGeoLon = idleJsonNumber(body, "longitude", res);
+      idleGeoFor = city;
+      Serial.printf("[IDLECLOCK] %s -> %s, %s\n", city.c_str(), idleGeoLat.c_str(), idleGeoLon.c_str());
+    } else {
+      Serial.printf("[IDLECLOCK] place '%s' not found\n", city.c_str());
+    }
+  } else {
+    Serial.printf("[IDLECLOCK] geocoding HTTP %d\n", code);
+  }
+  http.end();
+  if (idleGeoFor != city || idleGeoLat.length() == 0) return false;
+  lat = idleGeoLat; lon = idleGeoLon;
+  return true;
+}
+
+static void idleFetchTemp() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  unsigned long now = millis();
+  bool due = !idleTempEver ? (idleTempTryAt == 0 || now - idleTempTryAt > IDLE_TEMP_RETRY_MS)
+                           : (now - idleTempAt > IDLE_TEMP_REFRESH_MS &&
+                              now - idleTempTryAt > IDLE_TEMP_RETRY_MS);
+  if (!due) return;
+  idleTempTryAt = now;
+  String lat, lon;
+  if (!idleLocation(lat, lon)) return;
+
+  HTTPClient http;
+  String url = "http://api.open-meteo.com/v1/forecast?latitude=" + lat + "&longitude=" + lon +
+               "&current=temperature_2m";
+  if (appConfig.weatherUnit.equalsIgnoreCase("f")) url += "&temperature_unit=fahrenheit";
+  http.begin(url);
+  http.setTimeout(3000);
+  int code = http.GET();
+  if (code == 200) {
+    String body = http.getString();
+    int cur = body.indexOf("\"current\":{");
+    String v = cur >= 0 ? idleJsonNumber(body, "temperature_2m", cur) : "";
+    if (v.length() > 0) {
+      idleTemp = v.toFloat();
+      idleTempAt = now;
+      idleTempEver = true;
+      Serial.printf("[IDLECLOCK] outside temperature %.1f\n", idleTemp);
+    }
+  } else {
+    Serial.printf("[IDLECLOCK] Open-Meteo HTTP %d\n", code);
+  }
+  http.end();
+}
+
+// --- drawing ---------------------------------------------------------------------------
+static void idleRender(const struct tm* t, bool colon, bool blink) {
+  if (!idleSprTried) {
+    idleSprTried = true;
+    idleSpr = new LGFX_Sprite(&display);
+    idleSpr->setPsram(true);
+    idleSpr->setColorDepth(16);
+    if (!idleSpr->createSprite(TARGET_WIDTH, TARGET_HEIGHT)) {
+      Serial.println("[IDLECLOCK] no sprite, drawing straight to the panel");
+      delete idleSpr;
+      idleSpr = nullptr;
+    }
+  }
+  LovyanGFX* g = idleSpr ? (LovyanGFX*) idleSpr : (LovyanGFX*) &display;
+  g->fillScreen(TFT_BLACK);
+  g->fillRect(idleAreaX(), 0, TARGET_WIDTH - idleAreaX(), TARGET_HEIGHT, idleBg(g));
+  if (idleScreen == IDLE_FACE) idleDrawFace(g, blink);
+  else                         idleDrawClock(g, t, colon, idleScreen == IDLE_YEAR);
+  if (idleSpr) idleSpr->pushSprite(0, 0);
+}
+
+static bool idleStillMenu() {
+  return currentCore.equalsIgnoreCase("MENU") && currentGame.length() == 0;
+}
+
+// Called from showMenuImageWithCoreOverlay("MENU"): true = the clock takes over.
+bool idleClockShow() {
+  if (!appConfig.idleClock || !idleStillMenu()) return false;
+  if (!idleActive) {
+    idleActive   = true;
+    idleScreen   = IDLE_CLOCK;
+    idleSwitchAt = millis();
+    Serial.println("[IDLECLOCK] menu: idle clock on");
+  }
+  idleLastKey = "";            // force a full repaint
+  idleFetchTemp();
+  idleClockTick();
+  return true;
+}
+
+// Every loop pass in image mode. Only redraws when something changed.
+void idleClockTick() {
+  if (!idleActive) return;
+  if (!showingCoreImage || !idleStillMenu()) {
+    idleActive = false;
+    Serial.println("[IDLECLOCK] off (core/game/touch)");
+    return;
+  }
+  unsigned long now = millis();
+  unsigned long dwell = (unsigned long) constrain(appConfig.idleClockSeconds, 5, 3600) * 1000UL;
+  if (now - idleSwitchAt >= dwell) {
+    idleScreen   = (idleScreen + 1) % IDLE_SCREENS;
+    idleSwitchAt = now;
+    if (idleScreen != IDLE_FACE) idleFetchTemp();
+  }
+
+  struct tm t;
+  bool haveTime = standbyLocalTime(&t);
+  String key;
+  bool colon = true, blink = false;
+  if (idleScreen == IDLE_FACE) {
+    blink = (now % 5000) < 180;           // eyes closed briefly every 5 s
+    key = blink ? "F1" : "F0";
+  } else {
+    colon = !haveTime || idleScreen == IDLE_YEAR || (now % 1000) < 500;
+    char buf[48];
+    snprintf(buf, sizeof buf, "C%d%d%02d%02d%d%d%d%.1f", idleScreen, haveTime,
+             haveTime ? t.tm_hour : 0, haveTime ? t.tm_min : 0, haveTime ? t.tm_mday : 0,
+             haveTime ? t.tm_wday : 0, colon, isnan(idleTemp) ? -999.0f : idleTemp);
+    key = buf;
+  }
+  if (key == idleLastKey) return;
+  idleLastKey = key;
+  idleRender(haveTime ? &t : nullptr, colon, blink);
 }

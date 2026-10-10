@@ -146,6 +146,19 @@ struct AppConfig {
   String ntpServer = "pool.ntp.org";
   bool   clock24h  = true;
 
+  // --- Idle clock (Waveshare 2.8) ---------------------------------------------------
+  // A desk-clock screen while the MiSTer is in its menu: time -> year -> face.
+  bool   idleClock        = false;
+  int    idleClockSeconds = 30;
+  int    idleLcdLeft      = 0;
+  String idleDayNames     = "SUN,MON,TUE,WED,THU,FRI,SAT";
+  String idleDateOrder    = "md";   // md or dm
+  String idleFaceFile     = "";     // blank = built-in face
+  String weatherCity      = "";
+  String weatherLat       = "";
+  String weatherLon       = "";
+  String weatherUnit      = "c";    // c or f
+
   // What the fullscreen image mode shows for a game:
   //   rotate  game artwork and system artwork in turn (default)
   //   game    game artwork only
@@ -271,6 +284,16 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "timezone")               { cfg.timezone = val; }
     else if (key == "ntp_server")             { cfg.ntpServer = val; }
     else if (key == "clock_24h")              { cfg.clock24h = parseBool(val); }
+    else if (key == "idle_clock")             { cfg.idleClock = parseBool(val); }
+    else if (key == "idle_clock_seconds")     { cfg.idleClockSeconds = val.toInt(); }
+    else if (key == "idle_lcd_left")          { cfg.idleLcdLeft = val.toInt(); }
+    else if (key == "idle_day_names")         { cfg.idleDayNames = val; }
+    else if (key == "idle_date_order")        { cfg.idleDateOrder = val; }
+    else if (key == "idle_face_file")         { cfg.idleFaceFile = val; }
+    else if (key == "weather_city")           { cfg.weatherCity = val; }
+    else if (key == "weather_lat")            { cfg.weatherLat = val; }
+    else if (key == "weather_lon")            { cfg.weatherLon = val; }
+    else if (key == "weather_unit")           { cfg.weatherUnit = val; }
     // [ui]
     else if (key == "scroll_speed_ms")        { cfg.scrollSpeedMs = val.toInt(); }
     else if (key == "scroll_pause_start_ms")  { cfg.scrollPauseStartMs = val.toInt(); }
