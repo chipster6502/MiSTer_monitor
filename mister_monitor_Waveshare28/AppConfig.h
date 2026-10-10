@@ -151,6 +151,7 @@ struct AppConfig {
   //   game    game artwork only
   //   system  system artwork only
   String imageMode        = "rotate";
+  int    artInsetLeft     = 0;      // [images] art_inset_left (0-120, Waveshare 2.8)
   String screenshotScaling = "fill";  // fill | integer
 
   String coreMediaOrder   = "wheel-steel,wheel-carbon,wheel,screenmarquee,illustration,photo";
@@ -255,6 +256,7 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "arcade_subsystem_media_order")  { cfg.arcadeSubsystemMediaOrder = val; }
     else if (key == "core_media_order")              { cfg.coreMediaOrder = val; }
     else if (key == "image_mode")                    { cfg.imageMode = val; }
+    else if (key == "art_inset_left")                { cfg.artInsetLeft = val.toInt(); }
     else if (key == "screenshot_scaling")            { cfg.screenshotScaling = val; }
     else if (key == "image_upscale")                 { cfg.imageUpscale = parseBool(val); }
     else if (key == "image_upscale_max")             { cfg.imageUpscaleMax = val.toFloat(); }

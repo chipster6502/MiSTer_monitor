@@ -127,6 +127,9 @@ static void standbyStartClock();            // defined with the standby block
 // that game (see cycleGameSlide() at the end).
 enum ImageMode : uint8_t { IMAGE_MODE_ROTATE, IMAGE_MODE_GAME, IMAGE_MODE_SYSTEM, IMAGE_MODE_CYCLE };
 void cycleGameSlide();
+// [images] art_inset_left: pixels kept free on the left edge; artwork is fitted
+// and centred in the rest. For cases whose window is not centred on the panel.
+int ART_INSET_LEFT = 0;
 ImageMode IMAGE_MODE                    = IMAGE_MODE_ROTATE;
 // [images] screenshot_scaling - how screenshots and title screens fill the
 // image box: fill (default, sharp bilinear) or integer (whole factors only).
@@ -2905,6 +2908,7 @@ void setup() {
     }
   }
   {
+    ART_INSET_LEFT = constrain(appConfig.artInsetLeft, 0, 120);
     String scaling = appConfig.screenshotScaling;
     scaling.toLowerCase();
     scaling.trim();
@@ -3514,7 +3518,7 @@ static bool raw565Size(const String& path, int* w, int* h) {
 static bool displayGamePngCentered(const String& pngPath) {
   int w = 0, h = 0, type = -1;
   if (!sdCardAvailable || !pngReadHeader(SD, pngPath.c_str(), &w, &h, &type)) return false;
-  g_artBoxW = TARGET_WIDTH;
+  g_artBoxW = TARGET_WIDTH - ART_INSET_LEFT;
   g_artBoxH = KIOSK_MODE ? TARGET_HEIGHT : IMAGE_AREA_HEIGHT;
   Lcd.fillScreen(THEME_BLACK);
 
@@ -3534,7 +3538,7 @@ static bool displayGamePngCentered(const String& pngPath) {
                       (unsigned)info.largestBlock);
       }
     }
-    if (drawRaw565InBox(raw.c_str(), 0, 0, g_artBoxW, g_artBoxH, nullptr)) return true;
+    if (drawRaw565InBox(raw.c_str(), ART_INSET_LEFT, 0, g_artBoxW, g_artBoxH, nullptr)) return true;
   }
 
   // A .565 left by an earlier firmware is dead weight where this board decodes
@@ -3545,7 +3549,7 @@ static bool displayGamePngCentered(const String& pngPath) {
   }
 
   int k = 1;
-  bool ok = drawPngInBox(pngPath.c_str(), 0, 0, g_artBoxW, g_artBoxH, SCREENSHOT_FILL, &k, &info);
+  bool ok = drawPngInBox(pngPath.c_str(), ART_INSET_LEFT, 0, g_artBoxW, g_artBoxH, SCREENSHOT_FILL, &k, &info);
   Serial.printf("[PNG] %s %dx%d -> %dx%d x%d, %u ms (panel %u ms), largest block %u%s%s\n",
                 pngPath.c_str(), info.srcW, info.srcH, info.outW, info.outH, k,
                 (unsigned)info.ms, (unsigned)info.sinkMs, (unsigned)info.largestBlock,
@@ -3572,12 +3576,12 @@ static bool drawJpegInBox(const char* path, int boxX, int boxY, int boxW, int bo
 // (progressive): the caller then falls back to the box-art path.
 static bool displayGameJpegCentered(const String& jpgPath) {
   if (!sdCardAvailable) return false;
-  g_artBoxW = TARGET_WIDTH;
+  g_artBoxW = TARGET_WIDTH - ART_INSET_LEFT;
   g_artBoxH = KIOSK_MODE ? TARGET_HEIGHT : IMAGE_AREA_HEIGHT;
   Lcd.fillScreen(THEME_BLACK);
   PngConvInfo info;
   int k = 1;
-  bool ok = drawJpegInBox(jpgPath.c_str(), 0, 0, g_artBoxW, g_artBoxH, SCREENSHOT_FILL, &k, &info);
+  bool ok = drawJpegInBox(jpgPath.c_str(), ART_INSET_LEFT, 0, g_artBoxW, g_artBoxH, SCREENSHOT_FILL, &k, &info);
   Serial.printf("[JPG] %s %dx%d -> %dx%d x%d, %u ms (panel %u ms), largest block %u%s%s\n",
                 jpgPath.c_str(), info.srcW, info.srcH, info.outW, info.outH, k,
                 (unsigned)info.ms, (unsigned)info.sinkMs, (unsigned)info.largestBlock,
@@ -10418,7 +10422,7 @@ bool displayCoreImageCentered(String imagePath) {
     // Anything else, artwork and core screens alike, is fitted to the image
     // area and centred there.
     const int srcW = imgW, srcH = imgH;
-    g_artBoxW = TARGET_WIDTH;
+    g_artBoxW = TARGET_WIDTH - ART_INSET_LEFT;
     g_artBoxH = (KIOSK_MODE || (srcW == TARGET_WIDTH && srcH == TARGET_HEIGHT))
               ? TARGET_HEIGHT        // kiosk mode and panel assets use the full panel
               : IMAGE_AREA_HEIGHT;   // everything else stays above the footer
@@ -10514,6 +10518,7 @@ bool displayCoreImageCentered(String imagePath) {
     
     // Ensure offsets are not negative
     if (offsetX < 0) offsetX = 0;
+    offsetX += ART_INSET_LEFT;
     if (offsetY < 0) offsetY = 0;
     
     // Keep the image inside ITS box. For artwork that is the image area; for a
