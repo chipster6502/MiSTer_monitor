@@ -211,7 +211,8 @@ static const char WEBFILES_PAGE_TAIL[] PROGMEM = R"rawliteral(</table>
 covers files and empty directories. Uploads overwrite an
 existing file of the same name. Artwork must be baseline JPEG &mdash; progressive
 JPEGs are rejected.</p>
-<p><a href="/config">Edit config.ini</a></p>
+<p><a href="/config">Edit config.ini</a> &middot;
+<a href="/files/download?path=/settings.html">Settings page</a> (if settings.html is on the card)</p>
 </body></html>)rawliteral";
 
 // -----------------------------------------------------------------------------

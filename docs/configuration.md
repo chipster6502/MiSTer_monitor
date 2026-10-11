@@ -408,12 +408,34 @@ page it is listed as **Monitor IP**, right below the MiSTer's.
 |---|---|
 | `http://<display-ip>:8080/config` | Edits `config.ini` on the microSD card in a plain text editor, comments and all. Saving keeps the previous file as `config.ini.bak` on the same card, and the page offers a **Reboot** button — settings are read once at startup, so a restart is what applies them. |
 | `http://<display-ip>:8080/files` | Browses the microSD card: open folders, download files, upload new ones, create folders, and delete what you no longer need. Deleting a game's artwork makes it be fetched again the next time you load it; uploading your own replaces it. |
+| `http://<display-ip>:8080/files/download?path=/settings.html` | A graphical editor for the same `config.ini`: switches, sliders, drop-downs and drag-to-reorder for the media orders, grouped in tabs. Linked from the pages above. See [Settings page](#settings-page) below. |
 | `http://<display-ip>:8080/` | The screenshot page, on the boards whose panel supports readback (2.8" CYD, Tab5, Guition). On the 3.5" boards this is a landing page instead. |
 
 Artwork uploaded through `/files` must be **baseline** JPEG: progressive JPEGs
 are rejected with a message, because the display's decoder (JPEGDEC) cannot
 read them. Most image editors offer the choice when exporting. Deleting covers
 files and empty folders — empty a folder before removing it.
+
+### Settings page
+
+`settings.html` ships in every `SD_card_content/` folder, contributed by Rick
+van Soest. It is a plain HTML file on the card, served by the file browser,
+so it needs no firmware support beyond the routes above: it reads
+`config.ini` through `/files/download`, saves through the same route as the
+text editor (so `config.ini.bak` is kept), and can reboot the display through
+`/reboot`, waiting until it is back.
+
+Only the values you change are rewritten; comments, key order and line
+endings stay as they are. A commented-out key such as `;ss_dev_user=` becomes
+active once you fill it in, and a known key that is missing from an older
+`config.ini` is added next to its neighbours. Each field shows the comment
+block from `config.ini` under "Notes from config.ini", and keys the page does
+not know yet appear under "Other" with a control that fits their value. A
+summary of the pending changes can be checked before saving.
+
+On a card that is already in use, upload `settings.html` to the root through
+`/files` and open the URL above (bookmark it, or add it to the home screen of
+a phone).
 
 Two keys in the `[ui]` section control the interface:
 

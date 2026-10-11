@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiSTer Monitor - settings</title>
+<!--
+  Graphical editor for /config.ini of the MiSTer Monitor.
+  The page itself lives on the SD card and is served by the existing file browser:
+    http://<display-ip>:8080/files/download?path=/settings.html
+  No firmware change is needed: all logic runs in the browser, using the routes the
+  web interface already has:
+    read:    GET  /files/download?path=/config.ini
+    save:    POST /config/upload (the text as a file part, streamed to the card, keeps
+             config.ini.bak); on firmware without that route, POST /config (form field "ini")
+    reboot:  POST /reboot
+  Only the value after "key=" changes; comments, key order and line endings are kept.
+-->
+<style>
+:root{--bg:#000;--panel:#111;--line:#055;--text:#0FF;--muted:#888;--accent:#0FF;--accent-ink:#000;--input:#0F0;--warn:#FA0;--bad:#F55;--ok:#0F0;--chip:#111;--changed:#0FF1}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 monospace}
+header{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--accent)}
+.bar{max-width:880px;margin:0 auto;padding:10px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+h1{font-size:18px;margin:0;flex:1;min-width:180px}
+h1 small{color:var(--muted);font-weight:400;font-size:13px;margin-left:6px}
+nav{max-width:880px;margin:0 auto;padding:0 12px;display:flex;gap:2px;overflow-x:auto;scrollbar-width:none}
+nav button{background:none;border:0;border-bottom:2px solid transparent;color:var(--muted);padding:8px 10px;
+font:inherit;cursor:pointer;white-space:nowrap}
+nav button.on{color:var(--text);border-color:var(--accent)}
+nav button .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-left:5px;vertical-align:middle}
+main{max-width:880px;margin:0 auto;padding:12px 16px 120px}
+.row{background:var(--panel);border:1px solid var(--line);border-radius:0;padding:12px 14px;margin:10px 0;
+display:grid;grid-template-columns:1fr auto;gap:6px 16px;align-items:center}
+.row.changed{background:#002222;border-color:var(--accent)}
+.row.wide{grid-template-columns:1fr}
+.lbl{font-weight:bold}
+.lbl code{font-weight:400;color:var(--muted);font-size:12px;margin-left:6px}
+.desc{grid-column:1/-1;color:var(--muted);font-size:13px}
+.desc.warn{color:var(--warn)}
+details{grid-column:1/-1;font-size:12px;color:var(--muted)}
+details summary{cursor:pointer;width:max-content}
+details pre{white-space:pre-wrap;margin:6px 0 0;font:12px/1.4 ui-monospace,monospace}
+.ctl{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
+.row.wide .ctl{justify-content:flex-start}
+input[type=text],input[type=password],input[type=number],select{background:#111;color:var(--input);
+border:1px solid var(--accent);border-radius:0;padding:6px 9px;font:inherit;min-width:0}
+input[type=text],input[type=password]{width:260px;max-width:100%}
+input[type=number]{width:96px}
+input[type=range]{width:200px;accent-color:var(--accent)}
+.unit{color:var(--muted);font-size:13px}
+.sw{position:relative;width:46px;height:26px;flex:none}
+.sw input{opacity:0;width:100%;height:100%;margin:0;cursor:pointer;position:absolute;z-index:1}
+.sw span{position:absolute;inset:0;border-radius:0;background:#222;border:1px solid var(--accent);transition:.15s}
+.sw span::after{content:"";position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:0;background:var(--accent);transition:.15s}
+.sw input:checked+span{background:var(--accent)}
+.sw input:checked+span::after{background:#000}
+.sw input:checked+span::after{transform:translateX(20px)}
+.sw input:focus-visible+span{outline:2px solid var(--accent);outline-offset:2px}
+.seg{display:inline-flex;border:1px solid var(--accent);border-radius:0;overflow:hidden;flex-wrap:wrap}
+.seg button{background:none;border:0;border-right:1px solid var(--accent);color:var(--text);padding:6px 11px;font:inherit;cursor:pointer}
+.seg button:last-child{border-right:0}
+.seg button.on{background:var(--accent);color:var(--accent-ink)}
+.seg button small{display:block;font-size:11px;color:var(--muted)}
+.seg button.on small{color:var(--accent-ink);opacity:.7}
+.btn{background:var(--accent);color:#000;border:0;border-radius:0;padding:8px 20px;font:inherit;font-weight:bold;cursor:pointer}
+.btn.ghost{background:none;color:var(--accent);border:1px solid var(--accent)}
+.btn.danger{background:var(--bad)}
+.btn:disabled{opacity:.45;cursor:default}
+.icon{background:none;border:0;color:var(--muted);cursor:pointer;font-size:15px;padding:2px 4px}
+.icon:hover{color:var(--text)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:0;padding:0;list-style:none}
+.chips li{display:flex;align-items:center;gap:2px;background:var(--accent);color:var(--accent-ink);border-radius:0;
+padding:3px 4px 3px 10px;font-weight:bold;font-size:13px;cursor:grab;user-select:none}
+.chips li .n{opacity:.7;margin-right:4px;font-variant-numeric:tabular-nums}
+.chips li button{background:none;border:0;color:inherit;cursor:pointer;padding:0 3px;font-size:14px;opacity:.75}
+.chips li button:hover{opacity:1}
+.chips li.drag{opacity:.4}
+.chips li.over{outline:2px dashed var(--text)}
+.avail{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.avail button{background:none;border:1px dashed var(--accent);color:var(--muted);border-radius:0;font-family:inherit;padding:3px 10px;font-size:13px;cursor:pointer}
+.avail button:hover{color:var(--text);border-color:var(--muted)}
+.hint{font-size:12px;color:var(--muted);margin-top:6px}
+#status{font-size:13px;color:var(--muted)}
+#status.bad{color:var(--bad)}#status.ok{color:var(--ok)}
+.savebar{position:fixed;left:0;right:0;bottom:0;background:var(--panel);border-top:1px solid var(--accent);z-index:5;
+transform:translateY(100%);transition:transform .2s}
+.savebar.show{transform:none}
+.savebar .bar{gap:8px}
+.savebar .what{flex:1;min-width:150px;font-size:14px}
+.savebar .what a{color:var(--accent);cursor:pointer;text-decoration:underline}
+#diff{max-width:880px;margin:0 auto;padding:0 16px 10px;display:none;font:12px/1.5 ui-monospace,monospace;max-height:40vh;overflow:auto}
+#diff.show{display:block}
+#diff del{color:var(--bad)}#diff ins{color:var(--ok);text-decoration:none}
+.links{max-width:880px;margin:24px auto 0;padding:0 16px;font-size:13px;color:var(--muted)}
+.links a{color:var(--accent);margin-right:14px}
+.overlay{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;z-index:9}
+.overlay.show{display:flex}
+.overlay div{background:var(--panel);border:1px solid var(--line);border-radius:0;padding:22px 26px;border-color:var(--accent);max-width:360px;text-align:center}
+.spin{width:28px;height:28px;border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;
+animation:r 1s linear infinite;margin:0 auto 12px}
+@keyframes r{to{transform:rotate(360deg)}}
+@media (max-width:600px){
+  .row{grid-template-columns:1fr}
+  .ctl{justify-content:flex-start}
+  input[type=range]{width:150px}
+  h1 small{display:none}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1>MiSTer Monitor &mdash; settings</h1>
+    <span id="status">loading…</span>
+  </div>
+  <nav id="tabs"></nav>
+</header>
+<main id="main"></main>
+<div class="links">
+  <a href="/config">Edit config.ini as text</a>
+  <a href="/files">Browse the SD card</a>
+  <a href="#" id="reboot-link">Reboot only</a>
+</div>
+
+<div class="savebar" id="savebar">
+  <div class="bar">
+    <span class="what" id="what"></span>
+    <button class="btn ghost" id="undo">Undo</button>
+    <button class="btn" id="save">Save</button>
+    <button class="btn danger" id="saveboot">Save and reboot</button>
+  </div>
+  <div id="diff"></div>
+</div>
+<div class="overlay" id="overlay"><div><div class="spin"></div><div id="ovtext"></div></div></div>
+
+<script>
+"use strict";
+const CFG_URL = "/files/download?path=/config.ini";
+
+// ---------------------------------------------------------------------------
+// Schema. A key that is missing from config.ini is still offered (with its
+// default), unless it has `opt`: those belong to newer firmware or optional
+// patches and only appear when the file already has them. Likewise, enum
+// options listed in `optOpt` only appear when the comment above the key in
+// config.ini mentions them, or when they are the current value. Keys in the
+// file that the schema does not know go under "Other", with a control that
+// fits their value.
+//   t: bool | enum | int | float | text | pass | order
+//   ms: value in ms, shown in seconds
+// ---------------------------------------------------------------------------
+const TOKENS = {"box3d":"Box 3D","box2d":"Box 2D","screenshot":"Screenshot","titlescreen":"Title screen",
+  "wheel-steel":"Wheel steel","wheel-carbon":"Wheel carbon","wheel":"Wheel","fanart":"Fanart","marquee":"Marquee",
+  "screenmarquee":"Screen marquee","illustration":"Illustration","photo":"Photo","background":"Background",
+  "mix1":"Mix v1","mix2":"Mix v2"};
+const TZ = ["uk","portugal","iceland","spain","nigeria","greece","southafrica","turkey","dubai","india","thailand",
+  "china","japan","sydney","newzealand","argentina","venezuela","colombia","useastern","mexico","uscentral",
+  "usmountain","uspacific"];
+
+const GROUPS = [
+ {id:"display", name:"Display", keys:[
+  {k:"image_mode", t:"enum", l:"Image mode while a game runs", def:"rotate",
+   o:{rotate:"Game ↔ system", game:"Game only", system:"System only", cycle:"Snap → title → box"},
+   d:"‘Snap → title → box’ cycles through the images of the game itself."},
+  {k:"core_image_timeout", t:"int", ms:1, min:1000, max:600000, def:30000, l:"Time per image",
+   d:"How long each image stays on screen."},
+  {k:"system_image_timeout", t:"int", ms:1, min:0, max:600000, def:0, l:"Time for the system image",
+   d:"0 = same as above. Only used with ‘Game ↔ system’."},
+  {k:"art_inset_left", t:"int", slider:1, min:0, max:120, def:0, opt:1, unit:"px", l:"Artwork inset (left)",
+   d:"Keeps this many pixels free on the left and centres the artwork in the rest, e.g. behind a case bezel."},
+  {k:"kiosk_mode", t:"bool", def:false, l:"Kiosk mode (full-screen artwork)",
+   d:"No footer; a tap shows it for a moment."},
+  {k:"kiosk_hide_delay_ms", t:"int", ms:1, min:500, max:600000, def:5000, l:"Footer visible after a tap"},
+  {k:"image_upscale", t:"bool", def:false, l:"Upscale small artwork",
+   d:"Lets artwork smaller than its box grow to fill it."},
+  {k:"image_upscale_max", t:"float", min:1, max:2.875, step:0.125, slider:1, def:2.5, unit:"×", l:"Maximum upscale"},
+  {k:"screenshot_scaling", t:"enum", def:"fill", o:{fill:"Fill", integer:"Integer"}, l:"Screenshot scaling",
+   d:"Fill = always fills the box. Integer = sharp square pixels, sometimes smaller."},
+  {k:"flip_display", t:"bool", def:false, l:"Rotate display 180°"},
+ ]},
+ {id:"artwork", name:"Artwork", keys:[
+  {k:"game_media_order", t:"order", def:"box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot",
+   l:"Console / computer games", d:"Tried left to right until one is found. Drag to reorder."},
+  {k:"arcade_media_order", t:"order", def:"fanart,marquee,wheel-carbon,wheel-steel,wheel,box3d,box2d,screenshot",
+   l:"Arcade games"},
+  {k:"core_media_order", t:"order", def:"wheel-steel,wheel-carbon,wheel,screenmarquee,illustration,photo",
+   l:"System artwork"},
+  {k:"arcade_subsystem_media_order", t:"order", def:"wheel-steel,wheel-carbon,wheel,screenmarquee",
+   l:"Arcade subsystems (CPS1 etc.)"},
+  {k:"region", t:"enum", def:"wor", o:{wor:"World", eu:"Europe", us:"USA", jp:"Japan"}, l:"Preferred region",
+   d:"Region variant of the artwork that is tried first."},
+  {k:"auto_download", t:"bool", def:true, l:"Download missing artwork",
+   d:"Keep this on: otherwise new games get no artwork from the packs."},
+  {k:"alphabetical_folders", t:"bool", def:true, l:"Alphabetical folders (/cores/A/…)"},
+  {k:"max_image_size", t:"int", min:10000, max:5000000, def:500000, unit:"bytes", l:"Maximum image size"},
+  {k:"download_timeout", t:"int", ms:1, min:1000, max:300000, def:30000, l:"Download timeout"},
+  {k:"force_core_redownload", t:"bool", def:false, l:"Always re-download system artwork",
+   d:"Only switch on temporarily: costs a lot of downloads."},
+  {k:"force_game_redownload", t:"bool", def:false, l:"Always re-download game artwork",
+   d:"Only switch on temporarily: costs a lot of downloads."},
+  {k:"base_path", t:"text", def:"/cores", l:"Artwork folder on the SD card"},
+  {k:"default_image", t:"text", def:"/cores/menu.jpg", l:"Default image (menu)"},
+ ]},
+ {id:"standby", name:"Standby & clock", keys:[
+  {k:"standby_screen", t:"enum", def:"clock", o:{clock:"Clock", minimal:"Logo only"}, l:"Standby screen"},
+  {k:"standby_when_offline", t:"bool", def:true, l:"Standby when the MiSTer is off"},
+  {k:"standby_offline_min", t:"int", min:1, max:1440, def:3, unit:"min", l:"Minutes without the MiSTer"},
+  {k:"standby_idle_min", t:"int", min:0, max:1440, def:0, unit:"min", l:"Standby after minutes idle",
+   d:"0 = never. Also applies while the MiSTer is running."},
+  {k:"standby_in_menu", t:"bool", def:false, l:"Standby while the MiSTer sits in its menu",
+   d:"Loading a core wakes the display; a tap wakes it for half a minute."},
+  {k:"standby_menu_delay", t:"int", min:0, max:86400, def:0, unit:"s", l:"Seconds in the menu before that",
+   d:"0 = at once."},
+  {k:"standby_brightness", t:"int", slider:1, min:0, max:255, def:10, l:"Standby brightness", d:"0 = backlight off."},
+  {k:"standby_dim", t:"int", slider:1, min:5, max:100, def:100, unit:"%", l:"Standby colour dimming",
+   d:"Usually leave at 100 and use the brightness above."},
+  {k:"timezone", t:"text", list:TZ, def:"", l:"Time zone",
+   d:"‘spain’ covers Central European Time. Blank = no clock. A POSIX TZ string also works."},
+  {k:"ntp_server", t:"text", def:"pool.ntp.org", l:"NTP server"},
+  {k:"clock_24h", t:"bool", def:true, l:"24-hour clock"},
+  {k:"weather_city", t:"text", def:"", l:"City for the outside temperature",
+   d:"Shown next to the date on the standby clock. Blank = no temperature."},
+  {k:"weather_lat", t:"text", def:"", l:"Latitude (optional)", d:"With longitude, overrides the city."},
+  {k:"weather_lon", t:"text", def:"", l:"Longitude (optional)"},
+  {k:"weather_unit", t:"enum", def:"c", o:{c:"°C", f:"°F"}, l:"Temperature unit"},
+ ]},
+ {id:"menuclock", name:"Menu clock", keys:[
+  {k:"idle_clock", t:"bool", def:false, opt:1, l:"Clock while the MiSTer is in its menu",
+   d:"Waveshare 2.8 only. In the menu the display alternates between clock, year and face; uses the city above."},
+  {k:"idle_clock_seconds", t:"int", min:5, max:3600, def:30, opt:1, unit:"s", l:"Time per screen"},
+  {k:"idle_day_names", t:"text", def:"SUN,MON,TUE,WED,THU,FRI,SAT", opt:1, l:"Day names (Sunday first)", d:"Seven comma-separated names."},
+  {k:"idle_date_order", t:"enum", def:"md", opt:1, o:{dm:"day.month", md:"month.day"}, l:"Date order"},
+  {k:"idle_face_file", t:"text", def:"", opt:1, l:"Face file on the SD card", d:"Blank = built-in face."},
+  {k:"idle_lcd_left", t:"int", slider:1, min:0, max:120, def:0, opt:1, unit:"px", l:"Black border left"},
+ ]},
+ {id:"info", name:"Game info", keys:[
+  {k:"info_in_rotation", t:"bool", def:false, l:"Game info in the rotation"},
+  {k:"info_lang", t:"enum", def:"en", o:{en:"EN", fr:"FR", de:"DE", es:"ES", it:"IT", pt:"PT"}, l:"Synopsis language",
+   d:"Falls back to English when the language is not available."},
+  {k:"info_scroll_auto", t:"bool", def:true, l:"Auto-scroll synopsis"},
+  {k:"info_scroll_step_ms", t:"int", ms:1, min:200, max:8000, def:2000, l:"Scroll speed (per line)"},
+  {k:"info_synopsis_max", t:"int", min:200, max:2000, def:2000, unit:"chars", l:"Maximum synopsis length"},
+ ]},
+ {id:"network", name:"Network", keys:[
+  {k:"ssid", t:"text", def:"", l:"WiFi network", d:"A wrong value makes the display unreachable; then edit the SD card on a PC."},
+  {k:"password", t:"pass", def:"", l:"WiFi password"},
+  {k:"ip", t:"text", def:"", l:"MiSTer IP address", ph:"blank = auto-discover"},
+  {k:"ss_user", t:"text", def:"", l:"ScreenScraper user"},
+  {k:"ss_pass", t:"pass", def:"", l:"ScreenScraper password"},
+  {k:"ss_dev_user", t:"text", def:"", l:"ScreenScraper dev user (optional)"},
+  {k:"ss_dev_pass", t:"pass", def:"", l:"ScreenScraper dev password"},
+  {k:"timeout", t:"int", ms:1, min:1000, max:120000, def:30000, l:"ScreenScraper timeout"},
+  {k:"retries", t:"int", min:0, max:10, def:2, l:"Retries on overload"},
+  {k:"use_https", t:"bool", def:false, l:"Use HTTPS", d:"Only if HTTP stops working."},
+ ]},
+ {id:"other", name:"Other", keys:[
+  {k:"scroll_speed_ms", t:"int", min:20, max:2000, def:300, unit:"ms", l:"Scroll speed for long names", d:"Lower = faster."},
+  {k:"scroll_pause_start_ms", t:"int", ms:1, min:0, max:20000, def:2000, l:"Pause before scrolling"},
+  {k:"scroll_pause_end_ms", t:"int", ms:1, min:0, max:20000, def:3000, l:"Pause after scrolling"},
+  {k:"ota_auto", t:"bool", def:false, l:"Install firmware updates automatically",
+   d:"Installs an offered update without a tap on the display."},
+  {k:"web_config", t:"bool", def:true, l:"Web interface",
+   d:"Switching this off also removes this page; turning it back on needs the SD card in a PC.", warn:1},
+  {k:"web_password", t:"pass", def:"", l:"Web interface password", d:"Username ‘admin’. Blank = no password."},
+  {k:"sound", t:"bool", def:true, opt:1, l:"Sound", d:"Tab5 only: boot jingle and touch-button beeps."},
+  {k:"sound_volume", t:"int", slider:1, min:0, max:255, def:128, opt:1, l:"Speaker volume"},
+  {k:"panel_rev", t:"enum", def:"v1", opt:1, o:{v1:"v1", v2:"v2"}, l:"Panel revision",
+   d:"Guition 10.1 only: v2 from batch 2624 onward. Horizontal colour banding means the wrong one is set."},
+  {k:"debug", t:"bool", def:false, l:"Debug output (serial)"},
+ ]},
+];
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+let lines = [], eol = "\n", endsNl = true;
+let items = {};          // key -> {k, sec, idx, pre, post, orig, cur, help, commented, present}
+let schemaByKey = {};
+let activeTab = (() => { try { return localStorage.getItem("mmon-tab") || "display"; } catch (e) { return "display"; } })();
+GROUPS.forEach(g => g.keys.forEach(s => schemaByKey[s.k] = s));
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const truthy = v => /^(true|1|yes|on)$/i.test(String(v).trim());
+
+function status(msg, cls) { const s = $("status"); s.textContent = msg; s.className = cls || ""; }
+
+// ---------------------------------------------------------------------------
+// Parsing. The comment block right above a key becomes its "Notes from
+// config.ini". Separator lines (---, ═══, ───) are skipped.
+// ---------------------------------------------------------------------------
+function parse(text) {
+  eol = text.includes("\r\n") ? "\r\n" : "\n";
+  endsNl = /\n$/.test(text);
+  lines = text.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n");
+  items = {};
+  let sec = "", help = [];
+  lines.forEach((raw, i) => {
+    const t = raw.trim();
+    let m;
+    if (!t) { help = []; return; }
+    if (/^\[.+\]$/.test(t)) { sec = t.slice(1, -1).trim(); help = []; return; }
+    if ((m = raw.match(/^(\s*)([A-Za-z0-9_]+)(\s*=\s*)(.*?)(\s*)$/))) {
+      items[m[2]] = {k:m[2], sec, idx:i, pre:m[1] + m[2] + m[3], post:m[5], orig:m[4], cur:m[4],
+                     help:help.join("\n"), commented:false, present:true};
+      help = [];
+      return;
+    }
+    if ((m = raw.match(/^\s*[;#]\s*([A-Za-z0-9_]+)\s*=(.*)$/)) && schemaByKey[m[1]] && !items[m[1]]) {
+      // commented-out key (e.g. ;ss_dev_user=): editable, becomes active once you fill it in
+      items[m[1]] = {k:m[1], sec, idx:i, pre:m[1] + "=", post:"", orig:m[2].trim(), cur:m[2].trim(),
+                     help:help.join("\n"), commented:true, present:true};
+      help = [];
+      return;
+    }
+    if (/^[;#]/.test(t)) {
+      const c = t.replace(/^[;#]\s?/, "");
+      if (/^[\s\-=─═_*]+$/.test(c)) return;
+      help.push(c);
+    }
+  });
+  // schema keys that are not in the file yet
+  for (const s of Object.values(schemaByKey)) {
+    if (items[s.k] || s.opt) continue;
+    const d = s.t === "bool" ? String(s.def) : String(s.def ?? "");
+    items[s.k] = {k:s.k, sec:null, idx:-1, pre:s.k + "=", post:"", orig:d, cur:d, help:"", commented:false, present:false};
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Writing: only changed lines are touched. A new key goes right after the
+// last key of its own tab (the firmware ignores [sections]).
+// ---------------------------------------------------------------------------
+function changed() { return Object.values(items).filter(it => it.cur !== it.orig); }
+
+function build() {
+  const out = lines.slice();
+  const inserts = [];
+  for (const it of changed()) {
+    if (it.idx >= 0) out[it.idx] = it.pre + it.cur + it.post;
+    else inserts.push(it);
+  }
+  for (const it of inserts) {
+    // after the last existing key of the same group, otherwise at the end
+    const g = GROUPS.find(g => g.keys.some(s => s.k === it.k));
+    let at = -1;
+    for (const s of g.keys) { const o = items[s.k]; if (o && o.idx > at && o.present) at = o.idx; }
+    const line = it.k + "=" + it.cur;
+    // insert after line `at` (or at the end); back to front, so indexes stay valid
+    it._at = at >= 0 ? at : out.length - 1;
+    it._line = line;
+  }
+  inserts.sort((a, b) => b._at - a._at).forEach(it => out.splice(it._at + 1, 0, it._line));
+  return out.join(eol) + (endsNl ? eol : "");
+}
+
+// ---------------------------------------------------------------------------
+// Controls per type
+// ---------------------------------------------------------------------------
+function setVal(k, v) {
+  const it = items[k];
+  const s = schemaByKey[k] || {};
+  // back to the original meaning -> keep the original text (e.g. "1" rather than "true")
+  if (s.t === "bool" && truthy(v) === truthy(it.orig) && it.orig !== "") v = it.orig;
+  else if (s.t === "order" && norm(v) === norm(it.orig)) v = it.orig;
+  else if ((s.t === "int" || s.t === "float") && Number(v) === Number(it.orig) && it.orig.trim() !== "") v = it.orig;
+  it.cur = String(v);
+  refreshRow(k);
+  refreshBar();
+}
+const norm = v => String(v).split(",").map(x => x.trim()).filter(Boolean).join(",");
+
+function inferType(v) {
+  if (/^(true|false)$/i.test(v)) return "bool";
+  if (/^-?\d+$/.test(v)) return "int";
+  if (/^-?\d*\.\d+$/.test(v)) return "float";
+  return "text";
+}
+
+function control(k) {
+  const it = items[k], s = schemaByKey[k] || {t:inferType(it.orig)}, v = it.cur;
+  const wrap = document.createElement("div");
+  wrap.className = "ctl";
+  if (s.t === "bool") {
+    wrap.innerHTML = `<label class="sw"><input type="checkbox" ${truthy(v) ? "checked" : ""} aria-label="${esc(s.l || k)}"><span></span></label>`;
+    wrap.querySelector("input").onchange = e => setVal(k, e.target.checked ? "true" : "false");
+  } else if (s.t === "enum") {
+    const opts = Object.entries(s.o).filter(([o]) => !(s.optOpt || []).includes(o) || v === o ||
+      new RegExp("\\b" + o + "\\b").test(it.help));
+    if (!opts.some(([o]) => o === v)) opts.push([v, v || "(blank)"]);
+    if (opts.length <= 4 && opts.every(([, l]) => l.length < 28)) {
+      wrap.innerHTML = `<div class="seg">${opts.map(([o, l]) =>
+        `<button type="button" data-v="${esc(o)}" class="${o === v ? "on" : ""}">${esc(l)}${l !== o ? `<small>${esc(o)}</small>` : ""}</button>`).join("")}</div>`;
+      wrap.querySelectorAll("button").forEach(b => b.onclick = () => setVal(k, b.dataset.v));
+    } else {
+      wrap.innerHTML = `<select>${opts.map(([o, l]) =>
+        `<option value="${esc(o)}" ${o === v ? "selected" : ""}>${esc(l !== o ? l + " (" + o + ")" : l)}</option>`).join("")}</select>`;
+      wrap.querySelector("select").onchange = e => setVal(k, e.target.value);
+    }
+  } else if (s.t === "int" || s.t === "float") {
+    const f = s.ms ? 1000 : 1;
+    const shown = v.trim() === "" ? "" : Number(v) / f;
+    const min = s.min != null ? s.min / f : "", max = s.max != null ? s.max / f : "";
+    const step = s.ms ? 0.1 : (s.step || (s.t === "float" ? 0.1 : 1));
+    const unit = s.ms ? "s" : (s.unit || "");
+    wrap.innerHTML = (s.slider ? `<input type="range" min="${min}" max="${max}" step="${step}" value="${shown}">` : "") +
+      `<input type="number" min="${min}" max="${max}" step="${step}" value="${shown}">` +
+      (unit ? `<span class="unit">${esc(unit)}</span>` : "");
+    const num = wrap.querySelector("input[type=number]"), rng = wrap.querySelector("input[type=range]");
+    const commit = (raw, clamp) => {
+      if (raw === "") return;
+      let n = Number(raw);
+      if (isNaN(n)) return;
+      if (clamp) { if (min !== "") n = Math.max(min, n); if (max !== "") n = Math.min(max, n); }
+      let stored = n * f;
+      stored = s.t === "int" ? Math.round(stored) : Math.round(stored * 1000) / 1000;
+      setVal(k, String(stored));
+    };
+    num.oninput = () => { if (rng) rng.value = num.value; commit(num.value, false); };
+    num.onchange = () => { commit(num.value, true); };
+    if (rng) rng.oninput = () => { num.value = rng.value; commit(rng.value, true); };
+  } else if (s.t === "order") {
+    wrap.append(orderEditor(k));
+  } else {
+    const type = s.t === "pass" ? "password" : "text";
+    const lid = s.list ? "dl-" + k : "";
+    wrap.innerHTML = `<input type="${type}" value="${esc(v)}" spellcheck="false" autocomplete="off"` +
+      `${lid ? ` list="${lid}"` : ""} placeholder="${esc(s.ph || (s.def ? "default: " + s.def : ""))}">` +
+      (lid ? `<datalist id="${lid}">${s.list.map(o => `<option value="${esc(o)}">`).join("")}</datalist>` : "") +
+      (s.t === "pass" ? `<button type="button" class="icon" title="Show/hide">👁</button>` : "");
+    const inp = wrap.querySelector("input");
+    inp.oninput = () => setVal(k, inp.value.trim());
+    const eye = wrap.querySelector("button");
+    if (eye) eye.onclick = () => { inp.type = inp.type === "password" ? "text" : "password"; };
+  }
+  return wrap;
+}
+
+// Order editor: chosen media types as chips (drag, or ‹ › on touch), the rest below to add.
+function orderEditor(k) {
+  const box = document.createElement("div");
+  box.style.width = "100%";
+  const list = norm(items[k].cur).split(",").filter(Boolean);
+  const ol = document.createElement("ol");
+  ol.className = "chips";
+  list.forEach((tok, i) => {
+    const li = document.createElement("li");
+    li.draggable = true;
+    li.dataset.i = i;
+    li.innerHTML = `<span class="n">${i + 1}</span>${esc(TOKENS[tok] || tok)}` +
+      `<button type="button" title="Move left" data-a="l">‹</button><button type="button" title="Move right" data-a="r">›</button>` +
+      `<button type="button" title="Remove" data-a="x">×</button>`;
+    li.title = tok;
+    li.querySelectorAll("button").forEach(b => b.onclick = () => {
+      const a = list.slice();
+      if (b.dataset.a === "x") a.splice(i, 1);
+      else { const j = b.dataset.a === "l" ? i - 1 : i + 1; if (j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; }
+      setVal(k, a.join(","));
+    });
+    li.ondragstart = e => { e.dataTransfer.setData("text/plain", String(i)); li.classList.add("drag"); };
+    li.ondragend = () => li.classList.remove("drag");
+    li.ondragover = e => { e.preventDefault(); li.classList.add("over"); };
+    li.ondragleave = () => li.classList.remove("over");
+    li.ondrop = e => {
+      e.preventDefault();
+      const from = Number(e.dataTransfer.getData("text/plain"));
+      if (isNaN(from) || from === i) return;
+      const a = list.slice();
+      const [m] = a.splice(from, 1);
+      a.splice(i, 0, m);
+      setVal(k, a.join(","));
+    };
+    ol.append(li);
+  });
+  box.append(ol);
+  const rest = Object.keys(TOKENS).filter(t => !list.includes(t));
+  if (rest.length) {
+    const av = document.createElement("div");
+    av.className = "avail";
+    rest.forEach(t => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = "+ " + TOKENS[t];
+      b.title = t;
+      b.onclick = () => setVal(k, list.concat(t).join(","));
+      av.append(b);
+    });
+    box.append(av);
+  }
+  return box;
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+function groupKeys(g) {
+  if (g.id !== "other") return g.keys.filter(s => items[s.k]).map(s => s.k);
+  const known = new Set(Object.keys(schemaByKey));
+  const extra = Object.keys(items).filter(k => !known.has(k));
+  return g.keys.filter(s => items[s.k]).map(s => s.k).concat(extra);
+}
+
+function row(k) {
+  const it = items[k], s = schemaByKey[k] || {};
+  const r = document.createElement("div");
+  r.className = "row" + (s.t === "order" ? " wide" : "");
+  r.id = "row-" + k;
+  r.innerHTML = `<div class="lbl">${esc(s.l || k)}<code>${esc(k)}</code></div>`;
+  const ctl = control(k);
+  const reset = document.createElement("button");
+  reset.type = "button"; reset.className = "icon"; reset.title = "Back to the saved value"; reset.textContent = "↺";
+  reset.style.visibility = it.cur !== it.orig ? "visible" : "hidden";
+  reset.onclick = () => setVal(k, it.orig);
+  ctl.append(reset);
+  r.append(ctl);
+  if (s.d) r.insertAdjacentHTML("beforeend", `<div class="desc${s.warn && !truthy(it.cur) ? " warn" : ""}">${esc(s.d)}</div>`);
+  if (!it.present) r.insertAdjacentHTML("beforeend", `<div class="desc">Not in config.ini yet; added when you change it.</div>`);
+  if (it.help) r.insertAdjacentHTML("beforeend", `<details><summary>Notes from config.ini</summary><pre>${esc(it.help)}</pre></details>`);
+  if (it.cur !== it.orig) r.classList.add("changed");
+  return r;
+}
+
+function refreshRow(k) {
+  const old = $("row-" + k);
+  if (!old) return;
+  const focused = document.activeElement && old.contains(document.activeElement) &&
+                  document.activeElement.matches("input");
+  if (focused) {   // don't rebuild while typing (keeps the cursor in place)
+    old.classList.toggle("changed", items[k].cur !== items[k].orig);
+    old.querySelector(".ctl > .icon:last-child").style.visibility = items[k].cur !== items[k].orig ? "visible" : "hidden";
+    return;
+  }
+  const open = old.querySelector("details")?.open;
+  const n = row(k);
+  if (open) n.querySelector("details").open = true;
+  old.replaceWith(n);
+}
+
+function render() {
+  const tabs = $("tabs"), main = $("main");
+  tabs.innerHTML = ""; main.innerHTML = "";
+  const groups = GROUPS.filter(g => groupKeys(g).length);
+  if (!groups.some(g => g.id === activeTab)) activeTab = groups[0].id;
+  for (const g of groups) {
+    const b = document.createElement("button");
+    b.textContent = g.name;
+    b.className = g.id === activeTab ? "on" : "";
+    if (groupKeys(g).some(k => items[k].cur !== items[k].orig)) b.insertAdjacentHTML("beforeend", '<span class="dot"></span>');
+    b.onclick = () => { activeTab = g.id; try { localStorage.setItem("mmon-tab", g.id); } catch (e) {} render(); };
+    tabs.append(b);
+  }
+  const g = groups.find(g => g.id === activeTab);
+  groupKeys(g).forEach(k => main.append(row(k)));
+}
+
+function refreshBar() {
+  const c = changed();
+  $("savebar").classList.toggle("show", c.length > 0);
+  $("what").innerHTML = c.length ? `${c.length} change${c.length > 1 ? "s" : ""} <a id="showdiff">show</a>` : "";
+  const sd = $("showdiff");
+  if (sd) sd.onclick = () => $("diff").classList.toggle("show");
+  $("diff").innerHTML = c.map(it => {
+    const s = schemaByKey[it.k] || {};
+    const hide = s.t === "pass";
+    return `<div>${esc(it.k)}: <del>${hide ? "•••" : esc(it.orig || "(blank)")}</del> → <ins>${hide ? "•••" : esc(it.cur || "(blank)")}</ins></div>`;
+  }).join("");
+  if (!c.length) $("diff").classList.remove("show");
+  // update the tab dots without rebuilding the content
+  const groups = GROUPS.filter(g => groupKeys(g).length);
+  [...$("tabs").children].forEach((b, i) => {
+    const has = groupKeys(groups[i]).some(k => items[k].cur !== items[k].orig);
+    const dot = b.querySelector(".dot");
+    if (has && !dot) b.insertAdjacentHTML("beforeend", '<span class="dot"></span>');
+    if (!has && dot) dot.remove();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Network
+// ---------------------------------------------------------------------------
+async function load() {
+  status("loading…");
+  const r = await fetch(CFG_URL, {cache:"no-store"});
+  if (!r.ok) throw new Error("Could not read config.ini (HTTP " + r.status + ")");
+  parse(await r.text());
+  render();
+  refreshBar();
+  status("config.ini loaded", "ok");
+}
+
+async function save() {
+  const text = build();
+  status("saving…");
+  // The text goes as a file part: the firmware streams it to the card in small
+  // chunks, which a long config.ini needs on the boards without PSRAM. Firmware
+  // before that route answers 404; then the url-encoded form is the only way.
+  const fd = new FormData();
+  fd.append("ini", new Blob([text], {type:"text/plain"}), "config.ini");
+  let r = await fetch("/config/upload", {method:"POST", body:fd});
+  if (r.status === 404) r = await fetch("/config", {method:"POST", body:new URLSearchParams({ini:text})});
+  if (!r.ok) throw new Error("Save failed: " + (await r.text()).slice(0, 200));
+  // read it back to make sure the card has exactly what we sent
+  const chk = await fetch(CFG_URL, {cache:"no-store"}).then(x => x.text());
+  if (chk.replace(/\r\n/g, "\n") !== text.replace(/\r\n/g, "\n")) throw new Error("Saved, but the file on the card differs. Check the text editor.");
+  parse(chk);
+  render();
+  refreshBar();
+  status("saved (previous file kept as config.ini.bak). Reboot to apply.", "ok");
+}
+
+function overlay(msg) { $("ovtext").textContent = msg || ""; $("overlay").classList.toggle("show", !!msg); }
+
+async function reboot() {
+  overlay("Rebooting the display… this takes about 30 seconds.");
+  try { await fetch("/reboot", {method:"POST"}); } catch (e) { /* the connection drops: expected */ }
+  await new Promise(r => setTimeout(r, 8000));
+  const until = Date.now() + 120000;
+  while (Date.now() < until) {
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 3000);
+      const r = await fetch(CFG_URL, {cache:"no-store", signal:ctl.signal});
+      clearTimeout(t);
+      if (r.ok) { overlay(""); await load(); status("rebooted, new settings active", "ok"); return; }
+    } catch (e) {}
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  overlay("");
+  status("display not responding after 2 minutes; reload the page later", "bad");
+}
+
+async function guard(fn) {
+  ["save", "saveboot", "undo"].forEach(id => $(id).disabled = true);
+  try { await fn(); } catch (e) { overlay(""); status(e.message, "bad"); }
+  finally { ["save", "saveboot", "undo"].forEach(id => $(id).disabled = false); }
+}
+
+$("save").onclick = () => guard(save);
+$("saveboot").onclick = () => guard(async () => { await save(); await reboot(); });
+$("undo").onclick = () => { Object.values(items).forEach(it => it.cur = it.orig); render(); refreshBar(); };
+$("reboot-link").onclick = e => {
+  e.preventDefault();
+  if (changed().length && !confirm("There are unsaved changes. Reboot anyway?")) return;
+  guard(reboot);
+};
+window.addEventListener("beforeunload", e => { if (changed().length) { e.preventDefault(); e.returnValue = ""; } });
+
+load().catch(e => status(e.message, "bad"));
+</script>
+</body>
+</html>

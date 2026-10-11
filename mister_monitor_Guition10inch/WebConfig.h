@@ -97,7 +97,8 @@ static const char WEBCONFIG_EDITOR_TAIL[] PROGMEM = R"rawliteral(</textarea>
 <br><button type="submit">Save</button></form>
 <form method="POST" action="/reboot" onsubmit="return confirm('Reboot the display?')">
 <button class="danger" type="submit">Reboot</button></form>
-<p><a href="/files">Browse the SD card</a></p>
+<p><a href="/files/download?path=/settings.html">Settings page</a> (if settings.html is on the card)
+&middot; <a href="/files">Browse the SD card</a></p>
 <p class="note">Changes take effect after a reboot. The previous file is kept on the
 card as config.ini.bak.</p>
 <script>
@@ -142,6 +143,8 @@ static const char WEBCONFIG_LANDING_PAGE[] PROGMEM = R"rawliteral(<!DOCTYPE html
 style="background:#000;color:#0FF;font-family:monospace;padding:16px">
 <h1>MiSTer Monitor</h1>
 <p><a style="color:#0FF" href="/config">Edit config.ini</a></p>
+<p><a style="color:#0FF" href="/files/download?path=/settings.html">Settings page</a>
+<span style="color:#888;font-size:12px">(if settings.html is on the card)</span></p>
 <p><a style="color:#0FF" href="/files">Browse the SD card</a></p>
 <p style="color:#888;font-size:12px">Screenshot capture is not available on this board
 (the panel does not support framebuffer readback).</p>
