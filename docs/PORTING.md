@@ -29,10 +29,14 @@ pages, so most rendering code is identical between targets.
 
 ## Steps
 
-1. Create `mister_monitor_<TARGET>/` at the repo root and copy the
-   baseline (`.ino`, `AppConfig.h`, `mister_types.h`, plus
-   `board_hal.{h,cpp}` from the CYD port). Rename the `.ino` to
-   match the folder.
+1. Create `mister_monitor_<TARGET>/` at the repo root and copy the whole
+   baseline folder into it: besides the `.ino`, `AppConfig.h` and
+   `mister_types.h`, the sketch needs the image decoders
+   (`JpegImage`, `PngImage`), the web, update and weather modules
+   (`WebConfig.h`, `WebFiles.h`, `FirmwareUpdate.h`, `Weather.h`) and
+   `build_opt.h`. Starting from the Tab5, take `board_hal.{h,cpp}` from
+   the CYD port as the model for your own. Rename the `.ino` to match the
+   folder.
 2. **Adapt `board_hal.{h,cpp}`** for your panel controller and
    touch chip. The CYD28R_ILI9341’s `board_hal` uses **LovyanGFX**, the
    library expected for new ports. It covers essentially every
@@ -42,7 +46,8 @@ pages, so most rendering code is identical between targets.
    exception is ESP32-P4 MIPI-DSI panels — LovyanGFX support for
    that interface is still experimental. The Tab5 port handles this
    through M5Unified/M5GFX rather than LovyanGFX; other ESP32-P4
-   MIPI-DSI targets may need `esp_lcd` or Arduino_GFX directly.
+   MIPI-DSI targets may need `esp_lcd` or Arduino_GFX directly, as the
+   Guition port does with its vendor `esp_lcd` driver.
 3. **Set the panel constants** at the top of the `.ino`:
 - `TARGET_WIDTH`, `TARGET_HEIGHT` — physical panel size.
 - `IMAGE_AREA_HEIGHT` — vertical space reserved for artwork.
@@ -50,7 +55,18 @@ pages, so most rendering code is identical between targets.
   the 320x240 logical design onto your panel. Use `1.0 / 0 / 0`
   for a natively-sized panel (320x240 or 480x320); Tab5 uses `2.0`
   with `OFFSET_X=90, OFFSET_Y=200` for the 1280x720 panel.
-4. Add a row to the Supported Hardware table below.
+4. **Keep over-the-air updates working.** Build with a partition
+   scheme that has two app slots: an update is written to the slot that
+   is not running, so a single-slot layout cannot take one. Set
+   `FIRMWARE_BOARD_ID` in the `.ino` to a key of its own; the release
+   workflow publishes the board's update image as `<key>.bin` and lists
+   it under that key in `firmware/manifest.json`.
+5. **Add the board to `.github/workflows/release.yml`**: the credentials
+   loop, a compile step with its FQBN, the flasher image, the OTA image,
+   and a flasher manifest, plus its button on `docs/flasher/index.html`.
+   Give it a folder under `SD_card_content/` with its `config.ini` and
+   assets.
+6. Add a row to the Supported Hardware table below.
 
 That’s the essence. Everything else — the `Board` facade, the
 `ScaledDisplay` wrapper, monitor page rendering, server protocol,
@@ -76,14 +92,25 @@ JPEG handling, ScreenScraper integration — stays as-is.
 Arduino IDE → Tools:
 
 - Board: `M5Tab5` (M5Stack board package)
-- Library: `M5Unified`
+- Libraries: `M5Unified`, `M5GFX`, `JPEGDEC`, `PNGdec`
 - Other: defaults from the M5Tab board definition
+
+The release workflow builds it with the M5Stack package 3.3.7 and this FQBN:
+
+```
+m5stack:esp32:m5stack_tab5
+```
 
 ### Guition JC8012P4A1C (10.1")
 
-Arduino IDE -> Tools, per the vendor's documented configuration:
+Arduino IDE -> Tools, per the vendor's documented configuration plus the
+Chip Variant the v3 units need:
 
 - Board: `ESP32P4 Dev Module` (esp32 board package)
+- Chip Variant: `Before v3.00`, or `v3.00 or newer` for the units with the
+  newer ESP32-P4 (sticker SKU ending in `-V3`; esptool reports
+  `revision v3.x`). An image built for one revision restarts in a loop on
+  the other, so each gets its own build
 - PSRAM: `Enabled` (required - the framebuffer alone is ~2 MB)
 - Flash Mode: `QIO`
 - Flash Frequency: `80MHz`
@@ -92,10 +119,21 @@ Arduino IDE -> Tools, per the vendor's documented configuration:
 - USB CDC On Boot: `Disabled` - with it enabled, `Serial` output goes to the
   native USB port instead of the UART bridge used for flashing, so the COM
   port you flash from shows only the ROM boot log
-- Libraries: `M5GFX`, `JPEGDEC`
+- Libraries: `M5GFX`, `JPEGDEC`, `PNGdec`
 
-Verified on esp32 core 3.3.11. The vendor screenshot also shows a CPU
-Frequency of 360MHz; that option does not exist in the core and is ignored.
+The release workflow builds it with esp32 core 3.3.12. The vendor
+screenshot also shows a CPU Frequency of 360MHz; the core has no such menu
+for the P4, and Chip Variant sets it instead: 360 MHz before v3.00,
+400 MHz from v3.00. The sketch tells its two builds apart by that clock
+(`FIRMWARE_BOARD_ID` is `guition10inch` or `guition10inch_v3`), so each
+board is offered its own image over the air.
+
+As arduino-cli FQBNs, the ones the release workflow uses:
+
+```
+esp32:esp32:esp32p4:ChipVariant=prev3,PSRAM=enabled,FlashMode=qio,FlashFreq=80,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB
+esp32:esp32:esp32p4:ChipVariant=postv3,PSRAM=enabled,FlashMode=qio,FlashFreq=80,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB
+```
 
 The vendor `esp_lcd` JD9365 driver lives in the sketch's `src/lcd/` folder and
 is used unmodified - Arduino compiles `src/` recursively, so it is picked up
@@ -109,11 +147,21 @@ capacitive and resistive); only the sketch folder differs.
 Arduino IDE → Tools:
 
 - Board: `ESP32 Dev Module`
-- Partition Scheme: `Huge APP (3MB No OTA/1MB SPIFFS)`
+- Partition Scheme: `Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS)` —
+  two app slots, which the over-the-air updater needs. Boards flashed with
+  `Huge APP` before 2.12 have a single slot and need one last update by
+  cable
 - Flash Size: `4MB (32Mb)`
 - PSRAM: `Disabled`
 - Upload Speed: `921600`
-- Libraries: `LovyanGFX`, `XPT2046_Touchscreen`, `JPEGDEC`
+- Libraries: `LovyanGFX`, `XPT2046_Touchscreen`, `JPEGDEC`, `PNGdec`
+
+As an arduino-cli FQBN, the one the release workflow uses (esp32 core
+3.3.12):
+
+```
+esp32:esp32:esp32:PartitionScheme=min_spiffs,FlashSize=4M,PSRAM=disabled
+```
 
 ### Waveshare ESP32-S3-Touch-LCD-2.8 V2
 
