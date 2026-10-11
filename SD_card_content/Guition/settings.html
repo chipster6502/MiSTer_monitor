@@ -177,6 +177,10 @@ const GROUPS = [
   {k:"screenshot_scaling", t:"enum", def:"fill", o:{fill:"Fill", integer:"Integer"}, l:"Screenshot scaling",
    d:"Fill = always fills the box. Integer = sharp square pixels, sometimes smaller."},
   {k:"flip_display", t:"bool", def:false, l:"Rotate display 180°"},
+  {k:"touch_invert_x", t:"bool", def:false, opt:1, l:"Mirror touch horizontally",
+   d:"3.5\" boards only. For touch layers that report the X axis reversed; the image is not changed."},
+  {k:"touch_invert_y", t:"bool", def:false, opt:1, l:"Mirror touch vertically",
+   d:"3.5\" boards only. Taps land upside down on some resistive clones (e.g. LCDwiki E32R35T)."},
  ]},
  {id:"artwork", name:"Artwork", keys:[
   {k:"game_media_order", t:"order", def:"box3d,box2d,wheel-carbon,wheel-steel,wheel,fanart,marquee,screenshot",
