@@ -136,6 +136,8 @@ struct AppConfig {
   bool   standbyWhenOffline = true;
   int    standbyOfflineMin  = 3;
   int    standbyIdleMin     = 0;
+  bool   standbyInMenu      = false;  // [ui] standby_in_menu - standby while the MiSTer sits in its menu
+  int    standbyMenuDelay   = 0;      // [ui] standby_menu_delay - seconds in the menu first (0 = at once)
   int    standbyBrightness  = 10;
   int    standbyDim         = 100;
 
@@ -167,6 +169,13 @@ struct AppConfig {
   // --- Web config editor ------------------------------------------------------
   bool   webConfig   = true;   // [ui] web_config   - false disables /config + /reboot
   String webPassword = "";     // [ui] web_password - non-empty enables Basic Auth
+
+  // --- Weather (standby clock) -----------------------------------------------
+  // Outside temperature from Open-Meteo. Nothing is fetched without a location.
+  String weatherCity      = "";     // [weather] weather_city - place name, geocoded once
+  String weatherLat       = "";     // [weather] weather_lat / weather_lon - win over the city
+  String weatherLon       = "";
+  String weatherUnit      = "c";    // [weather] weather_unit - c or f
 
   // --- Firmware updates ------------------------------------------------------
   bool   updateAuto  = false;  // [update] ota_auto - install an offered update without a tap
@@ -264,6 +273,8 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "standby_when_offline")   { cfg.standbyWhenOffline = parseBool(val); }
     else if (key == "standby_offline_min")    { cfg.standbyOfflineMin = val.toInt(); }
     else if (key == "standby_idle_min")       { cfg.standbyIdleMin = val.toInt(); }
+    else if (key == "standby_in_menu")        { cfg.standbyInMenu = parseBool(val); }
+    else if (key == "standby_menu_delay")     { cfg.standbyMenuDelay = val.toInt(); }
     else if (key == "standby_brightness")     { cfg.standbyBrightness = val.toInt(); }
     else if (key == "standby_dim")            { cfg.standbyDim = val.toInt(); }
     else if (key == "timezone")               { cfg.timezone = val; }
@@ -277,6 +288,11 @@ inline void loadConfig(AppConfig& cfg) {
     // [ui] web config editor
     else if (key == "web_config")             { cfg.webConfig = parseBool(val); }
     else if (key == "web_password")           { cfg.webPassword = val; }
+    // [weather]
+    else if (key == "weather_city")           { cfg.weatherCity = val; }
+    else if (key == "weather_lat")            { cfg.weatherLat = val; }
+    else if (key == "weather_lon")            { cfg.weatherLon = val; }
+    else if (key == "weather_unit")           { cfg.weatherUnit = val; }
     // [update]
     else if (key == "ota_auto")               { cfg.updateAuto = parseBool(val); }
     // [debug]

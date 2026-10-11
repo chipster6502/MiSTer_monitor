@@ -114,6 +114,8 @@ int  KIOSK_HIDE_DELAY_MS                = 5000;   // [ui] kiosk_hide_delay_ms
 bool STANDBY_WHEN_OFFLINE         = true;   // [ui] standby_when_offline
 int  STANDBY_OFFLINE_MIN          = 3;      // [ui] standby_offline_min
 int  STANDBY_IDLE_MIN             = 0;      // [ui] standby_idle_min (0 = never)
+bool STANDBY_IN_MENU              = false;  // [ui] standby_in_menu
+int  STANDBY_MENU_DELAY_S         = 0;      // [ui] standby_menu_delay (seconds, 0 = at once)
 int  STANDBY_BRIGHTNESS           = 10;     // [ui] standby_brightness (0-255)
 int  STANDBY_DIM_PCT              = 100;    // [ui] standby_dim (percent of full colour)
 bool   STANDBY_SCREEN_CLOCK       = true;   // [ui] standby_screen (clock | minimal)
@@ -446,6 +448,7 @@ bool discoverMister(uint8_t attempts = 5, uint16_t replyWaitMs = 600) {
 #include "WebFiles.h"    // /files SD card browser (list, download, upload, delete)
 #define FIRMWARE_BOARD_ID "waveshare28"   // key of this build in firmware/manifest.json
 #include "FirmwareUpdate.h"   // /update page + install a newer release from the MiSTer
+#include "Weather.h"          // outside temperature for the standby clock
 
 // ========== SCREENSHOT SERVER ==========
 WebServer screenshotServer(8080);
@@ -2869,6 +2872,8 @@ void setup() {
   STANDBY_WHEN_OFFLINE        = appConfig.standbyWhenOffline;
   STANDBY_OFFLINE_MIN         = constrain(appConfig.standbyOfflineMin, 1, 1440);
   STANDBY_IDLE_MIN            = constrain(appConfig.standbyIdleMin, 0, 1440);
+  STANDBY_IN_MENU             = appConfig.standbyInMenu;
+  STANDBY_MENU_DELAY_S        = constrain(appConfig.standbyMenuDelay, 0, 86400);
   STANDBY_BRIGHTNESS          = constrain(appConfig.standbyBrightness, 0, 255);
   STANDBY_DIM_PCT             = constrain(appConfig.standbyDim, 5, 100);
   {
@@ -3019,6 +3024,11 @@ static bool          standbyFromImage     = false;  // image mode was up on entr
 static unsigned long standbyLastActivity  = 0;      // core/game change, touch or wake
 static bool          standbyOffline       = false;  // link currently down
 static unsigned long standbyOfflineSince  = 0;      // valid while standbyOffline
+static bool          standbyInMenu        = false;  // MiSTer online and sitting in its menu
+static unsigned long standbyMenuSince     = 0;      // valid while standbyInMenu
+static bool          standbyTouched       = false;  // a tap has been seen since boot
+static unsigned long standbyLastTouch     = 0;      // valid while standbyTouched
+#define STANDBY_MENU_TOUCH_GRACE_MS 30000UL        // a tap keeps the menu standby away this long
 static unsigned long standbyLastPoll      = 0;
 static bool          standbyPrevConnected = false;
 static String        standbySeenCore      = "";
@@ -3142,6 +3152,11 @@ static void standbyObserve(bool touched) {
   }
   standbySeenCore = currentCore;
   standbySeenGame = currentGame;
+  if (touched) { standbyTouched = true; standbyLastTouch = now; }
+
+  bool inMenu = connected && currentCore.equalsIgnoreCase("MENU");
+  if (inMenu && !standbyInMenu) standbyMenuSince = now;
+  standbyInMenu = inMenu;
 
   if (connected) {
     standbyOffline = false;
@@ -3162,6 +3177,16 @@ static bool standbyShouldEnter() {
       return true;
     }
   }
+  // In the menu: at once, or standby_menu_delay seconds after the menu came
+  // up. A tap holds it off for a while, so the screen can be looked at.
+  if (STANDBY_IN_MENU && standbyInMenu) {
+    unsigned long need  = (unsigned long)STANDBY_MENU_DELAY_S * 1000UL;
+    unsigned long grace = need > STANDBY_MENU_TOUCH_GRACE_MS ? need : STANDBY_MENU_TOUCH_GRACE_MS;
+    if (now - standbyMenuSince >= need && (!standbyTouched || now - standbyLastTouch >= grace)) {
+      Serial.println("[STANDBY] Enter: MiSTer in its menu");
+      return true;
+    }
+  }
   if (STANDBY_IDLE_MIN > 0 &&
       now - standbyLastActivity >= (unsigned long)STANDBY_IDLE_MIN * 60000UL) {
     Serial.printf("[STANDBY] Enter: no activity for %d min\n", STANDBY_IDLE_MIN);
@@ -3177,6 +3202,7 @@ static void standbyEnter() {
   standbySeenCore      = currentCore;
   standbySeenGame      = currentGame;
   standbyLastPoll      = millis();
+  weatherTick();                 // first temperature before the clock is drawn
 }
 
 // Standby runs its own state check: the regular ones sit further down the
@@ -3225,6 +3251,7 @@ static void standbyLeave(int reason) {
   unsigned long now = millis();
   standbyActive        = false;
   standbyLastActivity  = now;
+  if (reason == STANDBY_WAKE_TOUCH) { standbyTouched = true; standbyLastTouch = now; }
   standbyOfflineSince  = now;
   standbySeenCore      = currentCore;
   standbySeenGame      = currentGame;
@@ -3337,6 +3364,7 @@ static int  standbyDrawnAmPm   = -1;
 static int  standbyStatusDotX  = 0;         // where the status line put its dot
 static int  standbyStatusDotY  = 0;
 static int  standbyDrawnPulse  = -1;
+static int  standbyDrawnTemp   = -10000; // tenths of a degree; -9999 = none, -10000 = unset
 
 // The two lines under the rule scroll when they do not fit, with the same
 // helper and the same [ui] scroll timings as the rest of the interface.
@@ -3675,6 +3703,16 @@ static void drawStandbyMinimal(bool fullRedraw) {
         !drawStandbyLogoFile(STANDBY_LOGO_PATH, -1, false)) {
       drawStandbyLogoText(-1);
     }
+    // With the clock screen chosen, this is only the stand-in until the
+    // time is known: say so, or the wait looks like a fault.
+    if (STANDBY_SCREEN_CLOCK && standbyClockEnabled) {
+      const char* note = "waiting for time";
+      display.setTextSize(STANDBY_TEXT_SIZE);
+      display.setTextColor(standbyDimColor(0x4208), THEME_BLACK);
+      display.setCursor((TARGET_WIDTH - (int)strlen(note) * 6 * STANDBY_TEXT_SIZE) / 2,
+                        TARGET_HEIGHT - STANDBY_DOT_MARGIN - 4 * STANDBY_TEXT_SIZE);
+      display.print(note);
+    }
     standbyDrawnLink = -1;
   }
   drawStandbyLinkDot();
@@ -3749,6 +3787,41 @@ static void drawStandbyScrollLine(ScrollTextState* state, String* drawn, int x, 
   display.print(visible);
 }
 
+// Temperature for the date line, in tenths of a degree; -9999 when there is
+// nothing to show (no location in [weather], or no reading yet).
+static int standbyTempTenths() {
+  return (weatherConfigured() && weatherHaveTemp()) ? (int)lroundf(weatherTempValue() * 10.0f) : -9999;
+}
+
+// Centres "<date> / <temperature>" on the line, or the date alone when
+// tenths is -9999. Caller sets the font. The degree sign is a circle, so it
+// does not depend on the font having the glyph.
+#define STANDBY_DEG_R            3
+#define STANDBY_DEG_GAP          3
+
+static void drawStandbyDateLine(const char* date, int tenths, int y, uint16_t color) {
+  bool temp = tenths != -9999;
+  char num[16];
+  char unit[2] = { weatherUnitLetter(), 0 };
+  if (temp) snprintf(num, sizeof(num), " / %s%d.%d", tenths < 0 ? "-" : "", abs(tenths) / 10, abs(tenths) % 10);
+  int wDate = display.textWidth(date);
+  int wNum  = temp ? display.textWidth(num)  : 0;
+  int wUnit = temp ? display.textWidth(unit) : 0;
+  int total = wDate + (temp ? wNum + STANDBY_DEG_GAP + 2 * STANDBY_DEG_R + STANDBY_DEG_GAP + wUnit : 0);
+  int x = (TARGET_WIDTH - total) / 2;
+  uint16_t c = standbyDimColor(color);
+  display.setTextColor(c, THEME_BLACK);
+  display.setCursor(x, y);
+  display.print(date);
+  if (!temp) return;
+  display.setCursor(x + wDate, y);
+  display.print(num);
+  int cx = x + wDate + wNum + STANDBY_DEG_GAP + STANDBY_DEG_R;
+  display.drawCircle(cx, y + STANDBY_DEG_R + 1, STANDBY_DEG_R, c);
+  display.setCursor(cx + STANDBY_DEG_R + STANDBY_DEG_GAP, y);
+  display.print(unit);
+}
+
 static void drawStandbyClock(bool fullRedraw, const struct tm* t) {
   static const uint8_t segMask[10] = { 0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
   static const char* const dayName[7]    = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
@@ -3780,6 +3853,7 @@ static void drawStandbyClock(bool fullRedraw, const struct tm* t) {
     standbyDrawnAmPm  = -1;
     standbyDrawnLink  = -1;
     standbyDrawnPulse = -1;
+    standbyDrawnTemp  = -10000;
   }
   standbyBacklightWrite(255);
 
@@ -3806,18 +3880,19 @@ static void drawStandbyClock(bool fullRedraw, const struct tm* t) {
 
   // Date, in a proportional font. The default font goes back in afterwards:
   // the rest of the interface assumes it.
-  if (t->tm_yday != standbyDrawnDay) {
+  if (t->tm_yday != standbyDrawnDay || standbyTempTenths() != standbyDrawnTemp) {
+    // Double spaces on its own; single ones when the temperature shares the line.
+    int tenths = standbyTempTenths();
     char buf[24];
-    snprintf(buf, sizeof(buf), "%s  %d  %s  %d", dayName[t->tm_wday % 7], t->tm_mday,
-             monthName[t->tm_mon % 12], t->tm_year + 1900);
+    snprintf(buf, sizeof(buf), tenths != -9999 ? "%s %d %s %d" : "%s  %d  %s  %d",
+             dayName[t->tm_wday % 7], t->tm_mday, monthName[t->tm_mon % 12], t->tm_year + 1900);
     display.fillRect(0, STANDBY_DATE_Y - 2, TARGET_WIDTH, STANDBY_DATE_BAND_H, THEME_BLACK);
     display.setFont(&STANDBY_DATE_FONT);
     display.setTextSize(1);
-    display.setTextColor(standbyDimColor(THEME_YELLOW), THEME_BLACK);
-    display.setCursor((TARGET_WIDTH - (int)display.textWidth(buf)) / 2, STANDBY_DATE_Y);
-    display.print(buf);
+    drawStandbyDateLine(buf, tenths, STANDBY_DATE_Y, THEME_YELLOW);
     display.setFont(&fonts::Font0);
-    standbyDrawnDay = t->tm_yday;
+    standbyDrawnDay  = t->tm_yday;
+    standbyDrawnTemp = tenths;
   }
 
   // Link status line, with the running game on a line of its own under it.
@@ -3936,6 +4011,7 @@ void loop() {
     bool touched = Board.Touch.getDetail().wasPressed();
     if (standbyActive) {
       standbyPoll();
+      weatherTick();
       if (connected) pollRA();
       int wake = standbyWakeReason(touched);
       if (wake == STANDBY_WAKE_NONE) {

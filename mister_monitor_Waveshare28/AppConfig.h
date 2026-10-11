@@ -136,6 +136,8 @@ struct AppConfig {
   bool   standbyWhenOffline = true;
   int    standbyOfflineMin  = 3;
   int    standbyIdleMin     = 0;
+  bool   standbyInMenu      = false;  // [ui] standby_in_menu - standby while the MiSTer sits in its menu
+  int    standbyMenuDelay   = 0;      // [ui] standby_menu_delay - seconds in the menu first (0 = at once)
   int    standbyBrightness  = 10;
   int    standbyDim         = 100;
 
@@ -148,6 +150,7 @@ struct AppConfig {
 
   // --- Idle clock (Waveshare 2.8) ---------------------------------------------------
   // A desk-clock screen while the MiSTer is in its menu: time -> year -> face.
+  // The weather_* keys below are shared with the standby clock (Weather.h).
   bool   idleClock        = false;
   int    idleClockSeconds = 30;
   int    idleLcdLeft      = 0;
@@ -279,6 +282,8 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "standby_when_offline")   { cfg.standbyWhenOffline = parseBool(val); }
     else if (key == "standby_offline_min")    { cfg.standbyOfflineMin = val.toInt(); }
     else if (key == "standby_idle_min")       { cfg.standbyIdleMin = val.toInt(); }
+    else if (key == "standby_in_menu")        { cfg.standbyInMenu = parseBool(val); }
+    else if (key == "standby_menu_delay")     { cfg.standbyMenuDelay = val.toInt(); }
     else if (key == "standby_brightness")     { cfg.standbyBrightness = val.toInt(); }
     else if (key == "standby_dim")            { cfg.standbyDim = val.toInt(); }
     else if (key == "timezone")               { cfg.timezone = val; }
