@@ -487,6 +487,7 @@ seven boards unless noted.
 | | `force_core_redownload`, `force_game_redownload` | `false` | Fetch again even when a cached file exists. Set for one boot, then back to `false`. |
 | | `core_media_order`, `arcade_subsystem_media_order`, `arcade_media_order`, `game_media_order` | see above | Which image types are tried, and in what order — see [Artwork download order](#artwork-download-order). |
 | `[ui]` | `flip_display` | `false` | Rotate the display 180°, touch included, for cases that hold the board upside down. |
+| | `touch_invert_x`, `touch_invert_y` | `false` | **CYD 3.5" only.** Mirror a touch axis for boards whose touch layer reports it reversed, such as the LCDwiki E32R35T (`touch_invert_y=true`). |
 | | `kiosk_mode`, `kiosk_hide_delay_ms` | `false`, `5000` | Artwork on the whole panel, footer on tap. |
 | | `standby_screen`, `standby_when_offline`, `standby_offline_min`, `standby_idle_min`, `standby_in_menu`, `standby_menu_delay`, `standby_brightness`, `standby_dim` | `clock`, `true`, `3`, `0`, `false`, `0`, `10`, `100` | See [Standby and clock](#standby-and-clock). |
 | | `timezone`, `ntp_server`, `clock_24h` | blank, `pool.ntp.org`, `true` | The clock. |

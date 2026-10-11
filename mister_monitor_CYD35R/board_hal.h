@@ -181,14 +181,24 @@ struct BoardClass {
     // wasPressed() == true for exactly one update cycle on the press edge.
     Touch._current._pressed = (nowPressed && !_lastTouchState);
     if (nowPressed) {
+      // Mirrored after LovyanGFX applies the panel rotation, so the setting
+      // keeps its meaning with either flip_display value.
+      if (_invertX) tx = display.width()  - 1 - tx;
+      if (_invertY) ty = display.height() - 1 - ty;
       Touch._current.x = (int)tx;
       Touch._current.y = (int)ty;
     }
     _lastTouchState = nowPressed;
   }
 
+  // Screen-space touch mirroring from [ui] touch_invert_x / touch_invert_y.
+  // Set from setup() once config.ini has been read.
+  void setTouchInvert(bool x, bool y) { _invertX = x; _invertY = y; }
+
 private:
   bool _lastTouchState = false;
+  bool _invertX = false;
+  bool _invertY = false;
 public:
 };
 

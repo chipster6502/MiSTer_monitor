@@ -162,6 +162,10 @@ struct AppConfig {
   // upside down. Only 0 and 180 are offered: 90/270 would leave the panel in
   // portrait and the whole UI is laid out on a fixed 320x240 landscape grid.
   bool   flipDisplay        = false;
+  // true = mirror that touch axis on screen, for panels whose touch overlay
+  // reports it reversed. The image is not affected.
+  bool   touchInvertX       = false;
+  bool   touchInvertY       = false;
   int    scrollSpeedMs      = 300;
   int    scrollPauseStartMs = 2000;
   int    scrollPauseEndMs   = 3000;
@@ -285,6 +289,8 @@ inline void loadConfig(AppConfig& cfg) {
     else if (key == "scroll_pause_start_ms")  { cfg.scrollPauseStartMs = val.toInt(); }
     else if (key == "scroll_pause_end_ms")    { cfg.scrollPauseEndMs = val.toInt(); }
     else if (key == "flip_display")           { cfg.flipDisplay = parseBool(val); }
+    else if (key == "touch_invert_x")         { cfg.touchInvertX = parseBool(val); }
+    else if (key == "touch_invert_y")         { cfg.touchInvertY = parseBool(val); }
     // [ui] web config editor
     else if (key == "web_config")             { cfg.webConfig = parseBool(val); }
     else if (key == "web_password")           { cfg.webPassword = val; }

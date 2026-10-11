@@ -2809,6 +2809,14 @@ void setup() {
   // value lives on the SD card, which is not mounted that early in setup().
   applyDisplayFlip(appConfig.flipDisplay);
 
+  // [ui] touch_invert_x / touch_invert_y - mirror a touch axis for panels
+  // whose overlay reports it reversed. Independent of flip_display.
+  Board.setTouchInvert(appConfig.touchInvertX, appConfig.touchInvertY);
+  if (appConfig.touchInvertX || appConfig.touchInvertY) {
+    Serial.printf("[TOUCH] Inverted axes: x=%d y=%d\n",
+                  appConfig.touchInvertX, appConfig.touchInvertY);
+  }
+
   ssid     = appConfig.ssid.c_str();
   password = appConfig.wifiPass.c_str();
   // MiSTer IP from config.ini. When set it pins the display to that server;
