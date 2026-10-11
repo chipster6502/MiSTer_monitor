@@ -85,7 +85,9 @@
      browser tool can:</p>
   <ol>
     <li>Download
-      <a href="./mister_monitor_guition10inch_v3.bin" download>mister_monitor_guition10inch_v3.bin</a>.</li>
+      <a href="./mister_monitor_guition10inch_v3.bin" download
+         data-goatcounter-click="download/guition10inch-v3"
+         data-goatcounter-title="Download guition10inch-v3">mister_monitor_guition10inch_v3.bin</a>.</li>
     <li>Open <a href="https://espressif.github.io/esptool-js/">espressif.github.io/esptool-js</a>
       and set <strong>Baudrate</strong> to <strong>115200</strong> before
       connecting.</li>
@@ -110,6 +112,42 @@
     <a href="https://github.com/chipster6502/MiSTer_monitor/blob/main/LICENSE">LICENSE</a>
     and
     <a href="https://github.com/chipster6502/MiSTer_monitor/blob/main/TRADEMARK.md">TRADEMARK.md</a>.
+    To learn which boards are in use, this page counts visits, flashes and
+    firmware downloads per board with
+    <a href="https://www.goatcounter.com/">GoatCounter</a>, anonymously and
+    without cookies.
   </p>
+
+  <!-- Versioned and integrity-checked: third-party code on a page that
+       writes to the user's device must not change unnoticed. -->
+  <script data-goatcounter="https://mistermonitor.goatcounter.com/count"
+          async src="https://gc.zgo.at/count.v5.js"
+          crossorigin="anonymous"
+          integrity="sha384-atnOLvQb9t+jTSipvd75X2yginT4PjVbqDdlJAmxMm+wYElFmeR6EmLP5bYeoRVQ"></script>
+  <script>
+    (function () {
+      // ESP Web Tools fires no event for the flash result; it only exists as
+      // state of the install dialog it appends to the page, hence the polling.
+      var last;
+      setInterval(function () {
+        var dlg = document.querySelector("ewt-install-dialog");
+        var st = dlg && dlg._installState;
+        // Every update is a new object: comparing identity counts each flash
+        // once, however long its result stays on screen.
+        if (!st || st === last) return;
+        last = st;
+        var state = String(st.state).toLowerCase();
+        var kind = state === "finished" ? "ok" : state === "error" ? "error" : "";
+        if (!kind || !window.goatcounter || !window.goatcounter.count) return;
+        var board = String(dlg.manifestPath || "")
+          .replace(/^.*manifest-/, "").replace(/\.json$/, "") || "unknown";
+        window.goatcounter.count({
+          path: "flash-" + kind + "/" + board,
+          title: "Flash " + kind + " " + board,
+          event: true,
+        });
+      }, 1000);
+    })();
+  </script>
 </body>
 </html>
