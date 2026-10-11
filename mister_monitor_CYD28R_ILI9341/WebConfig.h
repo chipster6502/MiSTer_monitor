@@ -5,11 +5,16 @@
 // =============================================================================
 // WebConfig.h  —  Web-based config.ini editor and reboot endpoint
 // =============================================================================
-// Serves three routes on the existing device web server (port 8080):
+// Serves four routes on the existing device web server (port 8080):
 //
-//   GET  /config   — /config.ini from the microSD in a plain <textarea>
-//   POST /config   — writes the textarea content back to the card (safe write)
-//   POST /reboot   — replies first, then ESP.restart()
+//   GET  /config         — /config.ini from the microSD in a plain <textarea>
+//   POST /config/upload  — the text as a file part, streamed to the card in
+//                          small chunks (safe write); what the editor and
+//                          settings.html use
+//   POST /config         — the same from a plain url-encoded form; kept as the
+//                          fallback for browsers without script (see the note
+//                          at handleWebConfigSave)
+//   POST /reboot         — replies first, then ESP.restart()
 //
 // Integration (per board, in setup(), after WiFi is connected):
 //   * Boards that start the screenshot server (CYD28 x2, Tab5, Guition10inch):
@@ -36,7 +41,7 @@
 // instance and appConfig, so no per-board variant is needed.
 //
 // config.ini keys (parsed in AppConfig.h):
-//   [ui] web_config   = true / false — false disables all three routes
+//   [ui] web_config   = true / false — false disables all four routes
 //   [ui] web_password =              — non-empty enables HTTP Basic Auth
 //                                      (user "admin", this value as password)
 // =============================================================================
@@ -55,11 +60,10 @@
 extern WebServer screenshotServer;   // defined in the sketch (port 8080)
 extern AppConfig appConfig;          // defined in the sketch, loaded at boot
 
-// Measured config.ini sizes as shipped: ~9.9 KB (Tab5/CYD35 layouts) and
-// ~10.5 KB (CYD28 layouts). 32 KB leaves 3x headroom for user comments.
-// Note: WebServer has already buffered the POST body in RAM by the time the
-// handler runs, so this cap protects the SD write and produces a clear error
-// — it cannot prevent the initial allocation.
+// Measured config.ini sizes as shipped: ~10-11 KB. 32 KB leaves 3x headroom
+// for user comments. On the upload route the cap is enforced chunk by chunk;
+// on the form route WebServer has already buffered the body in RAM by the
+// time the handler runs, so there it only protects the SD write.
 static const size_t WEBCONFIG_MAX_INI_BYTES = 32768;
 
 // -----------------------------------------------------------------------------
@@ -96,6 +100,22 @@ static const char WEBCONFIG_EDITOR_TAIL[] PROGMEM = R"rawliteral(</textarea>
 <p><a href="/files">Browse the SD card</a></p>
 <p class="note">Changes take effect after a reboot. The previous file is kept on the
 card as config.ini.bak.</p>
+<script>
+// Send the text as a file part to /config/upload, which the firmware streams
+// to the card in small chunks. The plain form POST stays as the no-script fallback.
+document.querySelector('form').addEventListener('submit', async function (e) {
+  e.preventDefault();
+  var b = this.querySelector('button'); b.disabled = true;
+  var fd = new FormData();
+  fd.append('ini', new Blob([this.querySelector('textarea').value], {type: 'text/plain'}), 'config.ini');
+  try {
+    var r = await fetch('/config/upload', {method: 'POST', body: fd});
+    var t = await r.text();
+    if (!r.ok) throw new Error(t);
+    document.open(); document.write(t); document.close();
+  } catch (err) { alert('Save failed: ' + err.message); b.disabled = false; }
+});
+</script>
 </body></html>)rawliteral";
 
 static const char WEBCONFIG_SAVED_PAGE[] PROGMEM = R"rawliteral(<!DOCTYPE html><html><head>
@@ -190,10 +210,120 @@ static void handleWebConfigGet() {
 }
 
 // -----------------------------------------------------------------------------
-// POST /config — safe write:
+// Safe write, shared by both save routes:
 //   1) content -> /config.ini.new (verified length)
 //   2) /config.ini -> /config.ini.bak   (remove .bak first: f_rename refuses
 //   3) /config.ini.new -> /config.ini    existing destinations)
+// Steps 2) and 3) live here; each route does step 1) its own way.
+// -----------------------------------------------------------------------------
+static bool webConfigPromoteNew(String& err) {
+  // Rotate current -> .bak. If the rename is refused with the file still
+  // present (unusual), drop the backup rather than fail the save.
+  SD.remove("/config.ini.bak");
+  if (SD.exists("/config.ini") && !SD.rename("/config.ini", "/config.ini.bak")) {
+    Serial.println("[WEBCONFIG] rename to .bak refused - saving without backup");
+    SD.remove("/config.ini");
+  }
+  // Promote the scratch file.
+  if (!SD.rename("/config.ini.new", "/config.ini")) {
+    err = F("Rename failed - new content is on the card as /config.ini.new");
+    return false;
+  }
+  return true;
+}
+
+// -----------------------------------------------------------------------------
+// POST /config/upload — the editor (and settings.html) send the text as a
+// file part. WebServer hands it over in chunks of about 1.4 KB that go
+// straight to /config.ini.new; nothing is kept in RAM beyond that chunk.
+// Same shape as the browser upload in FirmwareUpdate.h.
+// -----------------------------------------------------------------------------
+static File   cfgUploadFile;
+static size_t cfgUploadBytes = 0;
+static String cfgUploadError;
+static bool   cfgUploadOk    = false;
+
+static void cfgUploadFail(const __FlashStringHelper* why) {
+  cfgUploadError = why;
+  if (cfgUploadFile) cfgUploadFile.close();
+  SD.remove("/config.ini.new");
+}
+
+static void handleWebConfigUploadChunk() {
+  HTTPUpload& up = screenshotServer.upload();
+  switch (up.status) {
+    case UPLOAD_FILE_START:
+      cfgUploadError = "";
+      cfgUploadOk    = false;
+      cfgUploadBytes = 0;
+      if (appConfig.webPassword.length() > 0 &&
+          !screenshotServer.authenticate("admin", appConfig.webPassword.c_str())) {
+        cfgUploadError = F("Authentication required");
+        return;
+      }
+      // FILE_WRITE truncates on the ESP32 FS layer, but remove first anyway
+      // so a stale .new from an earlier failure can't mix in.
+      SD.remove("/config.ini.new");
+      cfgUploadFile = SD.open("/config.ini.new", FILE_WRITE);
+      if (!cfgUploadFile) cfgUploadError = F("Cannot open /config.ini.new for writing");
+      break;
+
+    case UPLOAD_FILE_WRITE:
+      if (cfgUploadError.length() > 0) return;
+      if (cfgUploadBytes + up.currentSize > WEBCONFIG_MAX_INI_BYTES) {
+        cfgUploadFail(F("config.ini too large (max 32 KB)"));
+        return;
+      }
+      if (cfgUploadFile.write(up.buf, up.currentSize) != up.currentSize) {
+        cfgUploadFail(F("Short write to SD card - config.ini left untouched"));
+        return;
+      }
+      cfgUploadBytes += up.currentSize;
+      break;
+
+    case UPLOAD_FILE_END:
+      if (cfgUploadError.length() > 0) return;
+      cfgUploadFile.close();
+      if (cfgUploadBytes != up.totalSize) {
+        cfgUploadFail(F("Short write to SD card - config.ini left untouched"));
+        return;
+      }
+      cfgUploadOk = true;
+      break;
+
+    case UPLOAD_FILE_ABORTED:
+      cfgUploadFail(F("Upload aborted"));
+      break;
+  }
+}
+
+static void handleWebConfigUploadDone() {
+  if (!webConfigAuthOk()) return;
+  if (cfgUploadError.length() > 0 || !cfgUploadOk) {
+    Serial.printf("[WEBCONFIG] Save failed: %s\n", cfgUploadError.c_str());
+    screenshotServer.send(500, "text/plain",
+        cfgUploadError.length() ? cfgUploadError : String("Upload failed"));
+    return;
+  }
+  String err;
+  if (!webConfigPromoteNew(err)) {
+    screenshotServer.send(500, "text/plain", err);
+    return;
+  }
+  Serial.printf("[WEBCONFIG] Saved /config.ini (%u bytes)\n", (unsigned)cfgUploadBytes);
+  screenshotServer.send_P(200, "text/html", WEBCONFIG_SAVED_PAGE);
+}
+
+// -----------------------------------------------------------------------------
+// POST /config — the url-encoded form, kept for browsers without script.
+//
+// Known limit: WebServer decodes a url-encoded body into Strings that grow
+// one character at a time and silently stop growing when the heap cannot
+// extend them, with the raw body, its copy and the decoded value all alive
+// at once (the encoding alone makes a config.ini about 1.5x larger). On the
+// boards without PSRAM a ~10 KB file can therefore arrive with its tail cut
+// off and be written as such. That is why the editor submits through
+// /config/upload instead; this route stays for the no-script case only.
 // -----------------------------------------------------------------------------
 static void handleWebConfigSave() {
   if (!webConfigAuthOk()) return;
@@ -208,8 +338,6 @@ static void handleWebConfigSave() {
     return;
   }
 
-  // 1) Scratch file first. FILE_WRITE truncates on the ESP32 FS layer, but
-  //    remove first anyway so a stale .new from an earlier failure can't mix in.
   SD.remove("/config.ini.new");
   File f = SD.open("/config.ini.new", FILE_WRITE);
   if (!f) {
@@ -225,21 +353,11 @@ static void handleWebConfigSave() {
     return;
   }
 
-  // 2) Rotate current -> .bak. If the rename is refused with the file still
-  //    present (unusual), drop the backup rather than fail the save.
-  SD.remove("/config.ini.bak");
-  if (SD.exists("/config.ini") && !SD.rename("/config.ini", "/config.ini.bak")) {
-    Serial.println("[WEBCONFIG] rename to .bak refused - saving without backup");
-    SD.remove("/config.ini");
-  }
-
-  // 3) Promote the scratch file.
-  if (!SD.rename("/config.ini.new", "/config.ini")) {
-    screenshotServer.send(500, "text/plain",
-        "Rename failed - new content is on the card as /config.ini.new");
+  String err;
+  if (!webConfigPromoteNew(err)) {
+    screenshotServer.send(500, "text/plain", err);
     return;
   }
-
   Serial.printf("[WEBCONFIG] Saved /config.ini (%u bytes)\n", (unsigned)written);
   screenshotServer.send_P(200, "text/html", WEBCONFIG_SAVED_PAGE);
 }
@@ -278,9 +396,10 @@ inline void registerWebConfigRoutes() {
     Serial.println("[WEBCONFIG] Disabled via [ui] web_config=false");
     return;
   }
-  screenshotServer.on("/config", HTTP_GET,  handleWebConfigGet);
-  screenshotServer.on("/config", HTTP_POST, handleWebConfigSave);
-  screenshotServer.on("/reboot", HTTP_POST, handleWebConfigReboot);
+  screenshotServer.on("/config",        HTTP_GET,  handleWebConfigGet);
+  screenshotServer.on("/config",        HTTP_POST, handleWebConfigSave);
+  screenshotServer.on("/config/upload", HTTP_POST, handleWebConfigUploadDone, handleWebConfigUploadChunk);
+  screenshotServer.on("/reboot",        HTTP_POST, handleWebConfigReboot);
   Serial.printf("[WEBCONFIG] Editor at http://%s:8080/config\n",
                 WiFi.localIP().toString().c_str());
 }
