@@ -604,24 +604,45 @@ def _neogeo_cart_or_cd(game_path):
     return 'Neo-Geo'
 
 
+def _identity_changed(core, game, game_path, is_arcade):
+    """Caller holds _state_lock."""
+    return (_state['core']      != core or
+            _state['game']      != game or
+            _state['game_path'] != game_path or
+            _state['is_arcade'] != is_arcade)
+
+
 def _commit_state(core, game, game_path, is_arcade, event, core_raw='', game_system=''):
     """
     Atomically commits a derived state. Bumps 'seq' and invalidates the
     rom-details cache ONLY when the identity actually changed.
     Returns True if the state changed.
+
+    The pack images are resolved BEFORE the identity is published, and land in
+    the same locked write as the new seq. The display polls the state and asks
+    for /media/* the moment it sees a new game; resolving afterwards left a
+    window of a few hundred ms (three index.tsv loads) in which /media/artwork
+    answered 404 for an image the pack has, and the display settled for the
+    screenshot further down its media order.
     """
     with _state_lock:
-        changed = (_state['core']      != core or
-                   _state['game']      != game or
-                   _state['game_path'] != game_path or
-                   _state['is_arcade'] != is_arcade)
+        changed = _identity_changed(core, game, game_path, is_arcade)
         # Refreshed even when the identity did not change, and kept OUT of
         # 'changed': a raw-only flip must not bump seq nor wipe rom_details.
         _state['core_raw'] = core_raw
         # Derived from the same game_path as this identity, so rewriting it
         # unconditionally is free and can never disagree.
         _state['game_system'] = game_system
-        if changed:
+        seq_now = _state['seq']
+    if not changed:
+        print(f"♻️ Evaluation confirmed current state (seq={seq_now}) — rom cache preserved")
+        return False
+
+    # Disk work outside the lock: index.tsv loads, one per media kind.
+    paths = _pack_paths_for_state(game_path, is_arcade, game_system, core)
+
+    with _state_lock:
+        if _identity_changed(core, game, game_path, is_arcade):
             _state['core']              = core
             _state['system_name']       = core
             _state['game']              = game
@@ -632,15 +653,14 @@ def _commit_state(core, game, game_path, is_arcade, event, core_raw='', game_sys
             _state['seq']              += 1
             _state['updated_at']        = time.time()
             _state['last_event']        = event
+        # else: another thread committed this same identity meanwhile; its seq
+        # stands and the paths below are as good as its own.
         seq_now = _state['seq']
-    if changed:
-        # Resolve the pack image now: the display fetches artwork before
-        # rom-details, so a later resolution would serve the previous game's.
-        _pack_resolve_for_state(game_path, is_arcade, game_system, core, seq_now)
-        print(f"✅ State committed (seq={seq_now}, {event}): core='{core}' game='{game}' arcade={is_arcade}")
-    else:
-        print(f"♻️ Evaluation confirmed current state (seq={seq_now}) — rom cache preserved")
-    return changed
+        for media, path in paths.items():
+            _state[media + '_path'] = path
+            _state[media + '_seq'] = seq_now
+    print(f"✅ State committed (seq={seq_now}, {event}): core='{core}' game='{game}' arcade={is_arcade}")
+    return True
 
 # --- Background watcher thread: monitors /tmp/ files via inotifywait -------
 _WATCHED_FILES = [
@@ -1727,9 +1747,11 @@ def _pack_key_from_state(game_path, is_arcade):
     return keys
 
 
-def _pack_resolve_for_state(game_path, is_arcade, game_system, core, seq):
-    """Resolves every pack image at state-commit time and records which seq
-    they belong to, so /media/* is correct before the display asks."""
+def _pack_paths_for_state(game_path, is_arcade, game_system, core):
+    """Resolves every pack image for an identity about to be committed:
+    {media: path or ''}. Pure lookup, no state writes; _commit_state stores
+    the result together with the new seq, so /media/* is correct from the
+    first moment the display can ask."""
     paths = dict.fromkeys(_PACK_MEDIA, '')
     try:
         folders = (['Arcade'] if is_arcade
@@ -1745,10 +1767,7 @@ def _pack_resolve_for_state(game_path, is_arcade, game_system, core, seq):
                           % (media, system_folder, resolved, ext))
     except Exception as e:
         print("\u26a0\ufe0f local artwork lookup failed: %s" % e)
-    with _state_lock:
-        for media, path in paths.items():
-            _state[media + '_path'] = path
-            _state[media + '_seq'] = seq
+    return paths
 
 
 def _pack_annotate(result):
