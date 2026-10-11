@@ -10,7 +10,7 @@ game artwork, system information, storage status, and network details in real ti
 - [Supported Hardware](#supported-hardware)
 - [Requirements](#requirements)
 - [Installation](#installation)
-- [3D-printable stand](#3d-printable-stand)
+- [3D-printable stands](#3d-printable-stands)
 - [Architecture](#architecture)
 - [M5Stack Tab5 screenshots](#m5stack-tab5-screenshots-1280x720)
 - [Cheap Yellow Display screenshots](#28-cheap-yellow-display-cyd-screenshots-320x240)
@@ -32,9 +32,9 @@ console and computer games via the MiSTer Remote web application.*
 
 - **Artwork with no scraping** — game images come from the [MiSTer Artwork Pack](https://github.com/chipster6502/MiSTer_artwork_pack) installed through *Update All* (39 systems, three styles, ready on the MiSTer's SD card), and anything the pack does not cover — core images, games outside it — is fetched on demand from ScreenScraper as you play.
 - **RetroAchievements** — live progress, points and hardcore breakdown, the full trophy list with per-achievement descriptions, and an unlock popup the moment an achievement triggers. View-only on a stock MiSTer; pairs with the [odelot/Main_MiSTer](https://github.com/odelot/Main_MiSTer) RetroAchievements fork to record unlocks.
-- **Game Info panel** — "Now Playing" metadata (year, developer, publisher, genre, players, rating, synopsis), cached on the SD card.
+- **Game Info panel** — "Now Playing" metadata (year, developer, publisher, genre, players, rating, synopsis) in your preferred language, cached on the SD card.
 - **Reliable load detection** — an event-driven server state machine tells real game loads from OSD navigation and delivers them to the display atomically.
-- **Detection from multiple sources** — recognises games loaded from the OSD, the MiSTer Remote web app, and Super Attract Mode (SAM); auto-discovers the MiSTer on the LAN.
+- **Detection from multiple sources** — recognises games loaded from the OSD, the MiSTer Remote web app, Super Attract Mode (SAM), and front ends such as [Zaparoo Frontend](https://zaparoo.org/docs/frontend/), [Console Mode](https://github.com/Retro-Remake/ConsoleMode_Distribution) and [MisterZine](https://github.com/matijaerceg/misterzine-on-device); auto-discovers the MiSTer on the LAN.
 - **System monitor** — CPU, memory, uptime, storage, network, and USB device panels, with touch navigation.
 - **Web interface** — edit `config.ini` and browse, upload or delete files on the display's SD card from any browser on your network, at `http://<Display-IP>:8080`. Handy for swapping artwork or changing a setting without pulling the card.
 - **Standby with a clock** — when the MiSTer is switched off, or sits in its menu, the display dims to a standby screen: a large seven-segment clock with the date, the outside temperature and the MiSTer's state, or just the MiSTer logo. It wakes on its own when the MiSTer comes back or a core loads, and at a touch.
@@ -106,6 +106,7 @@ See `docs/PORTING.md` for porting guidelines.
 - Supported ESP32-based display
 - MiSTer FPGA with network connectivity
 - microSD card for the display (image storage), formatted as **FAT32** — exFAT is not read by the display
+- USB power for the display — a phone charger or a powered USB hub is recommended rather than a USB port on the MiSTer: depending on the setup, the MiSTer's ports may not supply enough current for the display's WiFi, which can leave it stuck on the boot screen
 
 **Software**
 - [ScreenScraper](https://www.screenscraper.fr) member account (free, instant signup)
@@ -143,21 +144,36 @@ procedure, the web flasher and ScreenScraper account setup, or the illustrated
 **[setup guide PDF](docs/MiSTer_Monitor_Setup_Guide.pdf)** if you prefer a
 printable walkthrough.
 
-## 3D-printable stand
+## 3D-printable stands
 
-A printable stand for the M5Stack Tab5 and the 3.5" Cheap Yellow Display are
+Printable stands for the M5Stack Tab5 and the 3.5" Cheap Yellow Display are
 included in the [`3d-printing/`](3d-printing/) folder. GitHub renders STL files in the
-browser, so you can preview the model before downloading.
+browser, so you can preview the model before downloading. The other stands
+are linked from their authors' pages.
 
-You can find the model files for the (truly) 2,8" Cheap Yellow Display (horizontal stand) [here](https://www.printables.com/model/708127-cheap-yellow-display-cyd-horizontal-stand-m36-self/files)
+**Included in the repository**
 
-The Tab5 STL file is ["M5Stack Tab5 Simple Stand"](https://makerworld.com/en/models/1403228-m5stack-tab5-simple-stand)
-by [hkawakami](https://makerworld.com/es/@hkawakami), licensed under
-[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+- **M5Stack Tab5** — ["M5Stack Tab5 Simple Stand"](https://makerworld.com/en/models/1403228-m5stack-tab5-simple-stand)
+  by [hkawakami](https://makerworld.com/es/@hkawakami), licensed under
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+- **3.5" Cheap Yellow Display** — ["Stand for Cheap Yellow Display 3.5 inch"](https://www.printables.com/model/1050896-stand-for-cheap-yellow-display-35-inch)
+  by [uli_2035](https://www.printables.com/@uli_2035_28350), licensed under
+  [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
 
-The 3.5" CYD stand STL is ["Stand for Cheap Yellow Display 3.5 inch"](https://www.printables.com/model/1050896-stand-for-cheap-yellow-display-35-inch)
-by [uli_2035](https://www.printables.com/@uli_2035_28350), licensed under
-[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
+**On the authors' pages**
+
+- **M5Stack Tab5, with its battery** — ["【M5STACK】M5TAB5 desktop stand"](https://makerworld.com/en/models/2553631)
+  by [user_2566827690](https://makerworld.com/en/@user_2566827690): a desktop
+  stand with a bay for the Tab5's NP-F550 battery.
+- **Guition JC8012P4A1C, tilted desktop stand** — ["Odin 2 Portal Stand"](https://www.printables.com/model/1417821-odin-2-portal-stand)
+  by [Martin Mesa](https://www.printables.com/@MartinMesa_294468). Designed
+  for the AYN Odin 2 Portal handheld, but the 10.1" Guition sits in it just
+  as well.
+- **Guition JC8012P4A1C, wall mount** — ["Guition 10.1" ESP32P4 / JC8012P4A1C wall mount"](https://www.thingiverse.com/thing:7208630)
+  by 8bitmcu: a flush wall bracket in landscape and portrait versions, with
+  a cable hole; needs six M2.5×8 mm screws.
+- **2.8" Cheap Yellow Display, horizontal stand** — ["Cheap Yellow Display (CYD) horizontal stand M3*6 self-tapping"](https://www.printables.com/model/708127-cheap-yellow-display-cyd-horizontal-stand-m36-self)
+  by [aibohphobia](https://www.printables.com/@aibohphobia).
 
 ## Architecture
 
@@ -242,7 +258,7 @@ Two components work together:
 - ~~**Enriched game metadata screen** — "Now Playing" view with synopsis, year, publisher, developer, genre.~~ *(shipped: Game Info panel)*
 - **Game Manuals access** — Show manuals for the system or running game from the ⁠Game Manuals Databases by *Moondandy*.
 - **Regional cover comparison** — Show EU/US/JP versions of the same game's artwork.
-- **Multilanguage descriptions** — Info in the user's preferred language via ScreenScraper.
+- ~~**Multilanguage descriptions** — Info in the user's preferred language via ScreenScraper.~~ *(shipped: `info_lang` in the Game Info panel)*
 
 ### AI-powered context layer
 
@@ -269,7 +285,7 @@ Two components work together:
 
 ### Other
 
-- Apply scaling for small images (rarely needed).
+- ~~Apply scaling for small images.~~ *(shipped: `image_upscale`)*
 
 ## License
 
@@ -283,8 +299,9 @@ MiSTer Monitor uses a split free-software license:
 See [LICENSE](LICENSE) for the overview, including the terms for the **official
 pre-built binaries**: they embed private ScreenScraper developer credentials and
 may not be redistributed commercially — commercial builds must be compiled from
-source with your own credentials. The 3D-printable stands are third-party
-designs under their own Creative Commons licenses (see above). The project name
+source with your own credentials. The 3D-printable stands included in the
+repository are third-party designs under their own Creative Commons licenses
+(see above). The project name
 and logo are covered by the [trademark policy](TRADEMARK.md), which also
 describes how commercial use can be granted in exchange for contributions.
 
