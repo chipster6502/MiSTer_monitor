@@ -37,8 +37,8 @@ console and computer games via the MiSTer Remote web application.*
 - **Detection from multiple sources** — recognises games loaded from the OSD, the MiSTer Remote web app, and Super Attract Mode (SAM); auto-discovers the MiSTer on the LAN.
 - **System monitor** — CPU, memory, uptime, storage, network, and USB device panels, with touch navigation.
 - **Web interface** — edit `config.ini` and browse, upload or delete files on the display's SD card from any browser on your network, at `http://<Display-IP>:8080`. Handy for swapping artwork or changing a setting without pulling the card.
-- **Standby with a clock** — when the MiSTer is switched off the display dims to a standby screen: a large seven-segment clock with the date and the MiSTer's state, or just the MiSTer logo. It wakes on its own when the MiSTer comes back, and at a touch.
-- **Kiosk mode and display options** — give the whole panel to the artwork, keep it on the game or on the system instead of alternating (`image_mode`), or upscale small artwork to fill the larger panels. All from `config.ini`; see [`docs/configuration.md`](docs/configuration.md).
+- **Standby with a clock** — when the MiSTer is switched off, or sits in its menu, the display dims to a standby screen: a large seven-segment clock with the date, the outside temperature and the MiSTer's state, or just the MiSTer logo. It wakes on its own when the MiSTer comes back or a core loads, and at a touch.
+- **Kiosk mode and display options** — give the whole panel to the artwork, keep it on the game or on the system instead of alternating, or cycle through the game's screenshot, title screen and box (`image_mode`), or upscale small artwork to fill the larger panels. All from `config.ini`; see [`docs/configuration.md`](docs/configuration.md).
 
 <details>
 <summary><b>More detail</b></summary>
@@ -56,7 +56,7 @@ console and computer games via the MiSTer Remote web application.*
 - **Manual SCAN button** on the image screen for the rare case where the CRC couldn't be detected automatically.
 - **Automatic MiSTer discovery** via UDP broadcast (no static IP needed), with reconnection if the MiSTer isn't ready at boot. With several MiSTers on the network, `ip=` in `config.ini` pins each display to its own MiSTer.
 - **Screenshot capture** of the display over HTTP on the local network (Tab5, Guition and 2.8" CYD boards; not on 3.5"/ST7796 panels, which have no SPI readback).
-- **Standby details** — goes to standby after the MiSTer has been unreachable for a few minutes, and optionally after a period with no activity; the time comes from NTP with a friendly `timezone` name, 12- or 24-hour. The logo breathes on the Tab5 and the Guition, the backlight on the CYD boards.
+- **Standby details** — goes to standby after the MiSTer has been unreachable for a few minutes, optionally after a period with no activity, and optionally whenever the MiSTer sits in its menu; the time comes from NTP with a friendly `timezone` name, 12- or 24-hour, and the outside temperature from Open-Meteo once a place is set. The logo breathes on the Tab5 and the Guition, the backlight on the CYD boards.
 - **System artwork of your choice** — `core_media_order` drives system images, including the `screenmarquee` style that fills the frame; `screenshot` fetches an in-game shot and `titlescreen` the title screen.
 - **Sound options on the Tab5** — mute the boot jingle and touch beeps, or set the volume.
 
@@ -72,6 +72,7 @@ console and computer games via the MiSTer Remote web application.*
 | [Cheap Yellow Display 2.8" — ST7789, usually 2-USB (ESP32-2432S028)](https://a.aliexpress.com/_EJ4r0Hg) | 320×240 ST7789 · resistive | Stable |
 | [Cheap Yellow Display 3.5" capacitive (ESP32-3248S035)](https://a.aliexpress.com/_EJ4r0Hg) | 480×320 ST7796 · GT911 capacitive | Stable |
 | [Cheap Yellow Display 3.5" resistive (ESP32-3248S035)](https://a.aliexpress.com/_EJ4r0Hg) | 480×320 ST7796 · XPT2046 resistive | Stable |
+| [Waveshare ESP32-S3-Touch-LCD-2.8 V2](https://www.waveshare.com/esp32-s3-touch-lcd-2.8.htm) | 2.8" 320×240 ST7789 · CST3530 capacitive | Beta — touch not yet verified on hardware. Port by Rick van Soest |
 
 The two 2.8" variants look identical but use different panel controllers, and
 the silkscreen doesn't name them. The USB port count is a **hint, not a rule**:
@@ -231,6 +232,7 @@ Two components work together:
 - ~**Cheap Yellow Display (CYD)** — Port to the widely available ESP32-2432S028R family.~
 - ~~**Guition 10.1" ESP32-P4 display** — Port to the Guition JC8012P4A1 family (ESP32-P4 + C6, MIPI-DSI capacitive touchscreen).~~ *(shipped in v2.10.0)*
 - **5" CYD variant** - Port to the ESP32-S3-8048S050C-I family (800x480 touchscreen).
+- ~~**Waveshare ESP32-S3-Touch-LCD-2.8 V2** — Port contributed by Rick van Soest.~~ *(beta)*
 - **M5Stack Core Basic support** — Port to the original Core Basic (ESP32, 320×240, physical buttons).
 - **M5Stack Core S3 support** — Port to the Core S3 (ESP32-S3, 320×240 touchscreen).
 

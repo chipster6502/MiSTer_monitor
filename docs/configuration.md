@@ -177,7 +177,7 @@ what it shows and how:
 
 | Key | Default | What it does |
 |---|---|---|
-| `image_mode` | `rotate` | `rotate` alternates game artwork and system artwork; `game` and `system` stay on one and never switch. A game with no artwork of its own still falls back to the system image. |
+| `image_mode` | `rotate` | `rotate` alternates game artwork and system artwork; `game` and `system` stay on one and never switch; `cycle` stays on the game and alternates its screenshot, title screen and box, all from the artwork packs on the MiSTer (the `<system>_snap` and `<system>_title` pack databases are needed; kinds the pack does not have are skipped). A game with no artwork of its own still falls back to the system image. |
 | `core_image_timeout` | `30000` | How long (ms) each slide stays up in `rotate` mode. |
 | `system_image_timeout` | `0` | A separate dwell (ms) for the system slide. `0` means the same as `core_image_timeout`. |
 | `info_in_rotation` | `false` | Adds the GAME INFO panel to the rotation as a third slide: game image → game info → system image. No effect with `image_mode=game` or `system`. |
@@ -186,6 +186,7 @@ what it shows and how:
 | `screenshot_scaling` | `fill` | How screenshots and title screens fill the display area. `fill` always fills it: smaller images grow with a sharp bilinear scale (crisp pixels, slight softening on some edges), larger ones shrink by averaging. `integer` grows only by whole multiples, every pixel square, so images can stay small where the area is not quite twice their size. Box art is not affected. |
 | `kiosk_mode` | `false` | Gives the whole panel to the artwork and hides the footer strip. |
 | `kiosk_hide_delay_ms` | `5000` | How long the footer stays up after a tap in kiosk mode (500–600000). |
+| `art_inset_left` | `0` | **Waveshare 2.8" only.** Pixels kept free on the left edge (0–120); the artwork is fitted and centred in the rest. For cases whose window is not centred on the panel — a RayCue Maclock needs about 40. Texts and the footer are not moved. |
 
 **Upscaling** is most visible on the Tab5 and the Guition, whose panels are
 larger than the source art: a wheel is 600×300 whatever the game or system, so
@@ -209,15 +210,18 @@ then back to `false` — or delete the images you care about from the
 ## Standby and clock
 
 When the MiSTer is switched off there is nothing to show, so the display dims
-to a standby screen. It leaves standby on its own as soon as the MiSTer answers
-again or the core or game changes, and at a touch.
+to a standby screen; it can do the same while the MiSTer sits in its menu. It
+leaves standby on its own as soon as the MiSTer answers again or the core or
+game changes, and at a touch.
 
 | Key | Default | What it does |
 |---|---|---|
-| `standby_screen` | `clock` | `clock`: a large seven-segment clock, the date, whether the MiSTer answers, and the core and game it is running. `minimal`: the MiSTer logo and a small state dot, cyan while the MiSTer answers and orange while it does not. `clock` needs a `timezone`; until one is set and the time has been fetched, `minimal` is shown. |
+| `standby_screen` | `clock` | `clock`: a large seven-segment clock, the date (with the outside temperature after it, see [Weather](#weather)), whether the MiSTer answers, and the core and game it is running. `minimal`: the MiSTer logo and a small state dot, cyan while the MiSTer answers and orange while it does not. `clock` needs a `timezone`; until one is set and the time has been fetched, `minimal` is shown, with a small *waiting for time* note while the sync is pending. |
 | `standby_when_offline` | `true` | Go to standby once the MiSTer has been unreachable for `standby_offline_min` minutes. `false` turns this off. |
 | `standby_offline_min` | `3` | Minutes without an answer before the MiSTer counts as switched off (1–1440). A single answer restarts the count. |
 | `standby_idle_min` | `0` | Also go to standby after this many minutes without a core change, a game change, a new achievement or a touch — with the MiSTer running too, so a long session on one game will dim the screen. `0` = never. |
+| `standby_in_menu` | `false` | Also go to standby whenever the MiSTer is switched on but sitting in its menu, with no core loaded. Loading a core wakes the display; a tap wakes it for half a minute. |
+| `standby_menu_delay` | `0` | Seconds the MiSTer has to sit in its menu before that happens (0–86400). `0` = at once. |
 | `standby_brightness` | `10` | Backlight level in standby, 0–255. `0` switches the backlight off. |
 | `standby_dim` | `100` | Darkens everything the standby screen draws, as a percentage of full colour (5–100). For units whose backlight only switches on and off — see below. |
 
@@ -289,6 +293,25 @@ of the usual UTC offset — UTC+1 is written `-1`:
 timezone=CET-1CEST,M3.5.0,M10.5.0/3
 ```
 
+### Weather
+
+The `clock` standby screen can show the outside temperature after the date,
+as `SAT 10 OCT 2026 / 12.3°C`. It comes from [Open-Meteo](https://open-meteo.com),
+which is free and needs no account or key, and is fetched only while the
+display is in standby: once on entering, then every 15 minutes. Nothing is
+fetched, and nothing is shown, until a location is set.
+
+| Key | Default | What it does |
+|---|---|---|
+| `weather_city` | blank | A place name, looked up once per boot. |
+| `weather_lat`, `weather_lon` | blank | Coordinates instead of a place name; they win when both are set. |
+| `weather_unit` | `c` | `c` or `f`. |
+
+```ini
+[weather]
+weather_city=New York City
+```
+
 ## Board-specific options
 
 ### M5Stack Tab5
@@ -299,6 +322,39 @@ The Tab5 is the only board with a speaker.
 |---|---|---|
 | `sound` | `true` | `false` silences every tone: the boot jingle and the touch-button beeps. |
 | `sound_volume` | `128` | Speaker volume, 0–255. |
+
+### Waveshare ESP32-S3-Touch-LCD-2.8 V2
+
+Port contributed by Rick van Soest, built for a RayCue Maclock case. Beyond
+`art_inset_left` above, it adds a desk-clock screen for the time the MiSTer
+sits in its menu, drawn as dots on a grey LCD-style background. With
+`idle_clock=true` the image screen shows three screens in turn instead of the
+menu picture — the time, the year and a smiling face — each for
+`idle_clock_seconds`. The time and year screens also show the outside
+temperature ([Weather](#weather)), the weekday and the date. Starting a core
+or game, or a tap, leaves it as usual. It needs a `timezone`; until one is set
+the digits stay unlit.
+
+| Key | Default | What it does |
+|---|---|---|
+| `idle_clock` | `false` | `true` turns it on. |
+| `idle_clock_seconds` | `30` | How long each of the three screens stays up (5–3600). |
+| `idle_lcd_left` | `0` | A black border (0–120 px) on the left; the grey area and everything on it are centred in the rest. A RayCue Maclock needs about 34. |
+| `idle_day_names` | `SUN,MON,TUE,WED,THU,FRI,SAT` | Seven weekday names, Sunday first, letters A–Z. |
+| `idle_date_order` | `md` | `md` shows month.day (`1.24`), `dm` day.month (`24.1`). |
+| `idle_face_file` | blank | A face of your own from the SD card, see below. Blank: the built-in face. |
+
+A face file is plain text, one row of dots per line, at most 32 columns by 20
+rows: `#` is a dot, `e` an eye dot that disappears when the face blinks every
+5 seconds, anything else is empty, and lines starting with `;` are ignored.
+The dot size follows the grid. Save it in the root of the card and name it in
+`idle_face_file`, for example `/face.txt`.
+
+Where the ST7789 CYD has a resistive touch panel, this board's CST3530 is
+capacitive, and in the Maclock case the touch does not reach through the
+lens — which is why `kiosk_mode=true` is the natural choice there and why
+the touch mapping is still marked beta. The panel has no MISO line, so
+`/screenshot.bmp` comes out black.
 
 ### Guition JC8012P4A1C
 
@@ -379,7 +435,7 @@ set `web_password`, or `web_config=false`, if that matters on your network.
 ## All keys at a glance
 
 Defaults are what the firmware uses when the key is absent. Keys apply to all
-six boards unless noted.
+seven boards unless noted.
 
 | Section | Key | Default | What it does |
 |---|---|---|---|
@@ -398,7 +454,8 @@ six boards unless noted.
 | | `info_in_rotation` | `false` | GAME INFO as a third slide — see [The image screen](#the-image-screen). |
 | `[images]` | `base_path`, `default_image` | `/cores`, `/cores/menu.jpg` | Where artwork lives on the card, and the default image. |
 | | `core_image_timeout`, `system_image_timeout` | `30000`, `0` | Slide dwell times — see [The image screen](#the-image-screen). |
-| | `image_mode` | `rotate` | `rotate`, `game` or `system`. |
+| | `image_mode` | `rotate` | `rotate`, `game`, `system` or `cycle` — see [The image screen](#the-image-screen). |
+| | `art_inset_left` | `0` | **Waveshare 2.8" only.** Pixels kept free on the left edge. |
 | | `image_upscale`, `image_upscale_max` | `false`, `2.5` | Grow small artwork to fill the display area. |
 | | `screenshot_scaling` | `fill` | `fill` or `integer` — see [The image screen](#the-image-screen). |
 | | `alphabetical_folders` | `true` | Organise images in lettered subfolders (`/cores/A/`, `/cores/B/`, …). |
@@ -409,13 +466,16 @@ six boards unless noted.
 | | `core_media_order`, `arcade_subsystem_media_order`, `arcade_media_order`, `game_media_order` | see above | Which image types are tried, and in what order — see [Artwork download order](#artwork-download-order). |
 | `[ui]` | `flip_display` | `false` | Rotate the display 180°, touch included, for cases that hold the board upside down. |
 | | `kiosk_mode`, `kiosk_hide_delay_ms` | `false`, `5000` | Artwork on the whole panel, footer on tap. |
-| | `standby_screen`, `standby_when_offline`, `standby_offline_min`, `standby_idle_min`, `standby_brightness`, `standby_dim` | `clock`, `true`, `3`, `0`, `10`, `100` | See [Standby and clock](#standby-and-clock). |
+| | `standby_screen`, `standby_when_offline`, `standby_offline_min`, `standby_idle_min`, `standby_in_menu`, `standby_menu_delay`, `standby_brightness`, `standby_dim` | `clock`, `true`, `3`, `0`, `false`, `0`, `10`, `100` | See [Standby and clock](#standby-and-clock). |
 | | `timezone`, `ntp_server`, `clock_24h` | blank, `pool.ntp.org`, `true` | The clock. |
 | | `sound`, `sound_volume` | `true`, `128` | **Tab5 only.** |
 | | `panel_rev` | `v1` | **Guition only.** `v2` for batch 2624 onward. |
 | | `scroll_speed_ms` | `300` | Footer text scroll, ms per character step. Lower is faster. |
 | | `scroll_pause_start_ms`, `scroll_pause_end_ms` | `2000`, `3000` | Pause before a scroll starts and before it resets. |
 | | `web_config`, `web_password` | `true`, blank | See [Web interface](#web-interface). |
+| `[weather]` | `weather_city`, `weather_lat`, `weather_lon`, `weather_unit` | blank, blank, blank, `c` | Outside temperature on the standby clock — see [Weather](#weather). |
+| `[idle]` | `idle_clock`, `idle_clock_seconds`, `idle_lcd_left`, `idle_day_names`, `idle_date_order`, `idle_face_file` | `false`, `30`, `0`, `SUN,…,SAT`, `md`, blank | **Waveshare 2.8" only.** The menu-time desk clock — see [Waveshare](#waveshare-esp32-s3-touch-lcd-28-v2). |
+| `[update]` | `ota_auto` | `false` | Install an offered firmware update by itself, without a tap. |
 | `[debug]` | `debug` | `false` | Verbose output on the serial monitor. |
 
 ## RetroAchievements

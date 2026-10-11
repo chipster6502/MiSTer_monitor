@@ -199,7 +199,9 @@ The fastest way to install the firmware. No Arduino IDE, no compiling.
    the browser dialog, and let it flash. The page lists every supported board
    and explains how to tell the CYD variants apart (2.8" ILI9341 vs ST7789,
    and 3.5" capacitive vs resistive). It installs the latest released firmware,
-   with the ScreenScraper credentials already built in.
+   with the ScreenScraper credentials already built in. On the Waveshare 2.8",
+   which has a single native USB-C port, hold **BOOT** while plugging it in if
+   the flasher cannot see it.
 5. Prepare the display's microSD card — formatted as **FAT32**, not exFAT —
    with `config.ini` and the asset images
    (see [`configuration.md`](configuration.md)), then insert it and power on.
@@ -346,7 +348,7 @@ The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
    **ESP32 Dev Module**.
 7. Connect the CYD via USB, select the correct port under **Tools → Port**,
    and configure the remaining Tools menu options:
-   - Partition Scheme: `Huge APP (3MB No OTA/1MB SPIFFS)`
+   - Partition Scheme: `Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)`
    - Flash Size: `4MB (32Mb)`
    - PSRAM: `Disabled`
    - Upload Speed: `921600`
@@ -361,6 +363,7 @@ The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
    | CYD 2.8" ST7789 (ESP32-2432S028) | `mister_monitor_CYD28R_ST7789/mister_monitor_CYD28R_ST7789.ino` |
    | CYD 3.5" capacitive (ESP32-3248S035C, GT911) | `mister_monitor_CYD35C/mister_monitor_CYD35C.ino` |
    | CYD 3.5" resistive (ESP32-3248S035R, XPT2046) | `mister_monitor_CYD35R/mister_monitor_CYD35R.ino` |
+   | Waveshare ESP32-S3-Touch-LCD-2.8 V2 | `mister_monitor_Waveshare28/mister_monitor_Waveshare28.ino` — different Tools settings, see [PORTING.md](PORTING.md#waveshare-esp32-s3-touch-lcd-28-v2) |
 
    The 2.8" variants differ only in panel controller, and the USB port count
    is a hint rather than a rule: 1 port is usually ILI9341 and 2 ports usually

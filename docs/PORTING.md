@@ -67,6 +67,7 @@ JPEG handling, ScreenScraper integration — stays as-is.
 | CYD 3.5" res. (ESP32-3248S035) | ESP32 | 480x320 ST7796 | XPT2046 res. | CYD28R_ILI9341 | Stable |
 | 8048S050C-I (5") | ESP32-S3 | 800x480 ST7262 RGB | GT911 cap. | Tab5 | Planned |
 | Guition JC8012P4A1C (10.1") | ESP32-P4 + C6 | 800x1280 IPS MIPI-DSI | GSL3680 cap. | Tab5 | Stable |
+| Waveshare ESP32-S3-Touch-LCD-2.8 V2 | ESP32-S3 | 320x240 ST7789 | CST3530 cap. | CYD28R_ST7789 | Beta (touch untested) |
 
 ## Build settings
 
@@ -113,3 +114,34 @@ Arduino IDE → Tools:
 - PSRAM: `Disabled`
 - Upload Speed: `921600`
 - Libraries: `LovyanGFX`, `XPT2046_Touchscreen`, `JPEGDEC`
+
+### Waveshare ESP32-S3-Touch-LCD-2.8 V2
+
+Port contributed by Rick van Soest, from the CYD28R_ST7789 sketch: same panel
+controller and resolution, so `board_hal.h` is the only new file (LovyanGFX
+ST7789 on SPI2, CST3530 capacitive touch on `Wire1`, and GPIO7 driven high so
+the board does not switch itself off on battery). The sketch differs from the
+ST7789 one in the SD and backlight pins and in three additions: `image_mode=cycle`,
+`art_inset_left` and the menu-time idle clock.
+
+Identify the V2 by its CST3530 at I2C address 0x58 on SDA=1/SCL=3. The V1, the
+non-touch ESP32-S3-LCD-2.8 and the -2.8B (ST7701, 480x640 RGB) are different
+boards. The panel has no MISO line, so `/screenshot.bmp` comes out black. The
+touch mapping and the RetroAchievements row calibration were derived from the
+panel geometry and have not been tapped on hardware yet, hence *Beta*.
+
+Arduino IDE → Tools (esp32 board package, verified on core 3.3.12):
+
+- Board: `ESP32S3 Dev Module`
+- USB CDC On Boot: `Enabled` (the board only has the native USB port)
+- PSRAM: `OPI PSRAM`
+- Flash Size: `16MB (128Mb)`
+- Partition Scheme: `16M Flash (3MB APP/9.9MB FATFS)` — two app slots, which the
+  over-the-air updater needs
+- Libraries: `LovyanGFX`, `JPEGDEC`, `PNGdec` (no `XPT2046_Touchscreen`)
+
+As an arduino-cli FQBN, the one the release workflow uses:
+
+```
+esp32:esp32:esp32s3:CDCOnBoot=cdc,PSRAM=opi,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB
+```
