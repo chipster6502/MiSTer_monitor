@@ -2,8 +2,8 @@
 
 This guide walks through installing the MiSTer Monitor **server** on your
 MiSTer, the **firmware** on your display target (M5Stack Tab5, Guition
-JC8012P4A1C or any of the Cheap Yellow Display variants), and creating the free
-ScreenScraper account used for artwork retrieval.
+JC8012P4A1C, any of the Cheap Yellow Display variants or the Waveshare 2.8"),
+and creating the free ScreenScraper account used for artwork retrieval.
 
 > Prefer a printable, illustrated walkthrough? The same procedure is in
 > **[MiSTer_Monitor_Setup_Guide.pdf](MiSTer_Monitor_Setup_Guide.pdf)** — six
@@ -77,8 +77,9 @@ setup again unless you have deactivated the monitor.
 > `downloader_chipster6502_MiSTer_monitor_DB.ini` from `/media/fat/` when you
 > enable the toggle, so the database is not declared twice.
 
-> **Installing Console Mode afterwards?** Console Mode — Taki Udon's frontend
-> for the SuperStation One, which also runs on any MiSTer — replaces
+> **Installing Console Mode afterwards?** [Console Mode](https://github.com/Retro-Remake/ConsoleMode_Distribution)
+> — Taki Udon's frontend for the SuperStation One, which also runs on any
+> MiSTer — replaces
 > `MiSTer.ini` with its own copy, which sets `log_file_entry` back to `0`. Run
 > **`MiSTer_Monitor`** once more from the Scripts menu after installing or
 > repairing Console Mode; it restores the setting and restarts the server.
@@ -132,8 +133,8 @@ the root of your SD card (`/media/fat/`) if you used that route.
 ### Alternative: manual install
 
 Only needed if you prefer not to use the MiSTer Downloader. Most users should
-use the Downloader method above, which also keeps the server updated
-automatically.
+use [Update All or MiSTer Companion](#recommended-update-all-or-mister-companion)
+above, which also keeps the server updated automatically.
 
 <details>
 <summary><strong>Show manual install steps</strong></summary>
@@ -160,24 +161,60 @@ currently loaded.
 ### Artwork packs (optional)
 
 The [MiSTer Artwork Pack](https://github.com/chipster6502/MiSTer_artwork_pack)
-puts game artwork for 39 systems — 23,658 images — on the MiSTer's SD card,
-under `docs/<System>/Artwork/`. With a pack installed the server serves the
-image for the loaded game directly and the display shows it without a
-ScreenScraper round trip, so covered games appear at once. Games the pack
-does not cover, and core images, still come from ScreenScraper, so the
-account below is still needed.
+puts game images for 39 systems on the MiSTer's SD card, in three packs:
+
+- **Box Art** — 23,658 boxes under `docs/<System>/Artwork/`, in one of
+  three styles.
+- **Screenshots** — 22,662 in-game screenshots under
+  `docs/<System>/Screenshots/`.
+- **Title Screens** — 23,204 title screens under `docs/<System>/Titles/`.
+
+With the packs installed the server serves the image for the loaded game
+directly and the display shows it without a ScreenScraper round trip, so
+covered games appear at once. Games the packs do not cover, and core
+images, still come from ScreenScraper, so the account below is still
+needed.
+
+Box art is what the display shows for a game by default. A screenshot or
+title screen from the packs is used wherever `screenshot` or `titlescreen`
+comes up in `game_media_order` or `arcade_media_order` — by default, when
+the pack has no box for the game — and `image_mode=cycle` alternates the
+game's screenshot, title screen and box. See
+[`configuration.md`](configuration.md#the-image-screen). Each pack installs
+on its own, next to the others: take box art only, or all three.
 
 1. In the Update All settings, go to **Extra Content → Game Artwork DBs**.
-2. Pick the systems you want, or **Select All**. Each system is one
-   database; the whole set is 2.0–2.4 GB depending on the style.
-3. Choose a style — **2D Boxes**, **3D Boxes** or **Box + Screenshot** —
-   for the selected systems, or per system. Styles are mutually exclusive
-   per system: switching one replaces its images on the next run.
+   It has three entries, **Box Art**, **Screenshots** and **Title Screens**,
+   each with its own list of systems. Each system is one database.
+2. In **Box Art**, pick the systems you want, or **Select All**, and choose
+   a style — **2D Boxes**, **3D Boxes** or **Box + Screenshot** — for the
+   selected systems with **Style for Selected DBs**, or per system. Styles
+   are mutually exclusive per system: switching one replaces its images on
+   the next run.
+3. Optionally, pick systems in **Screenshots** and **Title Screens** the
+   same way. They have no style to choose.
 4. Save and run Update All.
 
+**Space on the card.** Every image occupies whole allocation blocks,
+however small it is, so the packs take more room on the card than they
+take to download, and how much more depends on the card's block size:
+32 KB is the usual size on cards of 32 GB or less, and 128 KB the exFAT
+default on larger cards.
+
+| Pack | Download | Card, 32 KB blocks | Card, 128 KB blocks |
+|---|---:|---:|---:|
+| Box Art (one style) | 2.0–2.4 GB | 2.4–2.8 GB | 3.2 GB |
+| Screenshots | 1.1 GB | 1.7 GB | 3.6 GB |
+| Title Screens | 1.2 GB | 1.7 GB | 3.6 GB |
+
+All three together take about 6 GB with 32 KB blocks and about 10.4 GB with
+128 KB blocks. The figures per style are in the pack's
+[`PACK_FORMAT.md`](https://github.com/chipster6502/MiSTer_artwork_pack/blob/main/PACK_FORMAT.md).
+
 Nothing changes on the display side: the firmware asks the server first and
-falls back to ScreenScraper on its own. To go back to ScreenScraper-only,
-deselect the databases and run Update All again; it removes the images.
+falls back to ScreenScraper on its own. Deselecting a system stops its
+updates but leaves its images on the card; to delete them, highlight the
+system and choose **Uninstall**.
 
 ## Display side
 
@@ -205,6 +242,12 @@ The fastest way to install the firmware. No Arduino IDE, no compiling.
 5. Prepare the display's microSD card — formatted as **FAT32**, not exFAT —
    with `config.ini` and the asset images
    (see [`configuration.md`](configuration.md)), then insert it and power on.
+
+> **Powering the display.** A phone charger or a powered USB hub is
+> recommended rather than a USB port on the MiSTer. Depending on the setup,
+> the MiSTer's ports may not supply enough current for the display's WiFi,
+> which can leave it stuck on the boot screen. The display talks to the
+> MiSTer over WiFi, so it does not need to be plugged into it at all.
 
 > **Updating from an earlier version?** Flash the new firmware the same way.
 > Your `config.ini` keeps working — options added since then stay at their
@@ -289,7 +332,7 @@ Edge on desktop, Linux, or you want to modify the firmware yourself. Most
 users should use the web flasher above.
 
 <details>
-<summary><strong>Show Arduino IDE build instructions (Tab5 and CYD)</strong></summary>
+<summary><strong>Show Arduino IDE build instructions (Tab5, Guition and CYD)</strong></summary>
 
 #### Tab5 side
 
@@ -323,8 +366,64 @@ at boot from `config.ini` on the microSD card (see
 2. Install required libraries via **Tools → Manage Libraries…**:
    - M5Unified
    - JPEGDEC
+   - PNGdec
 
 3. Select the M5Stack Tab5 board and upload.
+
+#### Guition side
+
+The Guition uses the standard Espressif ESP32 board package, like the CYD
+boards, with the **ESP32P4 Dev Module** board and its own Tools settings.
+Before building, read the [Guition section](#guition-jc8012p4a1c) above:
+it explains which USB-C port to flash through and what the card needs
+before the first boot (`panel_rev`, `c6_firmware.bin`).
+
+##### Installing ESP32 board support in Arduino IDE
+
+1. Open Arduino IDE and go to **File → Preferences**.
+2. In the **Additional boards manager URLs** field, add:
+   ```
+   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+   ```
+3. Click **OK** to close Preferences.
+4. Go to **Tools → Board → Boards Manager…**
+5. Search for **esp32** and install the package named **esp32 by Espressif
+   Systems**, version 3.3.x (the releases are built with 3.3.12).
+6. Once installed, go to **Tools → Board → ESP32 Arduino** and select
+   **ESP32P4 Dev Module**.
+7. Connect the board through the USB-C port marked **USB UART**, select the
+   correct port under **Tools → Port**, and configure the remaining Tools
+   menu options:
+   - Chip Variant: `Before v3.00` for most units, or `v3.00 or newer` for a
+     board with the newer ESP32-P4 (sticker SKU ending in `-V3`; esptool
+     reports `revision v3.x`). The two are not interchangeable: a build for
+     the wrong revision restarts in a loop right after flashing, so if that
+     happens, pick the other one and upload again.
+   - PSRAM: `Enabled`
+   - Flash Mode: `QIO`
+   - Flash Frequency: `80MHz`
+   - Flash Size: `16MB (128Mb)`
+   - Partition Scheme: `16M Flash (3MB APP/9.9MB FATFS)`
+   - USB CDC On Boot: `Disabled`
+
+   These are the settings the release workflow uses, as an arduino-cli FQBN:
+   `esp32:esp32:esp32p4:ChipVariant=prev3,PSRAM=enabled,FlashMode=qio,FlashFreq=80,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB`
+   (`ChipVariant=postv3` for the v3 build).
+
+##### Uploading the sketch
+
+1. Open `mister_monitor_Guition10inch/mister_monitor_Guition10inch.ino` in
+   Arduino IDE. The vendor display driver lives in the sketch's `src/`
+   folder and is compiled with it; nothing else needs installing for it.
+2. Install required libraries via **Tools → Manage Libraries…**:
+   - M5GFX
+   - JPEGDEC
+   - PNGdec
+3. Copy the contents of `SD_card_content/Guition/` — `config.ini`, the
+   `cores/` images, `settings.html` and `c6_firmware.bin` — to the root of
+   the Guition's microSD card, formatted as **FAT32**, not exFAT, and fill in
+   your values in `config.ini` (see [`configuration.md`](configuration.md)).
+4. Select the ESP32P4 Dev Module board and upload.
 
 #### CYD side
 
@@ -348,7 +447,7 @@ The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
    **ESP32 Dev Module**.
 7. Connect the CYD via USB, select the correct port under **Tools → Port**,
    and configure the remaining Tools menu options:
-   - Partition Scheme: `Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)`
+   - Partition Scheme: `Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS)`
    - Flash Size: `4MB (32Mb)`
    - PSRAM: `Disabled`
    - Upload Speed: `921600`
@@ -378,6 +477,7 @@ The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
    - LovyanGFX
    - XPT2046_Touchscreen
    - JPEGDEC
+   - PNGdec
 3. Copy `config.ini` to the root of the CYD's microSD card — formatted as
    **FAT32**, not exFAT — and fill in your values
    (see [`configuration.md`](configuration.md)).
