@@ -174,6 +174,10 @@ are linked from their authors' pages.
   a cable hole; needs six M2.5×8 mm screws.
 - **2.8" Cheap Yellow Display, horizontal stand** — ["Cheap Yellow Display (CYD) horizontal stand M3*6 self-tapping"](https://www.printables.com/model/708127-cheap-yellow-display-cyd-horizontal-stand-m36-self)
   by [aibohphobia](https://www.printables.com/@aibohphobia).
+- **2.8" Cheap Yellow Display with USB-C and micro-USB, desk stand** — ["Bambu Lab Display Desk Stand (xtouch) USB-C Board"](https://makerworld.com/en/models/62236-bambu-lab-display-desk-stand-xtouch-usb-c-board)
+  by [enimatek-nl](https://makerworld.com/en/@enimateknl). Made for the
+  xtouch printer display, which runs on the same 2.8" board; this remix
+  fits the newer two-port version and widens the opening for its SD slot.
 
 ## Architecture
 
