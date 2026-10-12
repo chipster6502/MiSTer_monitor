@@ -141,8 +141,11 @@ on the display.
 
 See **[`docs/installation.md`](docs/installation.md)** for the complete step-by-step
 procedure, the web flasher and ScreenScraper account setup, or the illustrated
-**[setup guide PDF](docs/MiSTer_Monitor_Setup_Guide.pdf)** if you prefer a
-printable walkthrough.
+setup guide PDF if you prefer a walkthrough in one document. It comes in two
+versions with the same content:
+**[for reading on screen](docs/MiSTer_Monitor_Setup_Guide.pdf)**, dark like the
+display's settings page, and
+**[for printing](docs/MiSTer_Monitor_Setup_Guide_print.pdf)**, on white pages.
 
 ## 3D-printable stands
 
