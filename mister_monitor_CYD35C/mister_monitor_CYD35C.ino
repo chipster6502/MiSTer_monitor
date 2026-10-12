@@ -32,7 +32,7 @@
 //  half was updated and the other was not — the display warns instead of
 //  failing silently. Bump on every release, with SERVER_VERSION in the server.
 // =============================================================================
-#define FIRMWARE_VERSION "2.11.1"
+#define FIRMWARE_VERSION "2.12.0"
 
 #include <XPT2046_Touchscreen.h>
 #include <LovyanGFX.hpp>
