@@ -37,6 +37,7 @@ console and computer games via the MiSTer Remote web application.*
 - **Detection from multiple sources** — recognises games loaded from the OSD, the MiSTer Remote web app, Super Attract Mode (SAM), and front ends such as [Zaparoo Frontend](https://zaparoo.org/docs/frontend/), [Console Mode](https://github.com/Retro-Remake/ConsoleMode_Distribution) and [MisterZine](https://github.com/matijaerceg/misterzine-on-device); auto-discovers the MiSTer on the LAN.
 - **System monitor** — CPU, memory, uptime, storage, network, and USB device panels, with touch navigation.
 - **Web interface** — edit `config.ini` and browse, upload or delete files on the display's SD card from any browser on your network, at `http://<Display-IP>:8080`. Handy for swapping artwork or changing a setting without pulling the card.
+- **Updates over WiFi** — each release reaches the display through the MiSTer, together with the server, and installs with a tap on the screen, or by itself with `ota_auto=true`. No cable after the first flash of 2.12.0 or later; see [Updating the firmware](docs/installation.md#updating-the-firmware).
 - **Standby with a clock** — when the MiSTer is switched off, or sits in its menu, the display dims to a standby screen: a large seven-segment clock with the date, the outside temperature and the MiSTer's state, or just the MiSTer logo. It wakes on its own when the MiSTer comes back or a core loads, and at a touch.
 - **Kiosk mode and display options** — give the whole panel to the artwork, keep it on the game or on the system instead of alternating, or cycle through the game's screenshot, title screen and box (`image_mode`), or upscale small artwork to fill the larger panels. All from `config.ini`; see [`docs/configuration.md`](docs/configuration.md).
 
@@ -137,7 +138,8 @@ on the display.
   [the flasher page](https://chipster6502.github.io/MiSTer_monitor/flasher/)
   in Chrome or Edge on desktop, connect the display via USB, and flash the
   prebuilt firmware in one click — no Arduino IDE needed. Building from source
-  is also supported.
+  is also supported. From 2.12.0 on, later versions arrive over WiFi from the
+  MiSTer, so the cable is only needed once.
 
 See **[`docs/installation.md`](docs/installation.md)** for the complete step-by-step
 procedure, the web flasher and ScreenScraper account setup, or the illustrated
@@ -203,8 +205,10 @@ Two components work together:
   state, and the server also supplies a cleaned search name for containers
   with no ScreenScraper-indexed hash. When an artwork pack is installed it
   resolves the loaded game against `docs/<System>/Artwork/` on the MiSTer's
-  SD card and serves the image at `/media/artwork`. No external helper
-  scripts are needed.
+  SD card and serves the image at `/media/artwork`. It also serves the
+  display firmware that the Downloader puts in `firmware/` next to it, at
+  `/firmware/manifest` and `/firmware/<file>`, for updates over WiFi. No
+  external helper scripts are needed.
 - **display sketch** auto-discovers the MiSTer via UDP broadcast, takes the
   pack image from the server when there is one and otherwise downloads
   artwork from ScreenScraper by hash (or by name when the hash can't
