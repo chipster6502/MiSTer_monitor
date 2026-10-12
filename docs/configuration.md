@@ -10,6 +10,7 @@
 - [Standby and clock](#standby-and-clock)
 - [Board-specific options](#board-specific-options)
 - [Web interface](#web-interface)
+- [Firmware updates](#firmware-updates)
 - [All keys at a glance](#all-keys-at-a-glance)
 - [RetroAchievements](#retroachievements)
 
@@ -409,6 +410,7 @@ page it is listed as **Monitor IP**, right below the MiSTer's.
 | `http://<display-ip>:8080/config` | Edits `config.ini` on the microSD card in a plain text editor, comments and all. Saving keeps the previous file as `config.ini.bak` on the same card, and the page offers a **Reboot** button — settings are read once at startup, so a restart is what applies them. |
 | `http://<display-ip>:8080/files` | Browses the microSD card: open folders, download files, upload new ones, create folders, and delete what you no longer need. Deleting a game's artwork makes it be fetched again the next time you load it; uploading your own replaces it. |
 | `http://<display-ip>:8080/files/download?path=/settings.html` | A graphical editor for the same `config.ini`: switches, sliders, drop-downs and drag-to-reorder for the media orders, grouped in tabs. Linked from the pages above. See [Settings page](#settings-page) below. |
+| `http://<display-ip>:8080/update` | Firmware updates: shows the version running and the one on the MiSTer, installs the MiSTer's with a button, and installs an image uploaded from your computer. See [Firmware updates](#firmware-updates). |
 | `http://<display-ip>:8080/` | The screenshot page, on the boards whose panel supports readback (2.8" CYD, Tab5, Guition). On the 3.5" boards this is a landing page instead. |
 
 Artwork uploaded through `/files` must be **baseline** JPEG: progressive JPEGs
@@ -451,8 +453,86 @@ web_password=
 
 The interface is served over plain HTTP on your LAN, like the MiSTer's own
 Samba and FTP shares. Note that the editor shows `config.ini` as it is, so
-anyone who can reach the page can read your WiFi and ScreenScraper passwords —
+anyone who can reach the page can read your WiFi and ScreenScraper passwords,
+and install firmware through `/update` —
 set `web_password`, or `web_config=false`, if that matters on your network.
+`/update` sits behind the same password, and `web_config=false` removes it
+too; updates are then offered on the display only.
+
+## Firmware updates
+
+From 2.12.0 on, each release ships the display firmware to the MiSTer
+together with the server, through the same *Update All*, MiSTer Companion or
+Downloader run, into `Scripts/.config/mister_monitor/firmware/`. The display
+then updates over WiFi, with no cable:
+
+1. Update the MiSTer as usual and run `MiSTer_Monitor` once from the Scripts
+   menu, so the new server is the one running.
+2. The display notices that the server is newer than its own firmware and
+   that the MiSTer holds an image for its board, and shows a green banner for
+   12 seconds: `UPDATE TO x.y.z` / `TAP TO INSTALL`. Tap it. The display shows
+   the progress and restarts on the new version; the microSD card is not
+   touched.
+3. If the banner passes, the version panel on the main screen turns orange
+   and reads `UPDATE` / `TAP:x.y.z`. A tap on the main screen, above the
+   footer buttons, brings the banner back, and a tap on the banner installs.
+   The next boot offers it again too.
+
+The version panel's colour sums it up: cyan, firmware and server match;
+orange, an update is waiting; red, they differ and the MiSTer cannot fix it —
+the server is older than the firmware, it carries no image for this board, or
+the board needs one more flash by cable (see below). `/update` says which.
+
+**Installing without a tap.** For a display whose screen cannot be reached,
+in a case or behind a lens:
+
+```ini
+[update]
+; Install an offered update by itself, without a tap. Default: false
+ota_auto=true
+```
+
+The banner then reads `INSTALLING...` and the update starts on its own.
+
+**From a browser.** `http://<display-ip>:8080/update` shows the board, the
+firmware it runs and the version on the MiSTer, with an **Install from the
+MiSTer** button when there is an update; it asks the server afresh each time
+it is opened. The same page installs an image uploaded from your computer,
+for a display that cannot reach the MiSTer or to try a build before release.
+That has to be the app image for the board — the `.ino.bin` an Arduino build
+leaves, or the board's `.bin` from the `firmware/` folder on the MiSTer — not
+the merged image the web flasher and the release page use, which is refused
+with a message.
+
+**Safe without a cable.** The new image is written to the spare app slot
+while the running firmware stays in place, and the display switches to it
+only once its size, its MD5 and the image's own checksum have been verified.
+A download that stops halfway or arrives damaged never starts: the display
+keeps the version it had, shows why on screen, and `/update` can try again.
+Keep the display powered until it restarts.
+
+**The first update needs a cable.** Firmware 2.11.1 and earlier cannot
+update itself: flash 2.12.0 once with the
+[web flasher](installation.md#recommended-quick-install-web-flasher); the card
+and its settings stay as they are. On the four CYD boards that flash also
+moves to a partition layout with two app slots, which an update needs. A CYD
+built by hand with the `Huge APP` scheme has a single slot, and the display
+asks for one more flash by cable instead of offering the update. Guition
+units with the ESP32-P4 v3 take that first flash through esptool-js or
+esptool, as described in
+[installation.md](installation.md#guition-jc8012p4a1c); after it, each of the
+two Guition builds is offered its own image.
+
+**The card is not part of an update.** New `config.ini` keys stay at their
+defaults until you add them (see [config.ini](#configini)), and files a
+release changes under `SD_card_content/`, such as the Guition's
+`c6_firmware.bin`, have to be copied by hand; `/files` can upload them.
+
+**Manual server installs.** The images reach the MiSTer only through the
+Downloader database. A server installed by hand has no `firmware/` folder, so
+the display has nothing to be offered and `/update` reports *no firmware
+images on the MiSTer*: update with the web flasher instead, or upload the
+image through `/update`.
 
 ## All keys at a glance
 
@@ -498,7 +578,7 @@ seven boards unless noted.
 | | `web_config`, `web_password` | `true`, blank | See [Web interface](#web-interface). |
 | `[weather]` | `weather_city`, `weather_lat`, `weather_lon`, `weather_unit` | blank, blank, blank, `c` | Outside temperature on the standby clock — see [Weather](#weather). |
 | `[idle]` | `idle_clock`, `idle_clock_seconds`, `idle_lcd_left`, `idle_day_names`, `idle_date_order`, `idle_face_file` | `false`, `30`, `0`, `SUN,…,SAT`, `md`, blank | **Waveshare 2.8" only.** The menu-time desk clock — see [Waveshare](#waveshare-esp32-s3-touch-lcd-28-v2). |
-| `[update]` | `ota_auto` | `false` | Install an offered firmware update by itself, without a tap. |
+| `[update]` | `ota_auto` | `false` | Install an offered firmware update by itself, without a tap — see [Firmware updates](#firmware-updates). |
 | `[debug]` | `debug` | `false` | Verbose output on the serial monitor. |
 
 ## RetroAchievements
