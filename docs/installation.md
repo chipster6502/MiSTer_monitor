@@ -23,6 +23,7 @@ and creating the free ScreenScraper account used for artwork retrieval.
   - [Recommended: Quick install (web flasher)](#recommended-quick-install-web-flasher)
     - [Guition JC8012P4A1C](#guition-jc8012p4a1c)
   - [Alternative: Building from source (advanced)](#alternative-building-from-source-advanced)
+  - [Updating the firmware](#updating-the-firmware)
 - [Creating a ScreenScraper account](#creating-a-screenscraper-account)
   - [Advanced: using your own developer account](#advanced-using-your-own-developer-account)
 - [Enabling RetroAchievements (optional)](#enabling-retroachievements-optional)
@@ -64,6 +65,8 @@ fallback.
    - `/media/fat/Scripts/MiSTer_Monitor.sh`
    - `/media/fat/Scripts/MiSTer_Monitor_uninstall.sh`
    - `/media/fat/Scripts/.config/mister_monitor/mister_status_server.py`
+   - `/media/fat/Scripts/.config/mister_monitor/firmware/` — the display
+     firmware for each board, for [updates over WiFi](#updating-the-firmware)
 3. **⚠️ Required — back in the Scripts menu, run `MiSTer_Monitor` once.**
    Without this run nothing starts and no artwork is ever detected. It
    enables auto-start on boot, ensures `log_file_entry=1` in `MiSTer.ini`,
@@ -104,6 +107,8 @@ installs the same files and keeps them updated the same way.
    - `/media/fat/Scripts/MiSTer_Monitor.sh`
    - `/media/fat/Scripts/MiSTer_Monitor_uninstall.sh`
    - `/media/fat/Scripts/.config/mister_monitor/mister_status_server.py`
+   - `/media/fat/Scripts/.config/mister_monitor/firmware/` — the display
+     firmware for each board, for [updates over WiFi](#updating-the-firmware)
 4. **⚠️ Required — back in the Scripts menu, run `MiSTer_Monitor` once.**
    Without this run nothing starts and no artwork is ever detected. It
    enables auto-start on boot, ensures `log_file_entry=1` in `MiSTer.ini`,
@@ -158,6 +163,10 @@ log_file_entry=1
 ```
 This is required for the Python server to detect which core and game are
 currently loaded.
+
+With a manual install the MiSTer does not receive the display firmware, so
+the display is not offered [updates over WiFi](#updating-the-firmware):
+flash new versions with the web flasher instead.
 
 </details>
 
@@ -252,15 +261,9 @@ The fastest way to install the firmware. No Arduino IDE, no compiling.
 > which can leave it stuck on the boot screen. The display talks to the
 > MiSTer over WiFi, so it does not need to be plugged into it at all.
 
-> **Updating from an earlier version?** Flash the new firmware the same way.
-> Your `config.ini` keeps working — options added since then stay at their
-> defaults until you copy them from the `config.ini` under `SD_card_content/`
-> for your board. Copy `cores/logo_standby.565` from the same folder to
-> `/cores/` on your card as well; it is the logo of the standby screen. Both
-> can be done from the display's
-> [web interface](configuration.md#web-interface) without taking the card out.
-> On the Guition, also replace `c6_firmware.bin` in the root of the card with
-> the one from the new release.
+> **Updating from an earlier version?** From 2.12.0 on, the display updates
+> over WiFi, from the MiSTer. Coming from 2.11.1 or earlier, flash 2.12.0 once
+> as above. See [Updating the firmware](#updating-the-firmware).
 
 #### Guition JC8012P4A1C
 
@@ -490,6 +493,45 @@ The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
 5. Select the ESP32 Dev Module board and upload.
 
 </details>
+
+### Updating the firmware
+
+From 2.12.0 on, every release ships the display firmware to the MiSTer next
+to the server, and the display installs it over WiFi:
+
+1. Update the MiSTer with *Update All*, MiSTer Companion or the Downloader,
+   then run **`MiSTer_Monitor`** once from the Scripts menu, so the new server
+   is the one running.
+2. The display shows a green banner for 12 seconds:
+   **UPDATE TO x.y.z — TAP TO INSTALL**. Tap it. The display shows the
+   progress and restarts on the new version. Nothing on the microSD card
+   changes.
+3. Missed the banner? The version panel on the main screen stays orange.
+   Tap the main screen to bring the banner back, then tap the banner.
+
+`http://<display-ip>:8080/update` offers the same from a browser, and
+`ota_auto=true` in `config.ini` installs without a tap; both are described in
+[`configuration.md`](configuration.md#firmware-updates). A download that stops
+halfway or arrives damaged is discarded before it can start, and the display
+keeps the version it had.
+
+**Coming from 2.11.1 or earlier?** Those versions cannot update themselves.
+Flash 2.12.0 once with the [web flasher](#recommended-quick-install-web-flasher);
+your card and settings stay as they are. On the CYD boards this flash also
+changes the partition layout to the two app slots an update needs, so if you
+build from source, use the `Minimal SPIFFS` partition scheme listed under
+[CYD side](#cyd-side). Guition units with the ESP32-P4 v3 take this flash
+through esptool-js or esptool, as described [above](#guition-jc8012p4a1c).
+
+**After updating, the card.** Your `config.ini` keeps working: options added
+since then stay at their defaults until you copy them from the `config.ini`
+under `SD_card_content/` for your board, or set them on the
+[settings page](configuration.md#settings-page), which adds a missing key when
+you set it. If your card does not have them yet, copy `cores/logo_standby.565`
+from the same folder to `/cores/` on your card, and `settings.html` to its
+root. On the Guition, also replace `c6_firmware.bin` in the root of the card
+with the one from the new release. All of it can be done from the display's
+[web interface](configuration.md#web-interface) without taking the card out.
 
 ## Creating a ScreenScraper account
 
