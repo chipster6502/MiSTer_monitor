@@ -5,9 +5,12 @@ MiSTer, the **firmware** on your display target (M5Stack Tab5, Guition
 JC8012P4A1C, any of the Cheap Yellow Display variants or the Waveshare 2.8"),
 and creating the free ScreenScraper account used for artwork retrieval.
 
-> Prefer a printable, illustrated walkthrough? The same procedure is in
-> **[MiSTer_Monitor_Setup_Guide.pdf](MiSTer_Monitor_Setup_Guide.pdf)** — six
-> numbered steps from empty box to working display.
+> Prefer an illustrated walkthrough? The same procedure is in the setup guide
+> PDF — six numbered steps from empty box to working display. It comes in two
+> versions with the same content:
+> **[for reading on screen](MiSTer_Monitor_Setup_Guide.pdf)**, dark like the
+> display's settings page, and
+> **[for printing](MiSTer_Monitor_Setup_Guide_print.pdf)**, on white pages.
 
 ## Contents
 
