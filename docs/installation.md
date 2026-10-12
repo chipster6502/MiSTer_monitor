@@ -488,7 +488,7 @@ The CYD uses the standard Espressif ESP32 board package, not the M5Stack one.
    **FAT32**, not exFAT — and fill in your values
    (see [`configuration.md`](configuration.md)).
 4. Copy the required asset images to the microSD card (see the
-   [Asset images](configuration.md#asset-images) section in
+   [SD Card content](configuration.md#sd-card-content) section in
    `configuration.md`).
 5. Select the ESP32 Dev Module board and upload.
 
